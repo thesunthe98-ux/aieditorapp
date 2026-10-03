@@ -304,7 +304,7 @@ R/I1smaxcoKEUySU8h28AG8NjUKE/6kJRNnmakD10nURM284DiTl2ayWZ5XyRpmyVDfKswfVTERkRraF
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -398,6 +398,38 @@ def sentences_of(path):
 
 def natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+
+def serial_audio_order(paths):
+    """Audio file gulo jodi thik 1,2,3,...N naam e thake tahole number onujayi sorted list dey,
+    na hole None. (jemon 1.mp3, 2.wav, 3.mp3)"""
+    items = []
+    for p in paths:
+        stem = os.path.splitext(os.path.basename(p))[0].strip()
+        if not re.fullmatch(r"[0-9]+", stem):
+            return None
+        items.append((int(stem), p))
+    items.sort(key=lambda x: x[0])
+    if [n for n, _ in items] != list(range(1, len(items) + 1)):
+        return None
+    return [p for _, p in items]
+
+
+def merge_audio_files(files, out_path):
+    """files ke serially jure ekta mp3 banay (ffmpeg). Returns (ok, error_text)."""
+    n = len(files)
+    parts = [f"[{i}:a:0]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
+             for i in range(n)]
+    graph = ";".join(parts) + ";" + "".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[out]"
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    for fp in files:
+        cmd += ["-i", fp]
+    cmd += ["-filter_complex", graph, "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "192k",
+            "-f", "mp3", out_path]
+    r = subprocess.run(cmd, creationflags=NOWIN, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, errors="replace")
+    ok = r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0
+    return ok, (r.stderr or "").strip()[-600:]
 
 
 def archive(path, proj):
@@ -1874,6 +1906,7 @@ class App(_Base):
         self._srt_saved = None
         self._usage = {}
         self._usage_busy = False
+        self._merging = False
         self.cur_output = ""
         self.frames = {}
         self.nav = {}
@@ -1974,6 +2007,7 @@ class App(_Base):
         mkbtn(t, "＋ New", self.new_project, "ghost", pady=4, padx=11).pack(side="left", padx=3)
         mkbtn(t, "📂 Open…", self.open_dialog, "ghost", pady=4, padx=11).pack(side="left", padx=3)
         mkbtn(t, "💾 Save", lambda: self.save_all(), "ghost", pady=4, padx=11).pack(side="left", padx=3)
+        mkbtn(t, "🗑 Clear All", self.clear_all, "ghost", pady=4, padx=11).pack(side="left", padx=3)
         menu = tk.Menu(self, tearoff=0, bg=PANEL2, fg=FG, activebackground=ACCENT, activeforeground=ACCENT_FG)
         menu.add_command(label="Save a copy…", command=self.save_copy)
         menu.add_command(label="Open project folder", command=lambda: open_path(self.proj))
@@ -2302,7 +2336,7 @@ class App(_Base):
     # ───────── AUDIO ─────────
 
     def _build_audio(self, f):
-        self.header(f, "Audio", "Voiceover — ekta file. Audio file drag & drop korte paro.")
+        self.header(f, "Audio", "Voiceover — ekta file, othoba 1,2,3… naam e multiple file (auto join hobe).")
         card = tk.Frame(f, bg=PANEL)
         card.pack(fill="x", padx=22, pady=6)
         self.audio_name = mklabel(card, "", 13, FG, True, bg=PANEL)
@@ -2311,13 +2345,15 @@ class App(_Base):
         self.audio_info.pack(anchor="w", padx=20, pady=(0, 14))
         row = tk.Frame(card, bg=PANEL)
         row.pack(anchor="w", padx=20, pady=(0, 18))
-        mkbtn(row, "＋ Import audio…", self.import_audio, "primary").pack(side="left")
+        mkbtn(row, "＋ Import audio(s)…", self.import_audio, "primary").pack(side="left")
         self.audio_play = mkbtn(row, "▶ Play", lambda: open_path(self.audio_path()), "ghost")
         self.audio_play.pack(side="left", padx=8)
         self.audio_rm = mkbtn(row, "Remove", self.remove_audio, "ghost")
         self.audio_rm.pack(side="left")
-        mklabel(f, "🎯 Ekhane audio file (mp3/wav/m4a…) drag kore drop koro.  Notun audio dile purano ta replace hobe.",
-                9, MUTED).pack(anchor="w", padx=24, pady=8)
+        mklabel(f, "🎯 Ekhane audio file (mp3/wav/m4a…) drag kore drop koro.  Notun audio dile purano ta replace hobe.\n"
+                "Multiple audio dite hole nam serially 1, 2, 3, … hote hobe (1.mp3, 2.mp3, 3.mp3) — tahole number onujayi "
+                "joure ekta audio hoye jabe.\nNam serial na hole multiple audio add hobe na, shudhu ekta audio dile hobe.",
+                9, MUTED, justify="left").pack(anchor="w", padx=24, pady=8)
 
     def audio_path(self):
         for fn in sorted(os.listdir(self.proj)):
@@ -2339,10 +2375,10 @@ class App(_Base):
         self.audio_rm.configure(state=st)
 
     def import_audio(self):
-        p = filedialog.askopenfilename(
+        ps = filedialog.askopenfilenames(
             filetypes=[("Audio", "*.mp3 *.wav *.m4a *.aac *.ogg *.flac")])
-        if p:
-            self.set_audio(p)
+        if ps:
+            self.set_audios(list(ps))
             self.refresh_usage()
 
     def remove_audio(self):
@@ -3624,9 +3660,11 @@ class App(_Base):
             kinds.append("script")
             msgs.append("script")
         if audios:
-            self.set_audio(audios[0])
-            kinds.append("audio")
-            msgs.append("audio")
+            if self.set_audios(audios):
+                kinds.append("audio")
+                msgs.append("audio" if len(audios) == 1 else f"{len(audios)} ta audio join hocche…")
+            else:
+                msgs.append("audio add hoyni")
         if srts:
             self.set_srt(srts[0])
             kinds.append("srt")
@@ -3675,6 +3713,131 @@ class App(_Base):
             fast_copy(p, dst)
         if self.cur == "audio":
             self.refresh_audio()
+
+    def set_audios(self, paths):
+        """1 ta audio -> normal. Multiple -> shudhu tokhon, jokhon nam thik 1,2,3,…N; tahole join hoy."""
+        paths = [p for p in paths if os.path.splitext(p)[1].lower() in AUDIO_EXTS]
+        if not paths:
+            return False
+        if len(paths) == 1:
+            self.set_audio(paths[0])
+            return True
+        if self._merging:
+            self.note("Ager audio join cholche — shesh hole abar dao.", WARN)
+            return False
+        ordered = serial_audio_order(paths)
+        if ordered is None:
+            names = ", ".join(os.path.basename(p) for p in sorted(paths, key=lambda x: natural_key(os.path.basename(x)))[:8])
+            messagebox.showwarning(
+                "Audio add hoyni",
+                f"{len(paths)} ta audio dewa hoyeche kintu nam serial 1, 2, 3, … na.\n({names}{' …' if len(paths) > 8 else ''})\n\n"
+                "Multiple audio add korte hole nam thik 1, 2, 3, … N hote hobe (jemon 1.mp3, 2.mp3, 3.mp3),"
+                " kono number miss/duplicate howa jabe na.\n"
+                "Naile shudhu ekta audio file dao.\n\nKono audio add kora hoyni.")
+            return False
+        if not ff_ok():
+            messagebox.showerror("ffmpeg nei", "Audio join korte ffmpeg lagbe. Requirements check kore ffmpeg install koro.")
+            return False
+        self._merging = True
+        proj = self.proj
+        part = os.path.join(proj, "audio_merge.part")
+        final = os.path.join(proj, "voiceover_merged.mp3")
+        self.note(f"♫ {len(ordered)} ta audio join hocche…", WARN, 60)
+        if self.cur == "audio":
+            self.audio_name.configure(text=f"⏳  {len(ordered)} ta audio join hocche…")
+            self.audio_info.configure(text="Ektu opekkha koro")
+        res = {}
+
+        def work():
+            try:
+                res["r"] = merge_audio_files(ordered, part)
+            except Exception as e:
+                res["r"] = (False, str(e))
+
+        def poll():
+            if "r" not in res:
+                self.after(250, poll)
+                return
+            self._merging = False
+            ok, err = res["r"]
+            if not ok:
+                archive(part, proj)
+                messagebox.showerror("Audio join fail", "Audio gulo join kora gelo na.\n\n" + err)
+                if self.proj == proj and self.cur == "audio":
+                    self.refresh_audio()
+                return
+            try:
+                for fn in os.listdir(proj):
+                    if os.path.splitext(fn)[1].lower() in AUDIO_EXTS:
+                        archive(os.path.join(proj, fn), proj)
+                os.replace(part, final)
+            except Exception as e:
+                messagebox.showerror("Audio join fail", f"Final file save kora gelo na: {e}")
+                return
+            self.note(f"✓ {len(ordered)} ta audio serially join hoye ekta audio hoyeche", OK)
+            if self.proj == proj:
+                self.refresh_audio()
+                self.refresh_usage()
+        threading.Thread(target=work, daemon=True).start()
+        self.after(250, poll)
+        return True
+
+    def clear_all(self):
+        """Script, audio, SRT, clips, avatar sob faka — notun video banano jonno."""
+        if self.proc or self.busy or self._merging:
+            messagebox.showinfo("Busy", "Kaj cholche — shesh hole Clear All koro.")
+            return
+        if not self.proj:
+            return
+        if not messagebox.askyesno(
+                "Clear All",
+                "Script, Audio, SRT, Clips, Avatar — sob muchhe faka kore dibo?\n\n"
+                "(Tomar original file gulo thikই thakbe — shudhu project er copy muchbe.\n"
+                "Settings / API key thakbe.)", icon="warning"):
+            return
+        proj = self.proj
+        for job in ("_save_job", "_srt_job"):
+            j = getattr(self, job, None)
+            if j:
+                try:
+                    self.after_cancel(j)
+                except Exception:
+                    pass
+                setattr(self, job, None)
+        # script
+        self._loading = True
+        self.script_txt.delete("1.0", "end")
+        self.script_txt.edit_reset()
+        self.script_txt.edit_modified(False)
+        self._loading = False
+        atomic_write(os.path.join(proj, "script.txt"), "")
+        self._script_saved = ""
+        for fn in ("script.txt.bak", "queries.json"):       # purano script er backup / saved queries
+            archive(os.path.join(proj, fn), proj)
+        self.update_script_count()
+        # audio, srt, avatar
+        for fn in os.listdir(proj):
+            fp = os.path.join(proj, fn)
+            ext = os.path.splitext(fn)[1].lower()
+            if os.path.isfile(fp) and (ext in AUDIO_EXTS or ext == ".srt" or fn == "audio_merge.part"
+                                       or (fn.lower().startswith("avatar") and ext in VIDEO_EXTS)):
+                archive(fp, proj)
+        # clips
+        cd = self.clips_dir()
+        for fn in os.listdir(cd):
+            archive(os.path.join(cd, fn), proj)
+        # purano video er cache (temp / downloaded stock / thumbnails)
+        for d in CACHE_DIRS:
+            fp = os.path.join(proj, d)
+            if os.path.isdir(fp):
+                rm_tree(fp)
+        self.refresh_audio()
+        self.refresh_srt()
+        self.refresh_avatar()
+        self.refresh_clips()
+        self.refresh_usage()
+        self.show("script")
+        self.note("✓ Sob faka — notun video banate paro", OK)
 
     def _srt_modified(self, e=None):
         if self._srt_loading or not self.srt_txt.edit_modified():
