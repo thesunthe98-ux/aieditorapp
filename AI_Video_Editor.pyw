@@ -304,7 +304,7 @@ R/I1smaxcoKEUySU8h28AG8NjUKE/6kJRNnmakD10nURM284DiTl2ayWZ5XyRpmyVDfKswfVTERkRraF
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "1.0"
+APP_VERSION = "2.0.1"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
