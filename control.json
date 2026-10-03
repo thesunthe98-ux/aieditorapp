@@ -1,4 +1,4 @@
 {
- "payload": "{\"check_minutes\":10.0,\"issued\":1791002868,\"offline_days\":3.0,\"users\":{\"8e26d655d5e1dfd2820e1a1d1d284d1bed2cec7a684f21ff3719eac6e40ab187\":{\"active\":true,\"expires\":\"\",\"hash\":\"5631156088354860c9d972ce230c1bc5bfb498550bdaa4812ba143841189002e\",\"iters\":200000,\"name\":\"\",\"salt\":\"d35918047345ce50ae330f9b090db09d\"}},\"v\":1}",
- "sig": "64c+Tr0QhbX+TaftpAlIZYBJNqCIKFMZvUXun2TMr1Ou3Y7ygFkz2Qg/ZeyXVZevUFsLvren+Zdvs/glm++qCw=="
+ "payload": "{\"check_minutes\":10.0,\"issued\":1791003184,\"offline_days\":3.0,\"users\":{\"8e26d655d5e1dfd2820e1a1d1d284d1bed2cec7a684f21ff3719eac6e40ab187\":{\"active\":true,\"expires\":\"\",\"hash\":\"5631156088354860c9d972ce230c1bc5bfb498550bdaa4812ba143841189002e\",\"iters\":200000,\"name\":\"\",\"salt\":\"d35918047345ce50ae330f9b090db09d\"},\"c2eac775dc964008744cb4092a5a15eca1e8d59294531edd9ee5a15addc00eb9\":{\"active\":true,\"expires\":\"\",\"hash\":\"68b13a00976d814f0ba389c2ad156d1e90c673ac0f7cb5e30c135284f26c353e\",\"iters\":200000,\"name\":\"\",\"salt\":\"f4fe1484834a238c12332020a656995e\"}},\"v\":1}",
+ "sig": "+mW6ja0kXuBXo4SF3PxlJjwGhReyR84+AT95QTY0EuzzxvCbQDWJTFaHqD4OmMI4K7uxsxV1dF2D1lLfjU49Cg=="
 }
