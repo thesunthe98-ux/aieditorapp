@@ -1,0 +1,4 @@
+{
+ "payload": "{\"check_minutes\":10.0,\"issued\":1791002868,\"offline_days\":3.0,\"users\":{\"8e26d655d5e1dfd2820e1a1d1d284d1bed2cec7a684f21ff3719eac6e40ab187\":{\"active\":true,\"expires\":\"\",\"hash\":\"5631156088354860c9d972ce230c1bc5bfb498550bdaa4812ba143841189002e\",\"iters\":200000,\"name\":\"\",\"salt\":\"d35918047345ce50ae330f9b090db09d\"}},\"v\":1}",
+ "sig": "64c+Tr0QhbX+TaftpAlIZYBJNqCIKFMZvUXun2TMr1Ou3Y7ygFkz2Qg/ZeyXVZevUFsLvren+Zdvs/glm++qCw=="
+}
