@@ -304,7 +304,7 @@ R/I1smaxcoKEUySU8h28AG8NjUKE/6kJRNnmakD10nURM284DiTl2ayWZ5XyRpmyVDfKswfVTERkRraF
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -2292,10 +2292,14 @@ class App(_Base):
     # ───────── SCRIPT ─────────
 
     def _build_script(self, f):
-        h = self.header(f, "Script", "Ek line = ek sentence. Auto-save hoy. .txt file drag & drop korte paro.")
+        h = self.header(f, "Script", "Ek line = ek sentence. Auto-save hoy. .txt drag & drop kore dhukao / bahire nao.")
         self.script_count = mklabel(h, "", 10, ACCENT)
         self.script_count.pack(side="right")
         mkbtn(h, "Import .txt…", self.import_script, "ghost", pady=4).pack(side="right", padx=10)
+        mkbtn(h, "💾 Save copy…", self.save_script_copy, "ghost", pady=4).pack(side="right")
+        self.script_drag = mklabel(f, "⠿  Script ta drag kore bahire (desktop / folder e) felo  —  script.txt hishebe jabe",
+                                   10, MUTED, bg=PANEL2, padx=14, pady=7, cursor="hand2")
+        self.script_drag.pack(anchor="w", padx=22, pady=(0, 10))
         self.script_txt = mktext(f)
         self.script_txt.pack(fill="both", expand=True, padx=22, pady=(0, 18))
         self.script_txt.bind("<<Modified>>", self._script_modified)
@@ -2331,6 +2335,36 @@ class App(_Base):
         p = filedialog.askopenfilename(filetypes=[("Text", "*.txt"), ("All", "*.*")])
         if p:
             self.set_script_file(p)
+
+    def _script_file_ready(self):
+        """Latest script ke script.txt e save kore path dey (faka hole None)."""
+        if not self.proj or not self.script_txt.get("1.0", "end-1c").strip():
+            return None
+        self.flush_script()
+        p = os.path.join(self.proj, "script.txt")
+        return p if os.path.exists(p) else None
+
+    def save_script_copy(self):
+        p = self._script_file_ready()
+        if not p:
+            messagebox.showinfo("Script", "Script faka — save korar moto kichu nai.")
+            return
+        dst = filedialog.asksaveasfilename(initialfile="script.txt", defaultextension=".txt",
+                                           filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if dst:
+            try:
+                shutil.copyfile(p, dst)
+                self.note("✓ Script copy save hoyeche", OK)
+            except Exception as e:
+                messagebox.showerror("Save copy", f"Copy kora gelo na: {e}")
+
+    def _script_drag_init(self, event):
+        """Script bahire drag (copy) — project er script.txt thakei."""
+        p = self._script_file_ready()
+        if not p:
+            return "refuse_drop"
+        self._drag_out = True
+        return ("copy", DND_FILES, (os.path.abspath(p).replace("\\", "/"),))
 
     # ───────── AUDIO ─────────
 
@@ -3646,6 +3680,12 @@ class App(_Base):
                 w.dnd_bind("<<DragEndCmd>>", self._audio_drag_end)
             except Exception:
                 pass
+        try:
+            self.script_drag.drag_source_register(1, DND_FILES)
+            self.script_drag.dnd_bind("<<DragInitCmd>>", self._script_drag_init)
+            self.script_drag.dnd_bind("<<DragEndCmd>>", self._audio_drag_end)
+        except Exception:
+            pass
 
     def _dnd_register_tree(self, w):
         if not DND_OK:
