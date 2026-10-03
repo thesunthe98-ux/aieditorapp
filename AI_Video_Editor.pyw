@@ -304,7 +304,7 @@ R/I1smaxcoKEUySU8h28AG8NjUKE/6kJRNnmakD10nURM284DiTl2ayWZ5XyRpmyVDfKswfVTERkRraF
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -1907,6 +1907,7 @@ class App(_Base):
         self._usage = {}
         self._usage_busy = False
         self._merging = False
+        self._drag_out = False
         self.cur_output = ""
         self.frames = {}
         self.nav = {}
@@ -2336,18 +2337,23 @@ class App(_Base):
     # ───────── AUDIO ─────────
 
     def _build_audio(self, f):
-        self.header(f, "Audio", "Voiceover — ekta file, othoba 1,2,3… naam e multiple file (auto join hobe).")
+        self.header(f, "Audio", "Voiceover — ekta file, othoba 1,2,3… naam e multiple file (auto join hobe). Audio bahire drag kore nite paro.")
         card = tk.Frame(f, bg=PANEL)
         card.pack(fill="x", padx=22, pady=6)
         self.audio_name = mklabel(card, "", 13, FG, True, bg=PANEL)
         self.audio_name.pack(anchor="w", padx=20, pady=(18, 2))
         self.audio_info = mklabel(card, "", 10, MUTED, bg=PANEL)
-        self.audio_info.pack(anchor="w", padx=20, pady=(0, 14))
+        self.audio_info.pack(anchor="w", padx=20, pady=(0, 10))
+        self.audio_drag = mklabel(card, "⠿  Ei audio ta drag kore bahire (desktop / folder e) felo", 10, MUTED,
+                                  bg=PANEL2, padx=14, pady=8, cursor="hand2")
+        self.audio_drag.pack(anchor="w", padx=20, pady=(0, 14))
         row = tk.Frame(card, bg=PANEL)
         row.pack(anchor="w", padx=20, pady=(0, 18))
         mkbtn(row, "＋ Import audio(s)…", self.import_audio, "primary").pack(side="left")
         self.audio_play = mkbtn(row, "▶ Play", lambda: open_path(self.audio_path()), "ghost")
         self.audio_play.pack(side="left", padx=8)
+        self.audio_save = mkbtn(row, "💾 Save copy…", self.save_audio_copy, "ghost")
+        self.audio_save.pack(side="left", padx=(0, 8))
         self.audio_rm = mkbtn(row, "Remove", self.remove_audio, "ghost")
         self.audio_rm.pack(side="left")
         mklabel(f, "🎯 Ekhane audio file (mp3/wav/m4a…) drag kore drop koro.  Notun audio dile purano ta replace hobe.\n"
@@ -2372,7 +2378,12 @@ class App(_Base):
             self.audio_info.configure(text="Import your voiceover (mp3, wav, m4a, aac, ogg, flac)")
         st = "normal" if p else "disabled"
         self.audio_play.configure(state=st)
+        self.audio_save.configure(state=st)
         self.audio_rm.configure(state=st)
+        self.audio_drag.configure(
+            fg=FG if p else DISABLED,
+            text=("⠿  Ei audio ta drag kore bahire (desktop / folder e) felo" if DND_OK
+                  else "Drag out off — 'Save copy…' button use koro") if p else "⠿  Drag korar moto audio nai")
 
     def import_audio(self):
         ps = filedialog.askopenfilenames(
@@ -2387,6 +2398,32 @@ class App(_Base):
             archive(p, self.proj)
             self.refresh_audio()
             self.refresh_usage()
+
+    def save_audio_copy(self):
+        p = self.audio_path()
+        if not p:
+            return
+        ext = os.path.splitext(p)[1]
+        dst = filedialog.asksaveasfilename(initialfile=os.path.basename(p), defaultextension=ext,
+                                           filetypes=[("Audio", "*" + ext), ("All", "*.*")])
+        if dst:
+            try:
+                fast_copy(p, dst)
+                self.note("✓ Audio copy save hoyeche", OK)
+            except Exception as e:
+                messagebox.showerror("Save copy", f"Copy kora gelo na: {e}")
+
+    def _audio_drag_init(self, event):
+        """Audio section theke file bahire drag (copy) — project er original file ta thakei."""
+        p = self.audio_path()
+        if not p or self._merging:
+            return "refuse_drop"
+        self._drag_out = True
+        return ("copy", DND_FILES, (os.path.abspath(p).replace("\\", "/"),))
+
+    def _audio_drag_end(self, event):
+        self.after(300, lambda: setattr(self, "_drag_out", False))
+        return event.action
 
     # ───────── SRT ─────────
 
@@ -3602,6 +3639,13 @@ class App(_Base):
             self.after(1500, lambda: self.note("Drag & drop off — 'tkinterdnd2' install hoy nai (button diye import kaj korbe)", WARN, 10))
             return
         self._dnd_register_tree(self)
+        for w in (self.audio_drag, self.audio_name, self.audio_info):
+            try:
+                w.drag_source_register(1, DND_FILES)
+                w.dnd_bind("<<DragInitCmd>>", self._audio_drag_init)
+                w.dnd_bind("<<DragEndCmd>>", self._audio_drag_end)
+            except Exception:
+                pass
 
     def _dnd_register_tree(self, w):
         if not DND_OK:
@@ -3627,6 +3671,8 @@ class App(_Base):
         return None
 
     def _on_drop(self, event):
+        if self._drag_out:                     # nijer audio nijer e drop -> kichu korbo na
+            return event.action
         try:
             raw = list(self.tk.splitlist(event.data))
             paths = []
