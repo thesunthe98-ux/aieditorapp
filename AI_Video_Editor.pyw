@@ -252,20 +252,20 @@ RjI0d6niwARxNgJfMTlaPEUEwVJ/H7RcDeorl6tGOJZVmWJZ9f0QjZLcC9Tdl0WqMtgo42bD8GmOV6T5
 hdMdIBxaNpHAQptQiPxiDGtOk2LjEGcAVH4QcAh69R4iSj//lSR9kVjE3UxruqdpvodbuNcb/abWlfzUHA/n9cQ1Qs
 """
 _CONFIG_B64 = """
-eNrFVM1u00AQvu9TjFQhpYeiJNDQRjLSNl2C1TS2bCc0J8uNN2VVJw6O0yYSB7hQIYQ4lJ8LNyoXoapUnDiVV7F4EmZsE9ReOMay
-VzPfzOzszDfrFfj9/sWyXrYCwHXoKl+GIHwVhxGsQSMcDdQB2dLkXZqcwEAFkmT8ztLzN2lymSbXaXIF3NThUM4naLhIk58ZepoH
-fsiU1yScn9zaKEEoTT5mHhe5+SsqGLjMXjDGu9zhlms/Np64jwxLqwA9N2DRFVZPq2Y4npcX9ZeeTWU0z9twnVdDK/XqCtHPmfI2
-Tb5je3nHMWAY+n9b+iNz/pS3YhU3NSMVRiqe16Eph2qkYO0hNAJvihEkPfXipumQuCPnx2Hkw8ALgn2vf8iaYldv6y7S4u6IntYz
-OpZbYKizRot3tsXCzAxTtPk/dyrIjsP+IQylr7yisv8c1xR7omXfTFlglNLU9/gW792yFyA5MOZYvG3rjm60XdsUYltbp4N0Q9WX
-4ZGM4CgMpkNZh8rdMmh4gFeUnQaIOnuZjyQ8R/M6mivr5TuoVAvfJOs6kvIrC3qZJl+owTLqy1EMJfJeLVgDX/bVvgygVPO3CDzN
-4inyLJ/Rb/nUYzrWNVqdXaFhGsaWPLZ424xpPJ7GMJFxrEYHk2XfoxWwvFiFEI5xHU2QuVp9E0nZrFdqRFS9guv9+j1mdByz47gW
-R/I1smaxcoKEUySU8h28AG8NjUKE/6kJRNnmakD10nURM284DiTl2ayWZ5XyRpmyVDfKswfVTERkRraFjMsiubCRS5o+beHH/gAP
-9qg/
+eNrFVM1u00AQvu9TjBQhpYeiJJC2iWSkbboEq2lsOU5oTpYbb8oqTlwcp00kDnChQghxKD8XblQuQlWpOHEqr2LxJMzYblF74RjL
+Xs1838zOzs+6AH8+vFzWywoAXIee8mQAwlNREMIqNILJUO0Tl8Tvk/gYhsqXJON3mpy9TeKLJL5K4kvgpg4juZgicZ7Ev1L0JHP8
+mCpvSDg7vrNRjFASf0otzjP6GyrouMxaMMZ73OaW03liPHUeG5ZWBnpuwaInrL5WSXE8L8/zLz6fyXCRleEqy4ZWqtUlol9S5V0S
+/8Dy8q5twDjwrkv6MzX+nJViBTc1QxWEKlrUoSnHaqJg9RE0fHeGHiQ9c6OmaZO4LRdHQejB0PX9PXcwYk2xo7d1B9vibIu+1je6
+lpNjqLNGi3e3xA3NDFO0+T9zSqgTBYMRjKWn3Dyz/xzXFLui1bkdMscopKnv8k3ev8PnIBkwZlu83dFt3Wg7HVOILa1KB+kFaiCD
+QxnCYeDPxrIO5fsl0PAAryk6DRBV9iIbSXiBdBXpcrV0D5VKbhunVcem/E6dXiXxVyqwDAdyEkGRrFfyroEnB2pP+lBc8zYJPEn9
+yfM0m9Hv2dRjONYzWt0doWEYxpY8tnjbjFl0MItgKqNITfany75HBbDcSAUQHOA6mWLn1uo1bEqtXl6jRtXLuD6sP2BG1za7tmNx
+bL5GbOorp9hw8oRitoPr462hUQjxPzWFMN1cDSlfui5i7o4PfIlx1iulebmyUaIgpQ2Ua5VURmi+nok1MkHuJrboYCtp+LRrb/YX
+w6Wn4A==
 """
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.0.7"
+APP_VERSION = "2.0.8"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -4415,7 +4415,9 @@ class App(_Base):
         g = group("Output")
         cb = ttk.Combobox(g, textvariable=self.sv["OUTPUT_RATIO"], values=["16:9", "9:16", "1:1", "4:3"], state="readonly", width=10)
         row(g, 1, "Ratio", cb)
-        row(g, 2, "Resolution", mkentry(g, self.sv["OUTPUT_RESOLUTION"], 14), "optional, e.g. 1080x1920 (ratio ke override kore)")
+        self.res_cb = ttk.Combobox(g, textvariable=self.sv["OUTPUT_RESOLUTION"], values=self.RES_LIST["9:16"], width=14)
+        row(g, 2, "Resolution", self.res_cb, "ratio onujayi list theke bachun, ba nijer size likhun (e.g. 1080x1920)")
+        self.sv["OUTPUT_RATIO"].trace_add("write", self._ratio_changed)
         g = group("Audio & style")
         vs = Slider(g, self.vol_pct, 10, 400, 5, length=220, command=self._vol_changed, bg=PANEL)
         row(g, 1, "Voiceover volume", vs)
@@ -4438,15 +4440,54 @@ class App(_Base):
         mkbtn(b, "Save settings", self.save_settings, "primary").pack(side="left")
         mkbtn(b, "Open config.txt", lambda: open_path(os.path.join(self.proj, "config.txt")), "ghost").pack(side="left", padx=8)
 
+    # Resolution choices per ratio (720p / 1080p / 2K level)
+    RES_LIST = {
+        "9:16": ["720x1280", "1080x1920", "1440x2560"],
+        "16:9": ["1280x720", "1920x1080", "2560x1440"],
+        "1:1":  ["720x720", "1080x1080", "1440x1440"],
+        "4:3":  ["960x720", "1440x1080", "1920x1440"],
+    }
+    # what the engine used before when Resolution was empty (keeps old projects unchanged)
+    RES_OLD_DEFAULT = {"16:9": "1920x1080", "9:16": "1080x1920", "1:1": "1080x1080", "4:3": "1440x1080"}
+
+    def _ratio_changed(self, *a):
+        ratio = self.sv["OUTPUT_RATIO"].get().strip()
+        lst = self.RES_LIST.get(ratio)
+        if not lst:
+            return
+        self.res_cb["values"] = lst
+        if self._loading:
+            return
+        # keep the same level (720p/1080p/2K): match by the short side of the current size
+        m = re.fullmatch(r"(\d+)x(\d+)", self.sv["OUTPUT_RESOLUTION"].get().strip())
+        if m:
+            short = min(int(m.group(1)), int(m.group(2)))
+            best = min(lst, key=lambda r: abs(min(map(int, r.split("x"))) - short))
+        else:
+            best = lst[0]
+        if self.sv["OUTPUT_RESOLUTION"].get().strip() != best:
+            self.sv["OUTPUT_RESOLUTION"].set(best)
+
     def load_settings(self):
         c = cfg_read(self.proj)
-        d = {"OUTPUT_RATIO": "16:9", "VOLUME": "1.0", "TRANSITION_SPEED": "10", "ENCODER": "auto",
+        d = {"OUTPUT_RATIO": "9:16", "VOLUME": "1.0", "TRANSITION_SPEED": "10", "ENCODER": "auto",
              "USE_SAVED_QUERIES": "0"}
+        # new default is 720x1280; an old project with a ratio but no resolution keeps its old size
+        if not c.get("OUTPUT_RESOLUTION", "").strip():
+            if c.get("OUTPUT_RATIO", "").strip():
+                d["OUTPUT_RESOLUTION"] = self.RES_OLD_DEFAULT.get(c["OUTPUT_RATIO"].strip(), "")
+            else:
+                d["OUTPUT_RESOLUTION"] = "720x1280"
         was = self._loading
         self._loading = True
         try:
             for k, v in self.sv.items():
-                v.set(c.get(k, d.get(k, "")))
+                v.set(c.get(k, d.get(k, "")) or d.get(k, ""))
+            # write ratio/resolution into config.txt so the engine uses the same values as the UI
+            miss = {k: self.sv[k].get().strip() for k in ("OUTPUT_RATIO", "OUTPUT_RESOLUTION")
+                    if not c.get(k, "").strip() and self.sv[k].get().strip()}
+            if miss:
+                cfg_write(self.proj, miss)
             self.vol_pct.set(parse_volume_pct(c.get("VOLUME", "1.0")))
             count_to(self.vol_lbl, self.vol_pct.get(), "{}%", 0)
         finally:
@@ -4624,7 +4665,7 @@ class App(_Base):
         if m and int(m.group(1)) > 0 and int(m.group(2)) > 0:
             return int(m.group(1)), int(m.group(2))
         return {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080),
-                "4:3": (1440, 1080)}.get(c.get("OUTPUT_RATIO", "16:9"), (1920, 1080))
+                "4:3": (1440, 1080)}.get(c.get("OUTPUT_RATIO", "9:16"), (720, 1280))
 
     def _pv_collect_samples(self):
         srt_lines = []
