@@ -5,6 +5,8 @@ v2: project save/open + auto-save, drag & drop, disk-space meter + cache cleaner
 v4: Avatar Overlay mode (avatar on top of the whole video, loop, bg colour remove, size/position, live preview).
 v3: themes + accent colors, hover/press fades, smooth progress, tab slide, count-up numbers, CapCut-style look.
 v5: Avatar tab -> in-app player (video + sound) and front/back trim of the avatar video.
+v6: resizable preview (drag the corner grip / 25-400% slider / hide controls), resizable Player & Trim,
+    player can show the avatar with the background removed LIVE (checker / dark / light backdrop) or the original.
 make_video.py (the engine) is embedded and run as-is.
 """
 import os, sys, re, json, zlib, base64, shutil, hashlib, threading, subprocess, queue
@@ -265,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.0.8"
+APP_VERSION = "2.0.9"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -1428,6 +1430,11 @@ class TrimBar(tk.Canvas):
             self.cur = float(cur)
         self.draw()
 
+    def resize(self, w):
+        self.bw = int(w)
+        self.configure(width=self.bw)
+        self.draw()
+
     def _x(self, t):
         if self.dur <= 0:
             return self.PAD
@@ -1507,15 +1514,22 @@ class TrimBar(tk.Canvas):
 class ScrollFrame(tk.Frame):
     """Vertically scrollable container; put children in .inner. Scrollbar appears only if needed."""
 
-    def __init__(self, parent, bg=None):
+    def __init__(self, parent, bg=None, hscroll=False):
         super().__init__(parent, bg=bg or BG)
+        self._h, self._hb_shown = hscroll, False
         self.cv = tk.Canvas(self, bg=bg or BG, highlightthickness=0, bd=0, height=100)
         self.sb = ttk.Scrollbar(self, orient="vertical", command=self.cv.yview)
         self.cv.configure(yscrollcommand=self._on_scroll)
         self.inner = tk.Frame(self.cv, bg=bg or BG)
         self._win = self.cv.create_window((0, 0), window=self.inner, anchor="nw")
-        self.inner.bind("<Configure>", lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
-        self.cv.bind("<Configure>", lambda e: self.cv.itemconfigure(self._win, width=e.width))
+        if hscroll:
+            self.hb = ttk.Scrollbar(self, orient="horizontal", command=self.cv.xview)
+            self.cv.configure(xscrollcommand=self._on_hscroll)
+            self.inner.bind("<Configure>", self._fit)
+            self.cv.bind("<Configure>", self._fit)
+        else:
+            self.inner.bind("<Configure>", lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
+            self.cv.bind("<Configure>", lambda e: self.cv.itemconfigure(self._win, width=e.width))
         self.sb.pack(side="right", fill="y")
         self.cv.pack(side="left", fill="both", expand=True)
         for w in (self, self.cv, self.inner):
@@ -1524,6 +1538,25 @@ class ScrollFrame(tk.Frame):
 
     def _on_scroll(self, lo, hi):
         self.sb.set(lo, hi)
+
+    def _fit(self, _e=None):
+        """hscroll mode: content is at least as wide as the view, wider when something big (preview) needs it."""
+        try:
+            w = max(self.cv.winfo_width(), self.inner.winfo_reqwidth())
+            self.cv.itemconfigure(self._win, width=w)
+            self.cv.configure(scrollregion=self.cv.bbox("all"))
+        except tk.TclError:
+            pass
+
+    def _on_hscroll(self, lo, hi):
+        self.hb.set(lo, hi)
+        need = float(lo) > 0.0 or float(hi) < 1.0
+        if need and not self._hb_shown:
+            self.hb.pack(side="bottom", fill="x", before=self.cv)
+            self._hb_shown = True
+        elif not need and self._hb_shown:
+            self.hb.pack_forget()
+            self._hb_shown = False
 
     def _inside(self):
         try:
@@ -3107,12 +3140,20 @@ class App(_Base):
         self._av_size, self._av_out = (self.PV_MAX_W, 281), (1920, 1080)
         self._av_swatch = None
         self._av_scale = tk.IntVar(value=int(self.rec.get("av_preview", 100) or 100))
+        self._av_rs, self._av_grip_job, self._av_ctl_hidden = False, None, False
         self._av_scale_job = None
         self._av_resize_job = None
         # in-app avatar player + trim
         self._avp_sig, self._avp_path = None, None
         self._avp_dur, self._avp_vw, self._avp_vh = 0.0, 0, 0
+        self._avp_wvar = tk.IntVar(value=int(self.rec.get("avp_w", self.AVP_W) or self.AVP_W))
+        self._avp_cw, self._avp_ch = self.AVP_W, self.AVP_H
         self._avp_wh = (self.AVP_W, self.AVP_H)
+        self._avp_rsz, self._avp_wset, self._avp_szdirty, self._avp_was_playing = False, False, False, False
+        self._avp_size_job, self._avp_params_job = None, None
+        self._avp_snap_cur = None
+        self._avp_view = tk.StringVar(value="key")          # "raw" = original, "key" = background removed
+        self._avp_bgstyle = tk.StringVar(value="checker")   # backdrop behind the removed area
         self._avp_playing, self._avp_gen, self._avp_proc = False, 0, None
         self._avp_q, self._avp_fq = queue.Queue(), queue.Queue(maxsize=16)
         self._avp_t0, self._avp_base, self._avp_end, self._avp_n = 0.0, 0.0, 0.0, 0
@@ -3148,23 +3189,27 @@ class App(_Base):
         right = tk.Frame(body, bg=BG, cursor="arrow")
         body.add(left, minsize=300, stretch="always")
         body.add(right, minsize=340, stretch="never")
-        self._av_paned = body
+        self._av_paned, self._av_right = body, right
+        lsf = ScrollFrame(left, hscroll=True)            # big preview -> scrolls instead of getting cut
+        lsf.pack(fill="both", expand=True)
+        lin = lsf.inner
 
         # ── ONE live preview (avatar + subtitle together) ──
-        self.av_cv = tk.Canvas(left, width=self.PV_MAX_W, height=281, bg="#000000", highlightthickness=1,
+        self.av_cv = tk.Canvas(lin, width=self.PV_MAX_W, height=281, bg="#000000", highlightthickness=1,
                                highlightbackground=PANEL2, cursor="fleur")
         self.av_cv._no_theme = True
         self.pv_cv = self.av_cv
-        self.av_cv.pack(anchor="n")
+        self.av_cv.pack(anchor="nw")
         self.av_cv.bind("<ButtonPress-1>", self._cv_press)
         self.av_cv.bind("<B1-Motion>", self._cv_move)
         self.av_cv.bind("<ButtonRelease-1>", self._cv_release)
         self.av_cv.bind("<Double-Button-1>", self._cv_reset)
+        self.av_cv.bind("<Motion>", self._cv_motion)
         self.av_cv.bind("<MouseWheel>", self._cv_wheel)
         self.av_cv.bind("<Button-4>", self._cv_wheel)
         self.av_cv.bind("<Button-5>", self._cv_wheel)
 
-        info = tk.Frame(left, bg=PANEL)
+        info = tk.Frame(lin, bg=PANEL)
         info.pack(fill="x", pady=(10, 0))
         nav = tk.Frame(info, bg=PANEL)
         nav.pack(fill="x", padx=12, pady=(10, 2))
@@ -3176,16 +3221,18 @@ class App(_Base):
         sr = tk.Frame(info, bg=PANEL)
         sr.pack(fill="x", padx=12, pady=(0, 2))
         mklabel(sr, "Preview size", 9, MUTED, bg=PANEL).pack(side="left", padx=(0, 6))
-        Slider(sr, self._av_scale, 40, 100, 5, length=150, show_value=True, bg=PANEL).pack(side="left")
+        Slider(sr, self._av_scale, 25, 400, 5, length=150, show_value=True, bg=PANEL).pack(side="left")
         self._av_scale.trace_add("write", self._av_scale_changed)
+        self._av_ctl_btn = mkbtn(sr, "⇥ Controls hide", self._av_toggle_controls, "ghost", pady=1, padx=9)
+        self._av_ctl_btn.pack(side="left", padx=(10, 0))
         self.av_pos_lbl = mklabel(info, "", 9, MUTED, bg=PANEL, wraplength=440, justify="left", anchor="nw",
                                   height=2)
         self.av_pos_lbl.pack(anchor="w", fill="x", padx=12, pady=(2, 0))
         self.cv_hint = mklabel(info, "", 9, MUTED, bg=PANEL, wraplength=440, justify="left")
         self.cv_hint.pack(anchor="w", padx=12, pady=(2, 10))
-        self.pv_note = mklabel(left, "", 9, WARN, wraplength=450, justify="left")
+        self.pv_note = mklabel(lin, "", 9, WARN, wraplength=450, justify="left")
         self.pv_note.pack(anchor="w", pady=(6, 0))
-        self.av_note = mklabel(left, "", 9, WARN, wraplength=450, justify="left")
+        self.av_note = mklabel(lin, "", 9, WARN, wraplength=450, justify="left")
         self.av_note.pack(anchor="w", pady=(2, 0))
 
         # ── controls (right): Avatar | Subtitles ──
@@ -3193,7 +3240,7 @@ class App(_Base):
                   idle=PANEL, padx=22, pady=7, size=11).pack(anchor="w", pady=(0, 10))
         holder = tk.Frame(right, bg=BG)
         holder.pack(fill="both", expand=True)
-        self._pg = {"avatar": ScrollFrame(holder), "subs": ScrollFrame(holder)}
+        self._pg = {"avatar": ScrollFrame(holder, hscroll=True), "subs": ScrollFrame(holder)}
         self._pg["avatar"].pack(fill="both", expand=True)
         self._build_avatar_controls(self._pg["avatar"].inner)
         self._build_subs_controls(self._pg["subs"].inner)
@@ -3205,6 +3252,13 @@ class App(_Base):
             self.avv[k].trace_add("write", self._av_request)
         for k in ("AV_X", "AV_Y", "AV_FREE"):
             self.avv[k].trace_add("write", lambda *a: self._av_pos_changed())
+        # player: live background-remove view follows the colour / similarity / blend settings
+        for k in ("AV_KEY_COLOR", "AV_KEY_SIM", "AV_KEY_BLEND"):
+            self.avv[k].trace_add("write", self._avp_params_changed)
+        self.avv["AV_KEY_ON"].trace_add("write", self._avp_keyon_changed)
+        self._avp_view.trace_add("write", self._avp_view_changed)
+        self._avp_bgstyle.trace_add("write", self._avp_view_changed)
+        self._avp_wvar.trace_add("write", self._avp_wvar_changed)
         f.bind("<Configure>", self._av_frame_resized, add="+")
         left.bind("<Configure>", self._av_frame_resized, add="+")
         self.avv["AV_KEY_COLOR"].trace_add("write", lambda *a: self._av_paint_swatch())
@@ -3221,19 +3275,94 @@ class App(_Base):
         self.cv_hint.configure(
             text=("Subtitle er upor DRAG = position • scroll = size • double-click = reset" if t == "subs" else
                   "Avatar er upor DRAG = position • scroll = size • double-click = reset") +
-                 "\nPreview er background = tomar prothom clip er frame.")
+                 "\nPreview boro/soto korte: nicher dan kon-ar ◢ grip tano ba 'Preview size' slider (25–400%).")
         self._av_draw()
 
     # ---- canvas events: act on whichever tab is open ----
+    def _av_grip_hit(self, e):
+        cw, ch = self._av_size
+        return e.x >= cw - 24 and e.y >= ch - 24
+
+    def _cv_motion(self, e):
+        if self._av_rs:
+            return
+        cur = "bottom_right_corner" if self._av_grip_hit(e) else ("crosshair" if self._av_pick else "fleur")
+        try:
+            if str(self.av_cv.cget("cursor")) != cur:
+                self.av_cv.configure(cursor=cur)
+        except tk.TclError:
+            pass
+
+    def _av_grip_move(self, e):
+        """Dragging the corner grip: aspect-locked resize of the preview (sets the Preview size %)."""
+        W, H = self._pv_out_dims()
+        mw, mh = self._av_avail()
+        k0 = min(mw / float(W), mh / float(H))
+        cw0, ch0 = W * k0, H * k0
+        s = (e.x * cw0 + e.y * ch0) / (cw0 * cw0 + ch0 * ch0)
+        pct = max(25, min(400, int(round(s * 100 / 5.0)) * 5))
+        if pct != int(self._av_scale.get()):
+            self._av_scale.set(pct)
+            if not self._av_grip_job:
+                self._av_grip_job = self.after(60, self._av_grip_apply)
+
+    def _av_grip_apply(self):
+        self._av_grip_job = None
+        self._av_refresh()
+
+    def _av_make_room(self, cw):
+        """Preview got wider than its pane -> push the divider right (controls shrink, but keep >= 340px)."""
+        try:
+            if self._av_ctl_hidden:
+                return
+            body = self._av_paned
+            total = body.winfo_width()
+            if total < 600:
+                return
+            need = cw + 40
+            if need > body.sash_coord(0)[0]:
+                body.sash_place(0, min(need, total - 340 - 7), 1)
+        except tk.TclError:
+            pass
+
+    def _av_toggle_controls(self):
+        """Hide / show the right controls so the preview can use the whole window."""
+        try:
+            if self._av_ctl_hidden:
+                self._av_paned.add(self._av_right, minsize=340, stretch="never")
+                self._av_ctl_btn.configure(text="⇥ Controls hide")
+            else:
+                self._av_paned.forget(self._av_right)
+                self._av_ctl_btn.configure(text="⇤ Controls show")
+            self._av_ctl_hidden = not self._av_ctl_hidden
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _draw_grip(cv, w, h, tag="grip"):
+        cv.delete(tag)
+        cv.create_polygon(w - 17, h - 1, w - 1, h - 17, w - 1, h - 1, fill="#ffffff", outline="#202020", tags=tag)
+        cv.create_line(w - 12, h - 4, w - 4, h - 12, fill="#707070", tags=tag)
+        cv.create_line(w - 8, h - 4, w - 4, h - 8, fill="#707070", tags=tag)
+
     def _cv_press(self, e):
+        if self._av_grip_hit(e):
+            self._av_rs = True
+            return
         if self._av_pick or self._ctl_tab.get() == "avatar":
             return self._av_press(e)
         return self._pv_press(e)
 
     def _cv_move(self, e):
+        if self._av_rs:
+            return self._av_grip_move(e)
         return self._pv_move(e) if (self._ctl_tab.get() == "subs" and not self._av_pick) else self._av_move(e)
 
     def _cv_release(self, e):
+        if self._av_rs:
+            self._av_rs = False
+            self._av_refresh()
+            return
         self._av_release(e)
         self._pv_release(e)
 
@@ -3241,7 +3370,8 @@ class App(_Base):
         return self._pv_reset_pos(e) if self._ctl_tab.get() == "subs" else self._av_reset_pos(e)
 
     def _cv_wheel(self, e):
-        return self._pv_wheel(e) if self._ctl_tab.get() == "subs" else self._av_wheel(e)
+        (self._pv_wheel if self._ctl_tab.get() == "subs" else self._av_wheel)(e)
+        return "break"                                   # don't also scroll the pane
 
     def _color_row(self, body, r, label, var, pick, swatch_cb):
         fr = tk.Frame(body, bg=PANEL)
@@ -3276,29 +3406,43 @@ class App(_Base):
         fnote(g, 3, "⬇ Avatar video ei tab e drag & drop korleo import hobe")
 
         g = mkcard(cv, "Player & Trim", "shuru / shesh kete felo")
-        self.avp_cv = tk.Canvas(g, width=self.AVP_W, height=self.AVP_H, bg="#000000", highlightthickness=0,
+        vr = tk.Frame(g, bg=PANEL)
+        mklabel(vr, "Dekho", 9, MUTED, bg=PANEL).pack(side="left", padx=(0, 8))
+        Segmented(vr, self._avp_view, [("raw", "Original"), ("key", "Background removed")],
+                  padx=10, pady=3, size=9).pack(side="left")
+        fspan(g, 0, vr, pady=(0, 4))
+        br = tk.Frame(g, bg=PANEL)
+        mklabel(br, "Remove howa jayga te", 9, MUTED, bg=PANEL).pack(side="left", padx=(0, 8))
+        Segmented(br, self._avp_bgstyle, [("checker", "Checker"), ("dark", "Dark"), ("light", "Light")],
+                  padx=9, pady=3, size=9).pack(side="left")
+        fspan(g, 1, br, pady=(0, 6))
+        self.avp_cv = tk.Canvas(g, width=self._avp_cw, height=self._avp_ch, bg="#000000", highlightthickness=0,
                                 cursor="hand2")
         self.avp_cv._no_theme = True
-        self.avp_cv.create_text(self.AVP_W // 2, self.AVP_H // 2, text="Avatar video import koro", fill="#8a90a0",
+        self.avp_cv.create_text(self._avp_cw // 2, self._avp_ch // 2, text="Avatar video import koro", fill="#8a90a0",
                                 font=(FONT, 10), tags="msg")
-        self.avp_cv.bind("<Button-1>", lambda e: self._avp_toggle())
-        fspan(g, 0, self.avp_cv, pady=(0, 6))
-        self.avp_tl = TrimBar(g, self.AVP_W, on_seek=self._avp_on_seek, on_trim=self._avp_on_trim)
-        fspan(g, 1, self.avp_tl, pady=(0, 0))
+        self._draw_grip(self.avp_cv, self._avp_cw, self._avp_ch)
+        self.avp_cv.bind("<ButtonPress-1>", self._avp_press)
+        self.avp_cv.bind("<B1-Motion>", self._avp_drag)
+        self.avp_cv.bind("<ButtonRelease-1>", self._avp_release)
+        self.avp_cv.bind("<Motion>", self._avp_motion)
+        fspan(g, 2, self.avp_cv, pady=(0, 6))
+        self.avp_tl = TrimBar(g, self._avp_cw, on_seek=self._avp_on_seek, on_trim=self._avp_on_trim)
+        fspan(g, 3, self.avp_tl, pady=(0, 0))
         self.avp_time = mklabel(g, "0:00.00 / 0:00.00", 9, MUTED, bg=PANEL)
-        fspan(g, 2, self.avp_time, pady=(0, 4))
+        fspan(g, 4, self.avp_time, pady=(0, 4))
         tr = tk.Frame(g, bg=PANEL)
         self.avp_btn = mkbtn(tr, "▶ Play", self._avp_toggle, "primary", pady=3, padx=14)
         self.avp_btn.pack(side="left")
         for txt, d in (("−1s", -1.0), ("−0.1", -0.1), ("+0.1", 0.1), ("+1s", 1.0)):
             mkbtn(tr, txt, lambda d=d: self._avp_nudge(d), "ghost", pady=3, padx=7).pack(side="left", padx=(4, 0))
-        fspan(g, 3, tr, pady=(0, 6))
+        fspan(g, 5, tr, pady=(0, 6))
         sr = tk.Frame(g, bg=PANEL)
         mkbtn(sr, "⇤ Set start", lambda: self._avp_set_here("s"), "ghost", pady=3, padx=10).pack(side="left")
         mkbtn(sr, "Set end ⇥", lambda: self._avp_set_here("e"), "ghost", pady=3, padx=10).pack(side="left",
                                                                                                     padx=6)
         mkbtn(sr, "Reset", self._avp_reset_trim, "ghost", pady=3, padx=10).pack(side="left")
-        fspan(g, 4, sr, pady=(0, 6))
+        fspan(g, 6, sr, pady=(0, 6))
         er = tk.Frame(g, bg=PANEL)
         mklabel(er, "Start (sec)", 9, MUTED, bg=PANEL).pack(side="left")
         e1 = mkentry(er, self._avp_sv_s, 7)
@@ -3309,15 +3453,19 @@ class App(_Base):
         for _e, _k in ((e1, "s"), (e2, "e")):
             _e.bind("<Return>", lambda ev, k=_k: self._avp_entry_commit(k))
             _e.bind("<FocusOut>", lambda ev, k=_k: self._avp_entry_commit(k))
-        fspan(g, 5, er, pady=(0, 4))
+        fspan(g, 7, er, pady=(0, 4))
         self.avp_len = mklabel(g, "", 9, MUTED, bg=PANEL, wraplength=300, justify="left")
-        fspan(g, 6, self.avp_len, pady=(0, 2))
+        fspan(g, 8, self.avp_len, pady=(0, 2))
+        frow(g, 9, "Player size", Slider(g, self._avp_wvar, 200, 900, 10, length=170, show_value=True, bg=PANEL),
+             pady=1)
         if self._avp_can_sound():
-            fspan(g, 7, mktoggle(g, "Preview te sound-o shuno", self._avp_snd), pady=(2, 2))
-        fnote(g, 8, "Play dile video ei app er bhitore-i cholbe (video te click korleo play/pause). Bar er duto "
-                    "shada handle tene shuru ar shesh kete felo — export e shudhu oi ongshotuku-i jabe, "
-                    "original file ager moto thakbe. Hot-tip: lip sync rakhte chaile shuru theke beshi kete "
-                    "diyo na, karon avatar er sound voiceover er timeline er sathe mile thake.")
+            fspan(g, 10, mktoggle(g, "Preview te sound-o shuno", self._avp_snd), pady=(2, 2))
+        fnote(g, 11, "Play dile video ei app er bhitore-i cholbe (video te click korleo play/pause). 'Background removed' "
+                     "dile play korar somoy-i realtime e background remove hoye cholbe — Similarity / Edge blend / "
+                     "Remove color slider noRaile sathe sathe update hobe. 'Original' dile asol video. Player boro/soto "
+                     "korte video r dan kon-ar ◢ grip tano ba 'Player size' slider. Bar er duto shada handle tene shuru "
+                     "ar shesh kete felo — export e shudhu oi ongshotuku-i jabe, original file ager moto thakbe. "
+                     "Hot-tip: lip sync rakhte chaile shuru theke beshi kete diyo na.")
 
         g = mkcard(cv, "Avatar style", "Export mode")
         fspan(g, 0, Segmented(g, self.mode, [(1, "Normal"), (2, "Avatar windows"), (3, "Overlay")]), pady=(0, 6))
@@ -3395,12 +3543,12 @@ class App(_Base):
     def _av_avail(self):
         """Biggest preview that fits this window (controls keep ~380px on the right)."""
         try:
-            lw, fh = self._av_left.winfo_width(), self.frames["avatar"].winfo_height()
+            fh = self.frames["avatar"].winfo_height()
         except Exception:
-            lw = fh = 1
-        if lw < 200 or fh < 200:
+            fh = 1
+        if fh < 200:
             return self.PV_MAX_W, self.PV_MAX_H
-        return max(240, lw - 8), max(180, fh - 300)
+        return self.PV_MAX_W, max(180, min(self.PV_MAX_H, fh - 300))   # 100% base size; bigger = scale > 100
 
     def _av_scale_changed(self, *a):
         if self._av_scale_job:
@@ -3494,7 +3642,7 @@ class App(_Base):
         self._av_resize_job = None
         W, H = self._pv_out_dims()
         mw, mh = self._av_avail()
-        sc = max(0.4, min(1.0, int(self._av_scale.get() or 100) / 100.0))
+        sc = max(0.25, min(4.0, int(self._av_scale.get() or 100) / 100.0))
         k = min(mw * sc / float(W), mh * sc / float(H))
         cw, ch = max(120, int(W * k)), max(120, int(H * k))
         if (cw, ch) != self._av_size:
@@ -3502,8 +3650,9 @@ class App(_Base):
         self._av_out, self._av_size = (W, H), (cw, ch)
         self._pv_out, self._pv_size = (W, H), (cw, ch)
         self.av_cv.configure(width=cw, height=ch)
+        self._av_make_room(cw)
         try:
-            wl = max(200, self._av_left.winfo_width() - 36)
+            wl = max(200, min(520, self._av_left.winfo_width() - 36))
             for _w in (self.av_pos_lbl, self.cv_hint, self.pv_note, self.av_note):
                 _w.configure(wraplength=wl)
         except (AttributeError, tk.TclError):
@@ -3723,6 +3872,7 @@ class App(_Base):
                            font=(FONT, 10, "bold"), width=max(60, cw - 24), justify="center")
             self.av_pos_lbl.configure(text="")
             self._pv_overlay()
+            self._draw_grip(cv, cw, ch)
             return
         iw, ih, x, y = self._av_rect()
         on_av = self._ctl_tab.get() == "avatar"
@@ -3739,6 +3889,7 @@ class App(_Base):
             sx, sy = self._av_snap
             cv.create_line(cw / 2, 0, cw / 2, ch, fill=ACCENT if sx else "#ffffff", dash=(3, 4))
             cv.create_line(0, ch / 2, cw, ch / 2, fill=ACCENT if sy else "#ffffff", dash=(3, 4))
+        self._draw_grip(cv, cw, ch)
         k = W / float(cw)
         self.av_pos_lbl.configure(
             text=f"Size {self._av_fnum('AV_SIZE', 35, 5, 100):g}%  •  avatar ≈ {int(iw * k)}×{int(ih * k)}px  "
@@ -3809,6 +3960,180 @@ class App(_Base):
 
     def _avp_ok(self):
         return bool(self._avp_path) and self._avp_dur > 0 and self._avp_vw > 0
+
+    # ---- player: resize ----
+    def _avp_grip_hit(self, e):
+        return e.x >= self._avp_cw - 24 and e.y >= self._avp_ch - 24
+
+    def _avp_motion(self, e):
+        if self._avp_rsz:
+            return
+        try:
+            self.avp_cv.configure(cursor="bottom_right_corner" if self._avp_grip_hit(e) else "hand2")
+        except tk.TclError:
+            pass
+
+    def _avp_press(self, e):
+        if self._avp_grip_hit(e):
+            self._avp_rsz = True
+            self._avp_was_playing = self._avp_playing
+            if self._avp_playing:
+                self._avp_pause()
+            return
+        self._avp_toggle()
+
+    def _avp_drag(self, e):
+        if not self._avp_rsz:
+            return
+        a = self._avp_cw / float(max(1, self._avp_ch))
+        w = max(200, min(900, int(round((e.x + e.y * a) / 2.0 / 10.0)) * 10))
+        if w != int(self._avp_wvar.get()):
+            self._avp_wset = True
+            try:
+                self._avp_wvar.set(w)
+            finally:
+                self._avp_wset = False
+            self._avp_apply_size(final=False)
+
+    def _avp_release(self, e):
+        if not self._avp_rsz:
+            return
+        self._avp_rsz = False
+        self._avp_apply_size(final=True)
+        if self._avp_was_playing and self._avp_ok():
+            self._avp_play()
+        self._avp_was_playing = False
+
+    def _avp_wvar_changed(self, *a):
+        if self._avp_wset:
+            return
+        if self._avp_size_job:
+            self.after_cancel(self._avp_size_job)
+        self._avp_size_job = self.after(150, lambda: self._avp_apply_size(final=True))
+
+    def _avp_apply_size(self, final=True):
+        self._avp_size_job = None
+        try:
+            w = int(self._avp_wvar.get())
+        except Exception:
+            w = self.AVP_W
+        w = max(200, min(900, w))
+        h = w * self._avp_vh / float(self._avp_vw) if self._avp_vw > 0 and self._avp_vh > 0 else w * 0.6
+        w, h = max(2, int(w) // 2 * 2), max(2, int(round(h)) // 2 * 2)
+        if (w, h) != (self._avp_cw, self._avp_ch):
+            self._avp_szdirty = True
+        self._avp_cw, self._avp_ch, self._avp_wh = w, h, (w, h)
+        try:
+            self.avp_cv.configure(width=w, height=h)
+            self.avp_cv.coords("msg", w // 2, h // 2)
+            if self._avp_item is not None:
+                self.avp_cv.coords(self._avp_item, w // 2, h // 2)
+            self.avp_tl.resize(w)
+            self._draw_grip(self.avp_cv, w, h)
+        except tk.TclError:
+            return
+        self._avp_make_room(w)
+        if final and self._avp_szdirty:
+            self._avp_szdirty = False
+            try:
+                self.rec["avp_w"] = int(self._avp_wvar.get())
+                save_recent(self.rec)
+            except Exception:
+                pass
+            if self._avp_ok() and not self._avp_rsz:
+                if self._avp_playing:
+                    self._avp_pause()
+                    self._avp_play()
+                else:
+                    self._avp_seek_frame(self.avp_tl.cur)
+
+    def _avp_make_room(self, w):
+        """Player wider than the controls pane -> move the divider left so it fits."""
+        try:
+            if self._av_ctl_hidden:
+                return
+            body = self._av_paned
+            total = body.winfo_width()
+            if total < 600:
+                return
+            need = w + 90
+            right_w = total - body.sash_coord(0)[0] - 7
+            if right_w < need:
+                body.sash_place(0, max(300, total - need - 7), 1)
+        except tk.TclError:
+            pass
+
+    # ---- player: live background removal ----
+    def _avp_snapshot(self):
+        col = self.avv["AV_KEY_COLOR"].get().strip()
+        col = col if self._ok_hex(col) else "#FFFFFF"
+        return {"mode": self._avp_view.get(), "col": col[1:].upper(),
+                "sim": self._av_fnum("AV_KEY_SIM", 15, 1, 100) / 100.0,
+                "bl": self._av_fnum("AV_KEY_BLEND", 5, 0, 100) / 100.0,
+                "bg": self._avp_bgstyle.get()}
+
+    @staticmethod
+    def _avp_bg_inputs(style, w, h, fps):
+        """ffmpeg input args for the backdrop shown behind the removed colour (runs in a worker thread)."""
+        import tempfile
+        if style == "checker":
+            png = os.path.join(tempfile.gettempdir(), f"ave_avpchk_{w}x{h}.png")
+            if not (os.path.exists(png) and os.path.getsize(png) > 0):
+                try:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                         f"color=c=gray:s={w}x{h}", "-vf",
+                         "geq=lum='if(mod(floor(X/10)+floor(Y/10),2),205,150)':cb=128:cr=128,format=rgb24",
+                         "-frames:v", "1", png],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NOWIN, timeout=30)
+                except Exception:
+                    pass
+            if os.path.exists(png) and os.path.getsize(png) > 0:
+                return ["-loop", "1", "-framerate", str(fps), "-i", png]
+            style = "dark"
+        c = "0x1b1e27" if style == "dark" else "0xEDEDED"
+        return ["-f", "lavfi", "-i", f"color=c={c}:s={w}x{h}:r={fps}"]
+
+    def _avp_cmd(self, p, wh, snap, fps, start, dur=None, still=False):
+        """Full ffmpeg command that writes raw rgb24 frames to stdout. snap['mode']=='key' -> colour removed live."""
+        w, h = wh
+        pre = ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}"] + (["-t", f"{dur:.3f}"] if dur else []) + ["-i", p]
+        tail = (["-frames:v", "1"] if still else []) + ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        if snap and snap.get("mode") == "key":
+            graph = (f"[0:v]fps={fps},scale={w}:{h}:flags=fast_bilinear,format=rgba,"
+                     f"colorkey=0x{snap['col']}:{snap['sim']:.3f}:{snap['bl']:.3f}[v];"
+                     f"[1:v]scale={w}:{h},format=rgba[b];[b][v]overlay=shortest=1:format=auto,format=rgb24[o]")
+            return pre + self._avp_bg_inputs(snap["bg"], w, h, fps) + ["-filter_complex", graph, "-map", "[o]",
+                                                                         "-an"] + tail
+        vf = f"scale={w}:{h}" if still else f"fps={fps},scale={w}:{h}:flags=fast_bilinear"
+        return pre + ["-an", "-vf", vf] + tail
+
+    def _avp_params_changed(self, *a):
+        if self._loading or not hasattr(self, "avp_cv") or self._avp_view.get() != "key":
+            return
+        self._avp_view_changed()
+
+    def _avp_keyon_changed(self, *a):
+        if self._loading or not hasattr(self, "avp_cv"):
+            return
+        self._avp_view.set("key" if self.avv["AV_KEY_ON"].get() == "1" else "raw")
+
+    def _avp_view_changed(self, *a):
+        if self._loading or not hasattr(self, "avp_cv"):
+            return
+        if self._avp_params_job:
+            self.after_cancel(self._avp_params_job)
+        self._avp_params_job = self.after(250, self._avp_params_apply)
+
+    def _avp_params_apply(self):
+        self._avp_params_job = None
+        if not self._avp_ok():
+            return
+        if self._avp_playing:                      # restart from the current position with the new settings
+            self._avp_pause()
+            self._avp_play()
+        else:
+            self._avp_seek_frame(self.avp_tl.cur)
 
     @staticmethod
     def _avp_can_sound():
@@ -3904,6 +4229,8 @@ class App(_Base):
             self.avp_cv.delete("frame")
         except tk.TclError:
             pass
+        self._avp_apply_size(final=False)
+        self._avp_szdirty = False
         self.avp_tl.set_state(dur=0.0, t0=0.0, t1=0.0, cur=0.0)
         self._avp_sync_ui()
         if not p:
@@ -3926,8 +4253,8 @@ class App(_Base):
             return
         self._avp_vw, self._avp_vh = info["w"], info["h"]
         self._avp_dur = float(info["dur"])
-        sc = min(self.AVP_W / float(self._avp_vw), self.AVP_H / float(self._avp_vh))
-        self._avp_wh = (max(2, int(self._avp_vw * sc)), max(2, int(self._avp_vh * sc)))
+        self._avp_apply_size(final=False)
+        self._avp_szdirty = False
         s, e = self._avp_vars_trim()
         self.avp_tl.set_state(dur=self._avp_dur, t0=s, t1=e, cur=s)
         self._avp_sync_ui()
@@ -3939,11 +4266,12 @@ class App(_Base):
             img = tk.PhotoImage(data=ppm, format="PPM")
             self._avp_img = img                           # keep a reference or Tk drops the picture
             if self._avp_item is None:
-                self._avp_item = self.avp_cv.create_image(self.AVP_W // 2, self.AVP_H // 2, image=img, tags="frame")
+                self._avp_item = self.avp_cv.create_image(self._avp_cw // 2, self._avp_ch // 2, image=img, tags="frame")
                 self.avp_cv.tag_lower("frame")
             else:
                 self.avp_cv.itemconfigure(self._avp_item, image=img)
             self.avp_cv.itemconfigure("msg", state="hidden")
+            self.avp_cv.tag_raise("grip")
         except tk.TclError:
             pass
 
@@ -3952,6 +4280,7 @@ class App(_Base):
         if not self._avp_ok() or self._avp_playing:
             return
         t = min(max(0.0, t), max(0.0, self._avp_dur - 0.05))
+        self._avp_snap_cur = self._avp_snapshot()
         with self._avp_lock:
             self._avp_seek_t = t
             if self._avp_seek_busy:
@@ -3962,8 +4291,8 @@ class App(_Base):
                          daemon=True).start()
 
     def _avp_seek_worker(self, sig, p, wh):
-        w, h = wh
         while True:
+            w, h = self._avp_wh                           # re-read: the player may have been resized meanwhile
             with self._avp_lock:
                 t = self._avp_seek_t
                 self._avp_seek_t = None
@@ -3971,10 +4300,9 @@ class App(_Base):
                     self._avp_seek_busy = False
                     return
             try:
-                r = subprocess.run(
-                    ["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i", p, "-an", "-frames:v", "1",
-                     "-vf", f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NOWIN, timeout=25)
+                r = subprocess.run(self._avp_cmd(p, (w, h), self._avp_snap_cur, 24, t, still=True),
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NOWIN,
+                                   timeout=40)
                 if len(r.stdout) == w * h * 3:
                     self._avp_q.put(("still", sig, b"P6 %d %d 255\n" % (w, h) + r.stdout))
             except Exception:
@@ -4004,9 +4332,10 @@ class App(_Base):
         self.avp_btn.configure(text="⏸ Pause")
         snd = self._avp_snd.get() == "1" and self._avp_can_sound()
         threading.Thread(target=self._avp_worker,
-                         args=(gen, self._avp_path, cur, e, self._avp_wh, self.AVP_FPS, snd), daemon=True).start()
+                         args=(gen, self._avp_path, cur, e, self._avp_wh, self.AVP_FPS, snd, self._avp_snapshot()),
+                         daemon=True).start()
 
-    def _avp_worker(self, gen, p, start, end, wh, fps, want_sound):
+    def _avp_worker(self, gen, p, start, end, wh, fps, want_sound, snap=None):
         import tempfile
         w, h = wh
         wav, proc = None, None
@@ -4024,10 +4353,8 @@ class App(_Base):
             if gen != self._avp_gen:
                 self._avp_rm(wav)
                 return
-            proc = subprocess.Popen(
-                ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", p, "-an",
-                 "-vf", f"fps={fps},scale={w}:{h}:flags=fast_bilinear", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NOWIN)
+            proc = subprocess.Popen(self._avp_cmd(p, (w, h), snap, fps, start, dur=end - start),
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NOWIN)
             self._avp_q.put(("go", gen, proc, wav))
             size, hdr = w * h * 3, b"P6 %d %d 255\n" % (w, h)
             while gen == self._avp_gen:
@@ -4276,6 +4603,7 @@ class App(_Base):
             self.av_every.set(c.get("AVATAR_SHOW_EVERY", "6"))
             for k, v in self.avv.items():
                 v.set(c.get(k, self.AV_DEFAULTS[k]))
+            self._avp_view.set("key" if self.avv["AV_KEY_ON"].get() == "1" else "raw")
         finally:
             self._loading = was
         self._av_path, self._av_key_sig, self._av_dims = False, None, None
