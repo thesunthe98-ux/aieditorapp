@@ -9,7 +9,7 @@ v6: resizable preview (drag the corner grip / 25-400% slider / hide controls), r
     player can show the avatar with the background removed LIVE (checker / dark / light backdrop) or the original.
 make_video.py (the engine) is embedded and run as-is.
 """
-import os, sys, re, json, zlib, base64, shutil, hashlib, threading, subprocess, queue
+import os, sys, re, json, zlib, base64, shutil, hashlib, threading, subprocess, queue, tempfile
 import zipfile, urllib.request, time, ssl, stat, hmac
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog, colorchooser
@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.0.9"
+APP_VERSION = "2.1.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -2183,7 +2183,8 @@ _Base = TkinterDnD.Tk if DND_OK else tk.Tk
 class App(_Base):
     SECTIONS = [("script", "✎", "Script"), ("audio", "♫", "Audio"), ("srt", "❝", "SRT"),
                 ("clips", "▣", "Clips"), ("avatar", "☺", "Avatar+Subs"),
-                ("settings", "⚙", "Settings"), ("export", "➤", "Export")]
+                ("settings", "⚙", "Settings"), ("export", "➤", "Export"),
+                ("voice", "🎙", "Voice+SRT")]
 
     MEDIA_TYPES = [("Media", "*.mp4 *.mov *.avi *.mkv *.webm *.jpg *.jpeg *.png *.webp *.bmp")]
 
@@ -2224,6 +2225,7 @@ class App(_Base):
         self._usage_busy = False
         self._merging = False
         self._drag_out = False
+        self._voice_drag_path = None
         self.cur_output = ""
         self.frames = {}
         self.nav = {}
@@ -2258,6 +2260,7 @@ class App(_Base):
         self._build_avatar(self.frames["avatar"])
         self._build_settings(self.frames["settings"])
         self._build_export(self.frames["export"])
+        self._build_voice(self.frames["voice"])
 
         self.statusbar = mklabel(self, "", 9, MUTED, bg=SIDE, anchor="w", padx=16, pady=5)
         self.statusbar.pack(fill="x", side="bottom")
@@ -2379,6 +2382,8 @@ class App(_Base):
             self.refresh_srt()
         elif key == "avatar":
             self.refresh_avatar()
+        elif key == "voice":
+            self.refresh_voice()
         if slide:
             self._tab_anim(self.frames[key])
 
@@ -2530,7 +2535,7 @@ class App(_Base):
         items = []
         for n in sorted(os.listdir(WORKSPACE), key=str.lower):
             p = os.path.join(WORKSPACE, n)
-            if os.path.isdir(p) and not n.startswith((".", "_")):
+            if os.path.isdir(p) and not n.startswith((".", "_")) and n != "VoiceSRT":
                 items.append((n, p))
         for p in self.rec.get("external", []):
             if os.path.isdir(p) and all(p != q for _, q in items):
@@ -5960,9 +5965,32 @@ class App(_Base):
             w = getattr(w, "master", None)
         return None
 
+    def _drop_in_zone(self, event, key):
+        """True jodi drop ta ei section (page ba sidebar button) er upor hoy."""
+        try:
+            w = self.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        zone, nav = self.frames.get(key), self.nav.get(key)
+        while w is not None:
+            if w is zone or w is nav:
+                return True
+            w = getattr(w, "master", None)
+        return False
+
     def _on_drop(self, event):
-        if self._drag_out:                     # nijer audio nijer e drop -> kichu korbo na
+        # nijer project-audio bahire drag korle nijer e drop ignore;
+        # Voice+SRT theke drag kora file ( _voice_drag_path ) app e drop kora jabe
+        if self._drag_out and not getattr(self, "_voice_drag_path", None):
             return event.action
+        vp = getattr(self, "_voice_drag_path", None)
+        if vp:      # Voice+SRT er generated file: shudhu Audio / SRT section er upor chharle kaj korbe
+            e_ = os.path.splitext(vp)[1].lower()
+            key_ = "audio" if e_ in AUDIO_EXTS else ("srt" if e_ == ".srt" else None)
+            if not key_ or not self._drop_in_zone(event, key_):
+                self.note("Drop hoyni — file ta " + ("Audio" if key_ != "srt" else "SRT") +
+                          " section er upor niye chharo.", WARN)
+                return event.action
         try:
             raw = list(self.tk.splitlist(event.data))
             paths = []
@@ -6172,7 +6200,7 @@ class App(_Base):
         self.refresh_avatar()
         self.refresh_clips()
         self.refresh_usage()
-        self.show("script")
+        self.show("voice" if self.cur == "voice" else "script")
         self.note("✓ Sob faka — notun video banate paro", OK)
 
     def _srt_modified(self, e=None):
@@ -6357,6 +6385,2645 @@ class App(_Base):
         add_ffmpeg_path()
         self.check_requirements(prompt=False)
         self.note("FFmpeg location saved ✓")
+
+
+
+
+    # ───────── VOICE + SRT (integrated automation) ─────────
+
+    def _build_voice(self, f):
+        _voice_ensure_dirs()
+        self._voice_cfg = _voice_load_cfg()
+        self._voice_stop = threading.Event()
+        self._voice_thread = None
+        self._voice_runners = []
+        self._voice_jobs = {}
+        self._voice_loading = False
+        self._voice_chrome_hidden = False
+        self._voice_q = queue.Queue()
+        self._voice_cur_script = None
+        self._voice_drag_path = None
+
+        self.header(f, "Voice + SRT",
+                    "Script \u2192 Speechify (MP3) \u2192 VeePN \u2192 Zamzar (SRT). Prottek script er MP3+SRT alada folder e.")
+
+        # ── always-visible control bar ──
+        ctl = tk.Frame(f, bg=PANEL)
+        ctl.pack(fill="x", padx=22, pady=(0, 10))
+        row = tk.Frame(ctl, bg=PANEL)
+        row.pack(fill="x", padx=14, pady=10)
+        self.voice_start_btn = mkbtn(row, "\u25b6  START", self.voice_start, "primary", padx=20)
+        self.voice_start_btn.pack(side="left")
+        self.voice_stop_btn = mkbtn(row, "\u25a0  STOP", self.voice_stop, "danger", padx=16)
+        self.voice_stop_btn.pack(side="left", padx=8)
+        self.voice_stop_btn.configure(state="disabled")
+        self.voice_hide_btn = mkbtn(row, "\U0001f441 Hide Chrome", self.voice_toggle_chrome, "ghost")
+        self.voice_hide_btn.pack(side="left", padx=8)
+        self.voice_clear_btn = mkbtn(row, "\U0001f5d1 Clear All", self.voice_clear_all, "ghost")
+        self.voice_clear_btn.pack(side="left", padx=8)
+        self.voice_status = mklabel(row, "Ready", 10, MUTED, bg=PANEL)
+        self.voice_status.pack(side="right", padx=8)
+
+        # ── sub-tabs ──
+        self._voice_tab = tk.StringVar(value="run")
+        tabs = tk.Frame(f, bg=BG)
+        tabs.pack(fill="x", padx=22, pady=(0, 10))
+        Segmented(tabs, self._voice_tab,
+                  [("run", "\u25b6   Run"), ("script", "\u270e   Script"),
+                   ("accounts", "\u263a   Accounts"), ("settings", "\u2699   Settings"),
+                   ("prompt", "\u270d   Prompt")],
+                  bg=BG, padx=18, pady=7).pack(side="left")
+        pages = tk.Frame(f, bg=BG)
+        pages.pack(fill="both", expand=True, padx=22, pady=(0, 10))
+        self._voice_pages = {k: tk.Frame(pages, bg=BG) for k in ("run", "script", "accounts", "settings", "prompt")}
+
+        def card(parent, title, sub="", side=None, expand=True, padx=(0, 0), pack=True):
+            c = tk.Frame(parent, bg=PANEL)
+            if not pack:
+                pass
+            elif side:
+                c.pack(side=side, fill="both", expand=expand, padx=padx)
+            else:
+                c.pack(fill="both", expand=expand)
+            h = tk.Frame(c, bg=PANEL)
+            h.pack(fill="x", padx=14, pady=(12, 6))
+            tk.Frame(h, bg=ACCENT, width=3, height=15).pack(side="left", padx=(0, 9))
+            mklabel(h, title, 11, FG, True, bg=PANEL).pack(side="left")
+            if sub:
+                mklabel(h, sub, 9, MUTED, bg=PANEL).pack(side="left", padx=10)
+            return c, h
+
+        # ═══ RUN: generated files + live log ═══
+        pr = self._voice_pages["run"]
+        runpane = tk.PanedWindow(pr, orient="horizontal", bg=BG, sashwidth=10, sashrelief="flat",
+                                 sashpad=0, bd=0, opaqueresize=True, showhandle=False,
+                                 sashcursor="sb_h_double_arrow")
+        runpane.pack(fill="both", expand=True)
+        gc, gh = card(runpane, "Generated", "drag kore Audio / SRT section er upor niye chharo", pack=False)
+        runpane.add(gc, minsize=260, stretch="always", width=520)
+        mkbtn(gh, "Refresh", self.voice_refresh_results, "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(gh, "Output folder", lambda: open_path(VOICE_OUTPUT), "flat", pady=2, padx=10).pack(side="right", padx=4)
+        self.voice_results = ScrollFrame(gc, bg=PANEL)
+        self.voice_results.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        lc, lh = card(runpane, "Live log", "majher line tene size bodlano jay", pack=False)
+        runpane.add(lc, minsize=200, stretch="always")
+        self.voice_log = tk.Text(lc, bg=LOG_BG, fg=LOG_FG, font=(MONO, 9), relief="flat",
+                                 wrap="word", height=8, state="disabled", padx=10, pady=8, bd=0,
+                                 highlightthickness=0)
+        self.voice_log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.voice_log.tag_config("err", foreground=BAD)
+        self.voice_log.tag_config("ok", foreground=OK)
+        self.voice_log.tag_config("step", foreground=ACCENT)
+
+        # ═══ SCRIPT: queue list (left) + editor (right) ═══
+        ps = self._voice_pages["script"]
+        qc, qh = card(ps, "Scripts queue", side="left", padx=(0, 8))
+        qc.pack_configure(expand=False, fill="y")
+        qc.configure(width=270)
+        qc.pack_propagate(False)
+        mkbtn(qh, "+ New", self.voice_new_script, "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(qh, "Delete", self.voice_del_script, "flat", pady=2, padx=8).pack(side="right", padx=4)
+        self.voice_slist = ScrollFrame(qc, bg=PANEL)
+        self.voice_slist.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        ec, eh = card(ps, "Editor", side="left")
+        name_row = tk.Frame(ec, bg=PANEL)
+        name_row.pack(fill="x", padx=14, pady=(0, 8))
+        mklabel(name_row, "Name", 10, MUTED, bg=PANEL).pack(side="left")
+        self.voice_sname = tk.StringVar()
+        mkentry(name_row, self.voice_sname, 30).pack(side="left", padx=10)
+        mkbtn(name_row, "Save", self.voice_save_script, "primary", pady=3, padx=16).pack(side="left")
+        boxes = tk.Frame(ec, bg=PANEL)
+        boxes.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        boxes.columnconfigure(0, weight=1, uniform="vbox")
+        boxes.columnconfigure(1, weight=1, uniform="vbox")
+        boxes.rowconfigure(1, weight=1)
+        lh1 = tk.Frame(boxes, bg=PANEL)
+        lh1.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        mklabel(lh1, "Raw script", 10, FG, True, bg=PANEL).pack(side="left")
+        mklabel(lh1, "Speechify e voice hishebe jabe", 9, MUTED, bg=PANEL).pack(side="left", padx=8)
+        lh2 = tk.Frame(boxes, bg=PANEL)
+        lh2.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 4))
+        mklabel(lh2, "Line break script", 10, FG, True, bg=PANEL).pack(side="left")
+        mklabel(lh2, "Gemini + Script section e jabe", 9, MUTED, bg=PANEL).pack(side="left", padx=8)
+        self.voice_stext = mktext(boxes)
+        self.voice_stext.grid(row=1, column=0, sticky="nsew")
+        self.voice_ltext = mktext(boxes)
+        self.voice_ltext.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
+
+        # ═══ ACCOUNTS ═══
+        pa = self._voice_pages["accounts"]
+        ac, ah = card(pa, "Accounts", "ek line e ek mail")
+        mkbtn(ah, "Save", self.voice_save_accounts, "primary", pady=2, padx=16).pack(side="right")
+        self.voice_atext = mktext(ac)
+        self.voice_atext.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        # ═══ PROMPT (Gemini) ═══
+        pp = self._voice_pages["prompt"]
+        pc, ph = card(pp, "Gemini prompt", "SRT correction er jonno — edit kore onno prompt dite paren")
+        mkbtn(ph, "Reset to default", self.voice_reset_prompt, "ghost", pady=2, padx=12).pack(side="right")
+        self.voice_ptext = mktext(pc)
+        self.voice_ptext.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.voice_ptext.insert("1.0", voice_prompt_read())
+        self.voice_ptext.edit_modified(False)
+        self.voice_ptext.bind("<<Modified>>", self._voice_prompt_modified)
+
+        # ═══ SETTINGS ═══
+        pt = self._voice_pages["settings"]
+        sf = ScrollFrame(pt)
+        sf.pack(fill="both", expand=True)
+        sc = sf.inner
+        self.voice_vars = {}
+
+        def field(body, r, label, key, width=16, hint=""):
+            v = tk.StringVar(value=str(self._voice_cfg.get(key, "")))
+            self.voice_vars[key] = v
+            frow(body, r, label, mkentry(body, v, width))
+            if hint:
+                mklabel(body, hint, 9, MUTED, bg=PANEL).grid(row=r, column=2, sticky="w", padx=12)
+
+        b = mkcard(sc, "Voice")
+        field(b, 0, "Voice name", "voice_name", 28)
+        sm = tk.StringVar(value=str(self._voice_cfg.get("split_mode", "Split by Paragraphs")))
+        self.voice_vars["split_mode"] = sm
+        frow(b, 1, "Split mode", ttk.Combobox(b, textvariable=sm, values=VOICE_SPLIT_MODES,
+                                              state="normal", width=26))
+        b = mkcard(sc, "Threads", "ekshathe koita Chrome")
+        _lbl = {"single": "Single thread", "multiple": "Multiple threads"}
+        tm = tk.StringVar(value=_lbl.get(self._voice_cfg.get("thread_mode", "single"), "Single thread"))
+        self.voice_vars["thread_mode"] = tm
+        frow(b, 0, "Mode", ttk.Combobox(b, textvariable=tm, values=list(_lbl.values()),
+                                        state="readonly", width=26))
+        tc = tk.StringVar(value=str(self._voice_cfg.get("threads", 1)))
+        self.voice_vars["threads"] = tc
+        tcb = ttk.Combobox(b, textvariable=tc, values=["1"], state="readonly", width=8)
+        frow(b, 1, "Threads", tcb)
+        fnote(b, 2, "Single = ekta script shesh hole arekta. Multiple = 2-5 ta Chrome ekshathe, "
+                    "prottek Chrome e alada script.")
+
+        def _sync_threads(*a):
+            if tm.get() == "Multiple threads":
+                tcb.configure(values=["2", "3", "4", "5"], state="readonly")
+                if tc.get() not in ("2", "3", "4", "5"):
+                    tc.set("2")
+            else:
+                tcb.configure(values=["1"], state="disabled")
+                if tc.get() != "1":
+                    tc.set("1")
+        tm.trace_add("write", _sync_threads)
+        _sync_threads()
+        b = mkcard(sc, "VPN")
+        field(b, 0, "Locations", "vpn_locations", 60, "comma diye alada")
+        field(b, 1, "Max VPN tries", "max_vpn_tries", 8)
+        dv = tk.StringVar(value="1" if self._voice_cfg.get("vpn_disconnect_after", True) else "0")
+        self.voice_vars["vpn_disconnect_after"] = dv
+        fspan(b, 2, mktoggle(b, "Shesh hole VPN disconnect koro", dv, bg=PANEL))
+        b = mkcard(sc, "Account & Extension")
+        field(b, 0, "Extension ID", "ext_id", 40)
+        field(b, 1, "Max mail tries", "max_account_tries", 8)
+        b = mkcard(sc, "Timeouts", "minutes")
+        field(b, 0, "Generate", "gen_timeout_min", 8)
+        field(b, 1, "Export", "export_timeout_min", 8)
+        field(b, 2, "Convert (SRT)", "convert_timeout_min", 8)
+        b = mkcard(sc, "Gemini", "SRT correction")
+        gv = tk.StringVar(value="1" if self._voice_cfg.get("gemini_enabled", True) else "0")
+        self.voice_vars["gemini_enabled"] = gv
+        fspan(b, 0, mktoggle(b, "MP3 + SRT er por Gemini diye corrected SRT banao", gv, bg=PANEL))
+        field(b, 1, "Gemini timeout", "gemini_timeout_min", 8, "minutes")
+        field(b, 2, "Max Gemini tries", "gemini_tries", 8)
+        fspan(b, 3, mkbtn(b, "Gemini Login Setup (alada account)", self.voice_gemini_login, "ghost"))
+        fnote(b, 4, "Prottek thread (Chrome) er jonno alada Google account. Ekbar login korlei hobe. "
+                    "Account 1 = main Chrome, 2-5 = onno Chrome gulo. Normal Chrome khulbe (Google automation "
+                    "Chrome e login dey na) — login kore SOB window bondho korun.")
+        b = mkcard(sc, "Chrome")
+        fspan(b, 0, mkbtn(b, "Chrome Profile Setup", self.voice_setup_profile, "ghost"))
+        fnote(b, 1, "Prothombar ekbar Chrome profile e VeePN extension + Gemini (Google) login set kore nite hoy.")
+        mkbtn(sc, "Save settings", self.voice_save_settings, "primary", padx=22).pack(anchor="w", pady=(0, 14))
+
+        # ── realtime save: settings, script editor, accounts ──
+        for _v in self.voice_vars.values():
+            _v.trace_add("write", lambda *a: self._voice_sched("cfg", lambda: self.voice_save_settings(silent=True), 500))
+        self.voice_sname.trace_add("write", lambda *a: None if self._voice_loading else
+                                   self._voice_sched("script", self._voice_autosave_script, 900))
+        self.voice_stext.bind("<<Modified>>", self._voice_text_modified)
+        self.voice_ltext.bind("<<Modified>>", self._voice_text_modified)
+        self.voice_atext.bind("<<Modified>>", self._voice_acct_modified)
+
+        # text box gulo jeno alada bujha jay: halka alada bg + border (focus e accent color)
+        for _tb in (self.voice_stext, self.voice_ltext, self.voice_ptext, self.voice_atext):
+            _tb.configure(bg=PANEL2, highlightthickness=1, highlightbackground=MUTED,
+                          highlightcolor=ACCENT, padx=12, pady=10)
+
+        self._voice_tab.trace_add("write", lambda *a: self._voice_tab_changed())
+        self._voice_tab_changed()
+        self.after(200, self._voice_poll)
+        self.refresh_voice()
+
+    def _voice_tab_changed(self):
+        cur = self._voice_tab.get()
+        for k, fr in self._voice_pages.items():
+            if k == cur:
+                fr.pack(fill="both", expand=True)
+            else:
+                fr.pack_forget()
+
+    def refresh_voice(self):
+        _voice_ensure_dirs()
+        self.voice_refresh_scripts()
+        self.voice_refresh_accounts()
+        self.voice_refresh_results()
+
+    def voice_log_line(self, msg):
+        line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+        self._voice_q.put(line)
+        try:
+            with open(VOICE_LOG, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            pass
+
+    def _voice_poll(self):
+        try:
+            while True:
+                line = self._voice_q.get_nowait()
+                low = line.lower()
+                tag = "err" if ("fail" in low or "error" in low or "problem" in low) else (
+                    "ok" if ("shesh" in low or "saved" in low) else (
+                        "step" if "=====" in line else None))
+                if "MP3 saved" in line or "SRT saved" in line or "SHESH" in line:
+                    self.after(300, self.voice_refresh_results)     # show new files live
+                self.voice_log.configure(state="normal")
+                self.voice_log.insert("end", line + "\n", tag)
+                self.voice_log.see("end")
+                self.voice_log.configure(state="disabled")
+                self.voice_status.configure(text=line[11:].strip()[:100],
+                                            fg=BAD if tag == "err" else (OK if tag == "ok" else MUTED))
+        except queue.Empty:
+            pass
+        self.after(200, self._voice_poll)
+
+    def voice_refresh_scripts(self):
+        for w in self.voice_slist.inner.winfo_children():
+            w.destroy()
+        names = set()
+        for base in (VOICE_SCRIPTS, VOICE_LB):
+            try:
+                names.update(f for f in os.listdir(base)
+                             if f.lower().endswith(".txt") and os.path.isfile(os.path.join(base, f)))
+            except Exception:
+                pass
+        files = sorted(names)
+        for fn in files:
+            sel = (self._voice_cur_script == fn)
+            b = mkbtn(self.voice_slist.inner, os.path.splitext(fn)[0],
+                      lambda n=fn: self.voice_load_script(n),
+                      "primary" if sel else "flat", pady=3, padx=10)
+            b.pack(fill="x", pady=1, padx=4)
+
+    def _voice_alive(self):
+        return bool(self._voice_thread and self._voice_thread.is_alive())
+
+    def _voice_sched(self, key, fn, ms):
+        j = self._voice_jobs.get(key)
+        if j:
+            try:
+                self.after_cancel(j)
+            except Exception:
+                pass
+        self._voice_jobs[key] = self.after(ms, fn)
+
+    def _voice_text_modified(self, e=None):
+        changed = False
+        for w in (self.voice_stext, self.voice_ltext):
+            if w.edit_modified():
+                w.edit_modified(False)
+                changed = True
+        if changed:
+            self._voice_sched("script", self._voice_autosave_script, 600)
+
+    def _voice_prompt_modified(self, e=None):
+        if not self.voice_ptext.edit_modified():
+            return
+        self.voice_ptext.edit_modified(False)
+        self._voice_sched("prompt", self._voice_save_prompt, 600)
+
+    def _voice_save_prompt(self):
+        _voice_ensure_dirs()
+        atomic_write(VOICE_PROMPT, self.voice_ptext.get("1.0", "end-1c"))
+
+    def voice_reset_prompt(self):
+        if not messagebox.askyesno("Prompt", "Prompt ta default e ferot nibo? (ekhon ja lekha ache muchhe jabe)"):
+            return
+        self.voice_ptext.delete("1.0", "end")
+        self.voice_ptext.insert("1.0", VOICE_DEFAULT_PROMPT)
+        self.voice_ptext.edit_modified(False)
+        self._voice_save_prompt()
+        self.note("Prompt default e ferot geche")
+
+    def _voice_acct_modified(self, e=None):
+        if not self.voice_atext.edit_modified():
+            return
+        self.voice_atext.edit_modified(False)
+        if self._voice_alive():
+            return
+        self._voice_sched("acct", lambda: self.voice_save_accounts(silent=True), 600)
+
+    def _voice_autosave_script(self):
+        raw = self.voice_sname.get().strip()
+        name = re.sub(r'[\\/:*?"<>|]', "_", raw)
+        text = self.voice_stext.get("1.0", "end").strip()
+        ltext = self.voice_ltext.get("1.0", "end").strip()
+        cur = self._voice_cur_script
+        if not name:
+            if not text and not ltext:
+                return
+            n = 1
+            while any(os.path.exists(os.path.join(b, f"script_{n}.txt")) for b in (VOICE_SCRIPTS, VOICE_DONE, VOICE_LB)):
+                n += 1
+            name = f"script_{n}"
+            self._voice_loading = True
+            self.voice_sname.set(name)
+            self._voice_loading = False
+        fn = f"{name}.txt"
+        _voice_ensure_dirs()
+        dst = os.path.join(VOICE_SCRIPTS, fn)
+        ldst = os.path.join(VOICE_LB, fn)
+        if cur and cur != fn:
+            for base in (VOICE_SCRIPTS, VOICE_LB):
+                src_ = os.path.join(base, cur)
+                dst_ = os.path.join(base, fn)
+                if os.path.exists(src_) and not os.path.exists(dst_):
+                    try:
+                        os.replace(src_, dst_)
+                    except OSError:
+                        pass
+        if not text and not ltext:
+            return
+        if text:
+            atomic_write(dst, text)
+        if ltext:
+            atomic_write(ldst, ltext)
+        elif os.path.exists(ldst):
+            try:
+                os.remove(ldst)
+            except OSError:
+                pass
+        changed = (cur != fn)
+        self._voice_cur_script = fn
+        if changed:
+            self.voice_refresh_scripts()
+
+    def voice_new_script(self):
+        self._voice_cur_script = None
+        self._voice_loading = True
+        self.voice_sname.set("")
+        self._voice_loading = False
+        for w in (self.voice_stext, self.voice_ltext):
+            w.delete("1.0", "end")
+            w.edit_modified(False)
+        self.voice_refresh_scripts()
+
+    def voice_save_script(self):
+        name = re.sub(r'[\\/:*?"<>|]', "_", self.voice_sname.get().strip())
+        text = self.voice_stext.get("1.0", "end").strip()
+        ltext = self.voice_ltext.get("1.0", "end").strip()
+        if not name or not text:
+            messagebox.showwarning("Script", "Name ar Raw script duto-i dorkar.")
+            return
+        _voice_ensure_dirs()
+        atomic_write(os.path.join(VOICE_SCRIPTS, f"{name}.txt"), text)
+        if ltext:
+            atomic_write(os.path.join(VOICE_LB, f"{name}.txt"), ltext)
+        self._voice_cur_script = f"{name}.txt"
+        self.voice_refresh_scripts()
+        self.voice_log_line(f"Script saved: {name}")
+
+    def voice_load_script(self, fname):
+        self._voice_cur_script = fname
+        self._voice_loading = True
+        self.voice_sname.set(os.path.splitext(fname)[0])
+        self._voice_loading = False
+        for w, base in ((self.voice_stext, VOICE_SCRIPTS), (self.voice_ltext, VOICE_LB)):
+            p = os.path.join(base, fname)
+            w.delete("1.0", "end")
+            if os.path.exists(p):
+                w.insert("1.0", read_text(p))
+            w.edit_modified(False)
+        self.voice_refresh_scripts()
+
+    def voice_del_script(self):
+        if self._voice_cur_script and messagebox.askyesno("Delete", "Ei script queue theke muchben?"):
+            for base in (VOICE_SCRIPTS, VOICE_LB):
+                try:
+                    os.remove(os.path.join(base, self._voice_cur_script))
+                except Exception:
+                    pass
+            self.voice_new_script()
+
+    def voice_refresh_accounts(self):
+        self.voice_atext.configure(state="normal")
+        self.voice_atext.delete("1.0", "end")
+        if os.path.exists(VOICE_ACCOUNTS):
+            self.voice_atext.insert("1.0", open(VOICE_ACCOUNTS, encoding="utf-8").read())
+        self.voice_atext.edit_modified(False)
+        if self._voice_alive():          # cholar somoy runner accounts.txt update kore — editor lock
+            self.voice_atext.configure(state="disabled")
+
+    def voice_save_accounts(self, silent=False):
+        if self._voice_alive():
+            return
+        _voice_ensure_dirs()
+        atomic_write(VOICE_ACCOUNTS, self.voice_atext.get("1.0", "end").strip() + "\n")
+        if not silent:
+            self.voice_log_line("Accounts saved")
+
+    def voice_save_settings(self, silent=False):
+        for k, v in self.voice_vars.items():
+            val = v.get().strip()
+            if k in ("vpn_disconnect_after", "gemini_enabled"):
+                self._voice_cfg[k] = (val == "1")
+                continue
+            if k == "thread_mode":
+                self._voice_cfg[k] = "multiple" if val.lower().startswith("multiple") else "single"
+                continue
+            if k in ("max_account_tries", "max_vpn_tries", "gen_timeout_min",
+                     "export_timeout_min", "convert_timeout_min", "threads",
+                     "gemini_timeout_min", "gemini_tries"):
+                try:
+                    val = int(val)
+                except ValueError:
+                    val = VOICE_DEFAULTS[k]
+            self._voice_cfg[k] = val
+        if self._voice_cfg.get("thread_mode") == "multiple":
+            self._voice_cfg["threads"] = max(2, min(5, int(self._voice_cfg.get("threads") or 2)))
+        else:
+            self._voice_cfg["threads"] = 1
+        self._voice_cfg["output_dir"] = VOICE_OUTPUT
+        _voice_save_cfg(self._voice_cfg)
+        if not silent:
+            self.voice_log_line("Settings saved")
+
+    def voice_refresh_results(self):
+        for w in self.voice_results.inner.winfo_children():
+            w.destroy()
+        out = VOICE_OUTPUT
+        folders = []
+        if os.path.isdir(out):
+            folders = sorted((d for d in os.listdir(out) if os.path.isdir(os.path.join(out, d))),
+                             key=lambda d: os.path.getmtime(os.path.join(out, d)), reverse=True)
+        if not folders:
+            mklabel(self.voice_results.inner, "Ekhono kono output nei \u2014 START chapun.", 10, MUTED,
+                    bg=PANEL).pack(anchor="w", padx=8, pady=8)
+            return
+        for name in folders:
+            folder = os.path.join(out, name)
+            card = tk.Frame(self.voice_results.inner, bg=PANEL2)
+            card.pack(fill="x", padx=6, pady=4)
+            top = tk.Frame(card, bg=PANEL2)
+            top.pack(fill="x", padx=10, pady=(8, 2))
+            files_here = [x for x in os.listdir(folder) if os.path.isfile(os.path.join(folder, x))]
+            has_mp3 = any(os.path.splitext(x)[1].lower() in AUDIO_EXTS for x in files_here)
+            has_srt = any(x.lower().endswith(".srt") and not x.startswith(VOICE_CORR_PREFIX) for x in files_here)
+            has_corr = any(x.startswith(VOICE_CORR_PREFIX) and x.lower().endswith(".srt") for x in files_here)
+            mklabel(top, f"\U0001f4c1  {name}", 11, FG, True, bg=PANEL2).pack(side="left")
+            mklabel(top, ("  MP3 \u2713" if has_mp3 else "  MP3 \u2717"), 9, OK if has_mp3 else BAD,
+                    bg=PANEL2).pack(side="left", padx=(10, 0))
+            mklabel(top, ("SRT \u2713" if has_srt else "SRT \u2717"), 9, OK if has_srt else BAD,
+                    bg=PANEL2).pack(side="left", padx=(6, 0))
+            mklabel(top, ("Corrected \u2713" if has_corr else "Corrected \u2717"), 9, OK if has_corr else MUTED,
+                    bg=PANEL2).pack(side="left", padx=(6, 0))
+            mkbtn(top, "Use in project", lambda n=name: self._voice_use_folder(n), "primary",
+                  pady=2, padx=10).pack(side="right")
+            mkbtn(top, "Open folder", lambda p=folder: open_path(p), "flat", pady=2, padx=8).pack(side="right", padx=4)
+            if _voice_find_lb(name) and has_srt:
+                mkbtn(top, "Gemini fix", lambda n=name: self.voice_fix_srt(n), "ghost",
+                      pady=2, padx=8).pack(side="right", padx=4)
+            src = next((os.path.join(b, f"{name}.txt") for b in (VOICE_DONE, VOICE_SCRIPTS)
+                        if os.path.exists(os.path.join(b, f"{name}.txt"))), None)
+            if src:
+                srow = tk.Frame(card, bg=PANEL2)
+                srow.pack(fill="x", padx=10, pady=(2, 4))
+                sc_ = mklabel(srow, f"  TXT  {name}.txt  ", 10, ACCENT, bg=PANEL, padx=8, pady=4, cursor="hand2")
+                sc_.pack(side="left")
+                sc_.bind("<Double-Button-1>", lambda e, p=src: open_path(p))
+                mklabel(srow, "raw script", 9, MUTED, bg=PANEL2).pack(side="left", padx=8)
+            lbsrc = _voice_find_lb(name)
+            if lbsrc:
+                lrow = tk.Frame(card, bg=PANEL2)
+                lrow.pack(fill="x", padx=10, pady=(2, 4))
+                lc_ = mklabel(lrow, f"  TXT  {name}.txt  ", 10, ACCENT, bg=PANEL, padx=8, pady=4, cursor="hand2")
+                lc_.pack(side="left")
+                lc_.bind("<Double-Button-1>", lambda e, p=lbsrc: open_path(p))
+                mklabel(lrow, "line break script", 9, MUTED, bg=PANEL2).pack(side="left", padx=8)
+            for fn in sorted(os.listdir(folder)):
+                fp = os.path.join(folder, fn)
+                if not os.path.isfile(fp):
+                    continue
+                ext = os.path.splitext(fn)[1].lower()
+                if ext not in AUDIO_EXTS and ext != ".srt":
+                    continue
+                is_audio = ext in AUDIO_EXTS
+                row = tk.Frame(card, bg=PANEL2)
+                row.pack(fill="x", padx=10, pady=(2, 4))
+                kind_ = "MP3" if is_audio else ("CORR" if fn.startswith(VOICE_CORR_PREFIX) else "SRT")
+                chip = mklabel(row, f"  {kind_}  {fn}  ", 10, ACCENT, bg=PANEL,
+                               padx=8, pady=4, cursor="hand2")
+                chip.pack(side="left")
+                if DND_OK:
+                    try:
+                        chip.drag_source_register(1, DND_FILES)
+                        chip.dnd_bind("<<DragInitCmd>>", lambda e, p=fp: self._voice_drag_init(e, p))
+                        chip.dnd_bind("<<DragEndCmd>>", self._voice_drag_end)
+                    except Exception:
+                        pass
+                chip.bind("<Double-Button-1>", lambda e, p=fp: open_path(p))
+                chip.bind("<Button-3>", lambda e, p=fp: self._voice_use_in_project(p))
+                try:
+                    kb = os.path.getsize(fp) / 1024
+                    mklabel(row, f"{kb:,.0f} KB", 9, MUTED, bg=PANEL2).pack(side="left", padx=8)
+                except OSError:
+                    pass
+                if is_audio:
+                    mkbtn(row, "\u25b6 Play", lambda p=fp: self._voice_play(p), "ghost", pady=2, padx=10).pack(side="right")
+                    mkbtn(row, "\u25a0", self._voice_play_stop, "flat", pady=2, padx=8).pack(side="right", padx=4)
+
+    def _voice_play(self, path):
+        self._voice_play_stop()
+        ff = shutil.which("ffmpeg")
+        if not ff:
+            open_path(path)
+            return
+
+        def work():
+            try:
+                wav = os.path.join(tempfile.gettempdir(), "voice_preview.wav")
+                subprocess.run([ff, "-y", "-i", path, "-ac", "1", "-ar", "22050", wav],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               creationflags=NOWIN, timeout=180)
+                if os.name == "nt":
+                    import winsound
+                    winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                else:
+                    exe = shutil.which("afplay") or shutil.which("paplay") or shutil.which("aplay")
+                    if exe:
+                        self._voice_aproc = subprocess.Popen([exe, wav], stdout=subprocess.DEVNULL,
+                                                             stderr=subprocess.DEVNULL)
+                    else:
+                        self.after(0, lambda: open_path(path))
+            except Exception:
+                self.after(0, lambda: open_path(path))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _voice_play_stop(self):
+        try:
+            if os.name == "nt":
+                import winsound
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            else:
+                p = getattr(self, "_voice_aproc", None)
+                if p is not None and p.poll() is None:
+                    p.terminate()
+        except Exception:
+            pass
+
+    def _voice_drag_init(self, event, path):
+        if not path or not os.path.exists(path):
+            return "refuse_drop"
+        self._drag_out = True
+        self._voice_drag_path = path
+        self._voice_drag_watch()
+        return ("copy", DND_FILES, (os.path.abspath(path).replace("\\", "/"),))
+
+    def _voice_drag_end(self, event):
+        self._voice_drag_path = None
+        self.after(300, lambda: setattr(self, "_drag_out", False))
+        return event.action
+
+    def _voice_drag_watch(self):
+        if not self._voice_drag_path:
+            return
+        try:
+            x, y = self.winfo_pointerxy()
+            w = self.winfo_containing(x, y)
+        except Exception:
+            w = None
+        target = None
+        while w is not None:
+            for key, nav in self.nav.items():
+                if w is nav or w in (getattr(nav, "ic", None), getattr(nav, "tx", None)):
+                    if key in ("audio", "srt"):
+                        target = key
+                    break
+            if target:
+                break
+            w = getattr(w, "master", None)
+        if target and self.cur != target:
+            self.show(target)
+        if self._voice_drag_path:
+            self.after(120, self._voice_drag_watch)
+
+    def _voice_use_in_project(self, path):
+        ext = os.path.splitext(path)[1].lower()
+        if ext in AUDIO_EXTS:
+            self.set_audio(path)
+            self.show("audio")
+            self.note(f"Audio set: {os.path.basename(path)}")
+        elif ext == ".srt":
+            self.set_srt(path)
+            self.show("srt")
+            self.note(f"SRT set: {os.path.basename(path)}")
+
+    def _voice_use_folder(self, name):
+        folder = os.path.join(VOICE_OUTPUT, name)
+        mp3 = srt = corr = None
+        for fn in sorted(os.listdir(folder)):
+            fp = os.path.join(folder, fn)
+            e = os.path.splitext(fn)[1].lower()
+            if e in AUDIO_EXTS and not mp3:
+                mp3 = fp
+            elif e == ".srt":
+                if fn.startswith(VOICE_CORR_PREFIX):
+                    corr = corr or fp
+                else:
+                    srt = srt or fp
+        use_srt = corr or srt
+        if mp3:
+            self.set_audio(mp3)
+        if use_srt:
+            self.set_srt(use_srt)
+        sp = _voice_find_lb(name)                       # line break script -> Script section
+        if not sp:
+            for base in (VOICE_DONE, VOICE_SCRIPTS):
+                p = os.path.join(base, f"{name}.txt")
+                if os.path.exists(p):
+                    sp = p
+                    break
+        if sp:
+            self.set_script_file(sp)
+        self.show("audio" if mp3 else "srt")
+        extra = "corrected SRT" if corr else "SRT"
+        self.note(f"\u2713 {name} project e bosheche (audio / {extra} / script)")
+
+    def voice_ask(self, msg):
+        ev = threading.Event()
+
+        def show():
+            messagebox.showinfo("Apnar kaj dorkar", msg)
+            ev.set()
+        self.after(0, show)
+        ev.wait()
+
+    def voice_toggle_chrome(self):
+        self._voice_chrome_hidden = not self._voice_chrome_hidden
+        self.voice_hide_btn.configure(
+            text="\U0001f441 Unhide Chrome" if self._voice_chrome_hidden else "\U0001f441 Hide Chrome")
+        for r_ in list(self._voice_runners):
+            try:
+                r_.set_chrome_hidden(self._voice_chrome_hidden)
+            except Exception:
+                pass
+        self.note("Chrome hidden — onno kaj korte paren" if self._voice_chrome_hidden
+                  else "Chrome visible — automation dekhte parben")
+
+    def voice_setup_profile(self):
+        if self._voice_thread and self._voice_thread.is_alive():
+            messagebox.showwarning("Busy", "Age Voice+SRT STOP korun.")
+            return
+        ok, err = _ensure_playwright()
+        if not ok:
+            messagebox.showerror("Playwright", f"Install fail:\n{err}")
+            return
+        self.voice_log_line("Chrome Profile Setup shuru...")
+        self._voice_thread = threading.Thread(
+            target=lambda: voice_profile_setup(self.voice_log_line), daemon=True)
+        self._voice_thread.start()
+
+    def voice_fix_srt(self, name):
+        if self._voice_alive():
+            messagebox.showinfo("Busy", "Voice+SRT cholche — age shesh hok ba STOP korun.")
+            return
+        if self.proc or self.busy:
+            messagebox.showinfo("Busy", "Export cholche — shesh hole chalan.")
+            return
+        ok, err = _ensure_playwright()
+        if not ok:
+            messagebox.showerror("Playwright", f"Install lagbe:\n{err}")
+            return
+        self.voice_save_settings(silent=True)
+        self._voice_stop.clear()
+        self.voice_start_btn.configure(state="disabled")
+        self.voice_stop_btn.configure(state="normal")
+        self.voice_clear_btn.configure(state="disabled")
+        self.voice_status.configure(text="Gemini\u2026", fg=ACCENT)
+        cfg = dict(self._voice_cfg)
+        cfg["output_dir"] = VOICE_OUTPUT
+
+        def work():
+            r = None
+            try:
+                r = VoiceRunner(cfg, self.voice_log_line, self.voice_ask, self._voice_stop,
+                                chrome_hidden=self._voice_chrome_hidden)
+                self._voice_runners.append(r)
+                r.run_gemini_only(name)
+                self.voice_log_line("--- shesh ---")
+            except VoiceStopped:
+                self.voice_log_line("--- STOP kora hoyeche ---")
+            except Exception as e:
+                self.voice_log_line(f"ERROR: {str(e).splitlines()[0][:220]}")
+            finally:
+                if r in self._voice_runners:
+                    self._voice_runners.remove(r)
+                self.after(0, self._voice_finish)
+
+        self._voice_thread = threading.Thread(target=work, daemon=True)
+        self._voice_thread.start()
+
+    def voice_gemini_login(self):
+        if self._voice_alive():
+            messagebox.showwarning("Busy", "Age Voice+SRT STOP korun.")
+            return
+        ok, err = _ensure_playwright()
+        if not ok:
+            messagebox.showerror("Playwright", f"Install fail:\n{err}")
+            return
+        if not os.path.isdir(VOICE_PROFILE):
+            messagebox.showwarning("Chrome profile", "Age 'Chrome Profile Setup' chalan.")
+            return
+        try:
+            dflt = int(self._voice_cfg.get("threads") or 1)
+        except (TypeError, ValueError):
+            dflt = 1
+        n = simpledialog.askinteger("Gemini accounts", "Koyta Gemini account login korben? (1-5)",
+                                    initialvalue=max(1, min(5, dflt)), minvalue=1, maxvalue=5, parent=self)
+        if not n:
+            return
+        done = [i for i in range(1, n + 1) if os.path.exists(os.path.join(
+            VOICE_PROFILE if i == 1 else os.path.join(VOICE_CLONES, f"t{i}"), ".gemini_ok"))]
+        redo = False
+        if done:
+            redo = messagebox.askyesno(
+                "Gemini login", f"Account {', '.join(map(str, done))} e login kora ache.\n\n"
+                                "Ogulo abar login korbo? (No = skip kore baki gulo)")
+        self.voice_log_line(f"Gemini Login Setup shuru ({n} ta account)...")
+        self._voice_thread = threading.Thread(
+            target=lambda: voice_gemini_login_setup(n, redo, self.voice_log_line), daemon=True)
+        self._voice_thread.start()
+
+    def voice_start(self):
+        if self._voice_thread and self._voice_thread.is_alive():
+            return
+        if self.proc or self.busy:
+            messagebox.showinfo("Busy", "Export cholche — shesh hole Voice+SRT chalan.")
+            return
+        self.voice_save_settings()
+        self.voice_save_accounts()
+        ok, err = _ensure_playwright()
+        if not ok:
+            messagebox.showerror("Playwright", f"Install lagbe:\n{err}")
+            return
+        files = sorted(
+            [os.path.join(VOICE_SCRIPTS, f) for f in os.listdir(VOICE_SCRIPTS)
+             if f.lower().endswith(".txt") and os.path.isfile(os.path.join(VOICE_SCRIPTS, f))])
+        if not files:
+            messagebox.showwarning("Scripts", "Queue e kono script nei. Age script save korun.")
+            return
+        self._voice_stop.clear()
+        self.voice_start_btn.configure(state="disabled")
+        self.voice_stop_btn.configure(state="normal")
+        self.voice_status.configure(text="Running\u2026", fg=ACCENT)
+        cfg = dict(self._voice_cfg)
+        cfg["output_dir"] = VOICE_OUTPUT
+        self.voice_clear_btn.configure(state="disabled")
+        self.voice_atext.configure(state="disabled")
+        del self._voice_runners[:]
+
+        def work():
+            try:
+                voice_run_all(cfg, files, self.voice_log_line, self.voice_ask, self._voice_stop,
+                              lambda: self._voice_chrome_hidden, self._voice_runners)
+                self.voice_log_line("--- shesh ---")
+            except VoiceStopped:
+                self.voice_log_line("--- STOP kora hoyeche ---")
+            except Exception as e:
+                self.voice_log_line(f"ERROR: {e}")
+            finally:
+                del self._voice_runners[:]
+                self.after(0, self._voice_finish)
+
+        self._voice_thread = threading.Thread(target=work, daemon=True)
+        self._voice_thread.start()
+
+    def _voice_finish(self):
+        self.voice_start_btn.configure(state="normal")
+        self.voice_stop_btn.configure(state="disabled")
+        self.voice_clear_btn.configure(state="normal")
+        self.voice_status.configure(text="Ready", fg=MUTED)
+        cur = self._voice_cur_script
+        if cur and not os.path.exists(os.path.join(VOICE_SCRIPTS, cur)):
+            self.voice_new_script()          # script ta done e chole geche
+        self.refresh_voice()
+
+    def _voice_wipe_dir(self, path):
+        n = 0
+        if not os.path.isdir(path):
+            return 0
+        for fn in os.listdir(path):
+            fp = os.path.join(path, fn)
+            try:
+                if os.path.isdir(fp) and not os.path.islink(fp):
+                    rm_tree(fp)
+                else:
+                    try:
+                        os.chmod(fp, stat.S_IWRITE)
+                    except Exception:
+                        pass
+                    os.remove(fp)
+                n += 1
+            except Exception:
+                pass
+        return n
+
+    def voice_clear_all(self):
+        """Voice+SRT: script queue, generated MP3/SRT (disk theke), log — sob muchhe dey. Accounts thake."""
+        if self._voice_alive():
+            messagebox.showinfo("Busy", "Voice+SRT cholche — age STOP koro, tarpor Clear All.")
+            return
+        if not messagebox.askyesno(
+                "Clear All — Voice+SRT",
+                "Voice+SRT er sob muchhe dibo?\n\n"
+                "• Script queue (done shoho)\n"
+                "• Generated MP3 + SRT (computer theke delete hobe)\n"
+                "• Log / debug file\n\n"
+                "Accounts mail, Settings, Chrome profile thakbe.\n"
+                "(Project e already boshano audio/SRT muchbe na.)", icon="warning"):
+            return
+        self._voice_play_stop()
+        self._voice_drag_path = None
+        for k in ("script", "acct", "cfg"):
+            j = self._voice_jobs.pop(k, None)
+            if j:
+                try:
+                    self.after_cancel(j)
+                except Exception:
+                    pass
+        for d in (VOICE_OUTPUT, VOICE_DEBUG):
+            self._voice_wipe_dir(d)
+        if os.path.isdir(VOICE_SCRIPTS):
+            for fn in os.listdir(VOICE_SCRIPTS):
+                fp = os.path.join(VOICE_SCRIPTS, fn)
+                if os.path.isfile(fp):
+                    try:
+                        os.remove(fp)
+                    except Exception:
+                        pass
+        self._voice_wipe_dir(VOICE_DONE)
+        self._voice_wipe_dir(VOICE_LB)
+        for fp in (VOICE_LOG, os.path.join(tempfile.gettempdir(), "voice_preview.wav")):
+            try:
+                os.remove(fp)
+            except Exception:
+                pass
+        _voice_ensure_dirs()
+        self.voice_new_script()
+        self.voice_log.configure(state="normal")
+        self.voice_log.delete("1.0", "end")
+        self.voice_log.configure(state="disabled")
+        self.voice_status.configure(text="Ready", fg=MUTED)
+        self.voice_refresh_scripts()
+        self.voice_refresh_results()
+        self.refresh_usage()
+        self.note("✓ Voice+SRT sob faka (accounts thakche)", OK)
+
+    def voice_stop(self):
+        self._voice_stop.set()
+        self.voice_log_line("Stop kora hochhe\u2026")
+
+
+# ═════════════════════════════ VOICE + SRT AUTOMATION ═════════════════════════════
+# Speechify Studio (voice) -> VeePN (location) -> Zamzar (MP3 to SRT)
+# Output: WORKSPACE/VoiceSRT/Output/<script-name>/{name}.mp3 + {name}.srt
+
+from pathlib import Path as _Path
+from urllib.parse import urlparse as _urlparse
+
+VOICE_BASE = os.path.join(WORKSPACE, "VoiceSRT")
+VOICE_SCRIPTS = os.path.join(VOICE_BASE, "Scripts")
+VOICE_DONE = os.path.join(VOICE_SCRIPTS, "done")
+VOICE_PROFILE = os.path.join(VOICE_BASE, "chrome_profile")
+VOICE_ACCOUNTS = os.path.join(VOICE_BASE, "accounts.txt")
+VOICE_USED = os.path.join(VOICE_BASE, "accounts_used.txt")
+VOICE_CONFIG = os.path.join(VOICE_BASE, "config.json")
+VOICE_LOG = os.path.join(VOICE_BASE, "log.txt")
+VOICE_OUTPUT = os.path.join(VOICE_BASE, "Output")
+VOICE_DEBUG = os.path.join(VOICE_BASE, "debug")
+VOICE_LB = os.path.join(VOICE_SCRIPTS, "linebreak")          # "line break script" gulo (Gemini te jabe)
+VOICE_LB_DONE = os.path.join(VOICE_DONE, "linebreak")
+VOICE_PROMPT = os.path.join(VOICE_BASE, "prompt.txt")        # Gemini prompt (user edit korte pare)
+VOICE_CORR_PREFIX = "corrected srt - "
+GEMINI_URL = "https://gemini.google.com/"
+
+VOICE_DEFAULT_PROMPT = r'''আমার কাছে দুটো ফাইল আছে:
+1. **SRT file** (CapCut দিয়ে auto-generate করা) — এতে timing আছে 
+   কিন্তু text ভুল থাকতে পারে। যেমন:
+   - কিছু words missing থাকতে পারে
+   - কিছু extra words থাকতে পারে  
+   - কিছু words misspelled বা wrong হতে পারে
+   - একটা sentence কে SRT কয়েকটা block এ ভাগ করে রাখতে পারে
+   - বা কয়েকটা sentence কে একটা block এ রাখতে পারে
+2. **Script file** — এটাই 100% correct। এখানে কোনো error নেই।
+---
+**তোমার কাজ:**
+Script file-এর প্রতিটি sentence-এর জন্য সঠিক timing বের করতে হবে।
+**কীভাবে করবে:**
+- SRT-এর text দেখে বুঝবে কোন word কোন time-এ আছে।
+  তারপর script-এর sentence মিলিয়ে দেখবে সেই sentence 
+  কোন SRT block-এ শুরু হয়েছে এবং কোথায় শেষ হয়েছে।
+- যদি script-এর একটা sentence দুটো SRT block-এর মাঝে ভাগ হয়ে যায়,
+  তাহলে নিজে calculate করে বের করবে sentence-টা ঠিক কোথায় শেষ হয়।
+  **Calculation পদ্ধতি:**
+  ধরো SRT block এর duration = X ms, এবং ওই block এ মোট N টা word আছে।
+  তাহলে প্রতিটা word এর সময় = X ÷ N ms।
+  Script এর sentence যতটুকু ওই block এ পড়েছে সেই word count × (X ÷ N) 
+  যোগ করলেই sentence এর end time পাবে।
+- পুরো script-কে একটা continuous sequence হিসেবে treat করবে।
+  কোনো sentence আলাদাভাবে match করবে না।
+  একবার যে SRT position পার হয়ে গেছে পিছনে যাবে না।
+  এটা না করলে common words এর কারণে timing gap তৈরি হবে।
+- SRT-তে কোনো word ভুল বা missing থাকলে script দেখে 
+  বুঝে নেবে আসলে ওই জায়গায় কোন sentence চলছে।
+- Output-এ সবসময় script-এর text লিখবে, 
+  কখনো SRT-র ভুল text লিখবে না।
+---
+**Output format (SRT):**
+
+1
+00:00:00,000 --> 00:00:03,500
+[Script-এর sentence 1]
+
+2
+00:00:03,500 --> 00:00:05,100
+[Script-এর sentence 2]
+
+এভাবে script-এর সব sentence-এর জন্য। প্রতিটা block-এর পর একটা ফাঁকা লাইন থাকবে।
+---
+🚨 **কঠোর নিয়ম (এগুলো অবশ্যই মানতে হবে, কোনো ব্যতিক্রম নেই):**
+
+**1. ফাইল delivery:**
+- Final output অবশ্যই একটা **downloadable .md ফাইল** হিসেবে দেবে। ফাইলের নাম হবে `output.md`।
+- শুধু chat-এ SRT লিখে দেওয়া **নিষিদ্ধ**। .md ফাইল তৈরি করে download link/button দিতেই হবে।
+- .md ফাইলের ভেতরের content হবে সরাসরি plain SRT text। ফাইলের ভেতরে কোনো code fence (```), heading, bold, italic, bullet বা অন্য কোনো Markdown formatting ব্যবহার করবে না।
+- .md বানানো সম্ভব না হলে `output.txt` বানাবে। কোনোভাবেই ফাইল বানাতে না পারলে, পুরো SRT **একটা single code block-এর ভেতরে** দেবে, যেন আমি এক ক্লিকে copy করতে পারি। code block-এর বাইরে কিছু লিখবে না।
+
+**2. ফাইলের ভেতরে শুধু SRT, আর কিছু না:**
+- ফাইলে শুধু এই তিনটা জিনিস থাকবে: block নম্বর, timing লাইন, আর script-এর sentence।
+- কোনো sentence-এর শেষে বা শুরুতে **একটা extra character, word, symbol, নোট, মন্তব্য, বন্ধনী, reference, citation, emoji বা চিহ্ন** যোগ করা যাবে না।
+  (যেমন: [cite], [1], (note), *, **, ✓, "..." ইত্যাদি কিছুই না)
+- ফাইলের শুরুতে বা শেষে কোনো ভূমিকা, শিরোনাম, ব্যাখ্যা, সারাংশ, "Here is your file" বা "Done" ধরনের লেখা থাকবে না।
+- Script-এর sentence হুবহু যেমন আছে তেমন কপি করবে: একটা অক্ষর, দাড়ি, কমা বা বানান পরিবর্তন করবে না।
+
+**3. Chat-এ কী লিখবে:**
+- ফাইল দেওয়ার পর chat-এ সর্বোচ্চ **একটা ছোট লাইন** লিখবে (যেমন: "ফাইল তৈরি হয়েছে")। এর বেশি কিছু না।
+- আমি আলাদা করে জিজ্ঞেস না করলে কোনো ব্যাখ্যা, calculation বা timing-এর হিসাব দেখাবে না।
+
+**4. ফাইল দেওয়ার আগে নিজে যাচাই করবে (চুপচাপ, আমাকে না দেখিয়ে):**
+- Script-এর সব sentence ফাইলে আছে কিনা, কোনোটা বাদ যায়নি তো?
+- প্রতিটা sentence script-এর সাথে হুবহু মিলছে কিনা?
+- কোনো extra text/চিহ্ন ঢুকে গেছে কিনা?
+- Timing কি ক্রমানুসারে আছে, একটা block-এর end time পরের block-এর start time-এর সমান বা আগে?
+- কোনো সমস্যা পেলে ঠিক করে তারপর ফাইল দেবে।
+---
+এখন আমি দুটো ফাইল attach করছি। কাজ শুরু করো।'''
+
+VOICE_DEFAULTS = {
+    "output_dir": VOICE_OUTPUT,
+    "ext_id": "",
+    "vpn_locations": "France, Netherlands, Singapore, United Kingdom, Optimal location",
+    "max_account_tries": 3,
+    "max_vpn_tries": 4,
+    "vpn_disconnect_after": True,
+    "voice_name": "Albert (M)",
+    "split_mode": "Split by Paragraphs",
+    "thread_mode": "single",
+    "threads": 1,
+    "gen_timeout_min": 20,
+    "export_timeout_min": 15,
+    "convert_timeout_min": 8,
+    "gemini_enabled": True,
+    "gemini_timeout_min": 15,
+    "gemini_tries": 2,
+}
+VOICE_FREE_LOCS = ["Optimal location", "France", "Netherlands", "Russia", "Singapore",
+                   "United Kingdom", "United States"]
+VOICE_SPLIT_MODES = ["Split by Paragraphs", "Split by Sentences", "Split by Lines"]
+VOICE_CLONES = os.path.join(VOICE_BASE, "chrome_profiles")
+VOICE_CHIP_RE = re.compile(r"\((M|F)\)\s*$")
+VOICE_ALLOWED = ("speechify.com", "zamzar.com", "google.com")
+VOICE_SIGN_IN = "https://studio.speechify.com/sign-in"
+VOICE_ORIGIN = "https://studio.speechify.com"
+VOICE_ZAMZAR = "https://www.zamzar.com/convert/mp3-to-srt/"
+
+
+def _voice_ensure_dirs():
+    for d in (VOICE_BASE, VOICE_SCRIPTS, VOICE_DONE, VOICE_OUTPUT, VOICE_DEBUG, VOICE_LB, VOICE_LB_DONE):
+        os.makedirs(d, exist_ok=True)
+
+
+def voice_prompt_read():
+    """Gemini prompt. File na thakle default prompt diye toiri hoy."""
+    _voice_ensure_dirs()
+    if not os.path.exists(VOICE_PROMPT):
+        atomic_write(VOICE_PROMPT, VOICE_DEFAULT_PROMPT)
+    try:
+        return read_text(VOICE_PROMPT)
+    except Exception:
+        return VOICE_DEFAULT_PROMPT
+
+
+def _voice_find_lb(name):
+    for base in (VOICE_LB, VOICE_LB_DONE):
+        p = os.path.join(base, f"{name}.txt")
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            return p
+    return None
+
+
+_SRT_TIME_RX = re.compile(r"^\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*$")
+
+
+def _voice_norm_line(t):
+    """Shudhu invisible/space difference ignore kore (NFC, extra space, zero-width). Baki hubohu."""
+    import unicodedata
+    t = unicodedata.normalize("NFC", t or "")
+    t = re.sub("[\u200b\u200c\u200d\ufeff]", "", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def voice_srt_match_problems(srt_text, script_lines):
+    """Shudhu sonkha milay: SRT er block sonkha == script er line sonkha. Somossha er list return kore (faka = 100% match)."""
+    texts = []
+    for blk in re.split(r"\n\s*\n", srt_text.strip()):
+        ls = [l for l in blk.strip().splitlines()]
+        if len(ls) >= 3:
+            texts.append(" ".join(x.strip() for x in ls[2:]))
+    problems = []
+    if len(texts) != len(script_lines):
+        problems.append(f"block sonkha mile nai: SRT {len(texts)}, script {len(script_lines)}")
+    return problems
+
+
+def voice_md_to_srt(md):
+    """Gemini .md output -> clean SRT text. (text, block_count) return kore."""
+    t = md.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
+    blocks, cur, open_ = [], None, False
+    for line in t.split("\n"):
+        s = line.strip()
+        if s.startswith("```"):
+            continue
+        m = _SRT_TIME_RX.match(line)
+        if m:
+            g = m.groups()
+            a = f"{int(g[0]):02d}:{g[1]}:{g[2]},{g[3].ljust(3, '0')}"
+            b = f"{int(g[4]):02d}:{g[5]}:{g[6]},{g[7].ljust(3, '0')}"
+            cur = {"t": f"{a} --> {b}", "text": []}
+            blocks.append(cur)
+            open_ = True
+        elif cur is not None and open_:
+            if not s:
+                open_ = False
+            else:
+                cur["text"].append(s)
+    blocks = [b for b in blocks if b["text"]]
+    out = []
+    for i, b in enumerate(blocks, 1):
+        out.append(f"{i}\n{b['t']}\n" + "\n".join(b["text"]))
+    return "\n\n".join(out) + ("\n" if out else ""), len(blocks)
+
+
+def _voice_load_cfg():
+    cfg = dict(VOICE_DEFAULTS)
+    cfg["output_dir"] = VOICE_OUTPUT
+    if os.path.exists(VOICE_CONFIG):
+        try:
+            cfg.update(json.load(open(VOICE_CONFIG, encoding="utf-8")))
+        except Exception:
+            pass
+    cfg["output_dir"] = VOICE_OUTPUT  # always keep inside app workspace
+    return cfg
+
+
+def _voice_save_cfg(cfg):
+    _voice_ensure_dirs()
+    atomic_write(VOICE_CONFIG, json.dumps(cfg, indent=2, ensure_ascii=False))
+
+
+def _ensure_playwright():
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F401
+        return True, None
+    except ImportError:
+        pass
+    try:
+        subprocess.check_call([find_python(), "-m", "pip", "install", "playwright"],
+                              creationflags=NOWIN, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call([find_python(), "-m", "playwright", "install", "chromium"],
+                              creationflags=NOWIN, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        from playwright.sync_api import sync_playwright  # noqa: F401
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+class VoiceStopped(Exception):
+    pass
+
+
+class VoiceRunner:
+    """Speechify -> VeePN -> Zamzar pipeline (runs in a worker thread)."""
+
+    def __init__(self, cfg, log, ask, stop_event, chrome_hidden=False, profile=None, shared=None, tag=""):
+        self.cfg = cfg
+        self.tag = (tag + " ") if tag else ""
+        self.log = (lambda m: log(f"[{tag}] {m}")) if tag else log
+        self.shared = shared or {"lock": threading.RLock(), "reserved": set(), "ask": threading.Lock()}
+        _ask_lock = self.shared["ask"]
+
+        def _ask(msg):
+            with _ask_lock:
+                return ask(f"[{tag}] {msg}" if tag else msg)
+        self.ask = _ask
+        self.profile = profile or VOICE_PROFILE
+        self.stop = stop_event
+        self.chrome_hidden = chrome_hidden
+        self.own = set()
+        self.ctx = None
+        self.keepalive = None
+        self.last_vpn = None
+
+    def check_stop(self):
+        if self.stop.is_set():
+            raise VoiceStopped()
+
+    def sweep(self):
+        try:
+            for p in list(self.ctx.pages):
+                if p in self.own:
+                    continue
+                url = p.url or ""
+                if url in ("", "about:blank"):
+                    continue
+                host = _urlparse(url).netloc
+                if url.startswith(("chrome://", "chrome-extension://")):
+                    continue
+                if any(host.endswith(h) for h in VOICE_ALLOWED):
+                    continue
+                self.log(f"  (ad tab bondho: {host})")
+                p.close()
+        except Exception:
+            pass
+
+    def sleep(self, ms, page=None):
+        self.check_stop()
+        (page or self.keepalive).wait_for_timeout(ms)
+        self.sweep()
+
+    def new_page(self):
+        p = self.ctx.new_page()
+        self.own.add(p)
+        p.on("dialog", lambda d: d.accept())
+        if self.chrome_hidden:
+            self.move_window(p, False)
+        return p
+
+    def close_page(self, p):
+        try:
+            self.own.discard(p)
+            p.close()
+        except Exception:
+            pass
+
+    def move_window(self, page, visible):
+        try:
+            cdp = self.ctx.new_cdp_session(page)
+            wid = cdp.send("Browser.getWindowForTarget")["windowId"]
+            bounds = ({"left": 60, "top": 60, "width": 1200, "height": 800, "windowState": "normal"}
+                      if visible else
+                      {"left": -32000, "top": -32000, "width": 1366, "height": 900, "windowState": "normal"})
+            cdp.send("Browser.setWindowBounds", {"windowId": wid, "bounds": bounds})
+        except Exception:
+            pass
+
+    def set_chrome_hidden(self, hidden):
+        self.chrome_hidden = bool(hidden)
+        if not self.ctx:
+            return
+        for p in list(self.own) + list(self.ctx.pages):
+            try:
+                self.move_window(p, not self.chrome_hidden)
+            except Exception:
+                pass
+
+    def peek_account(self, skip):
+        """Ekta mail neya + reserve kore rakha — onno thread same mail nite parbe na."""
+        with self.shared["lock"]:
+            if not os.path.exists(VOICE_ACCOUNTS):
+                return None
+            for line in open(VOICE_ACCOUNTS, encoding="utf-8").read().splitlines():
+                line = line.strip()
+                if not line or line in skip or line in self.shared["reserved"]:
+                    continue
+                if ":" in line:
+                    email, pw = line.split(":", 1)
+                else:
+                    email, pw = line, line
+                self.shared["reserved"].add(line)
+                return email.strip(), pw.strip(), line
+        return None
+
+    def release_account(self, line):
+        with self.shared["lock"]:
+            self.shared["reserved"].discard(line)
+
+    def mark_used(self, line):
+        with self.shared["lock"]:
+            lines = [l.strip() for l in open(VOICE_ACCOUNTS, encoding="utf-8").read().splitlines() if l.strip()]
+            if line in lines:
+                lines.remove(line)
+            atomic_write(VOICE_ACCOUNTS, "\n".join(lines) + ("\n" if lines else ""))
+            with open(VOICE_USED, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            self.shared["reserved"].discard(line)
+
+    def debug(self, page, tag):
+        try:
+            os.makedirs(VOICE_DEBUG, exist_ok=True)
+            shot = os.path.join(VOICE_DEBUG, f"{time.strftime('%H%M%S')}_{self.tag}{tag}.png")
+            page.screenshot(path=shot)
+            txt = " ".join(page.inner_text("body").split())[:300]
+            self.log(f"  [debug] {os.path.basename(shot)} | {page.url} | {txt}")
+        except Exception:
+            pass
+
+    def dismiss_onboarding(self, page):
+        try:
+            btn = page.get_by_role("button", name=re.compile(
+                r"^(Skip|Skip for now|Got it|Maybe later|No thanks|Not now|Done|Close|Continue to Studio)$", re.I))
+            for i in range(min(btn.count(), 3)):
+                if btn.nth(i).is_visible():
+                    btn.nth(i).click(timeout=1500)
+                    page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+    def find_editor(self, page):
+        cands = [
+            lambda: page.get_by_placeholder("Type or paste your text to generate speech..."),
+            lambda: page.locator("[data-placeholder*='Type or paste']"),
+            lambda: page.locator("[placeholder*='Type or paste']"),
+            lambda: page.get_by_text(re.compile(r"Type or paste your text")).first,
+            lambda: page.locator("[contenteditable='true']").last,
+            lambda: page.locator("textarea").last,
+        ]
+        for _ in range(45):
+            self.dismiss_onboarding(page)
+            for mk in cands:
+                try:
+                    loc = mk().first
+                    if loc.is_visible():
+                        return loc
+                except Exception:
+                    continue
+            self.sleep(1500, page)
+        raise RuntimeError("Script likhar box paoa jayni")
+
+    def launch(self, pw):
+        os.makedirs(self.profile, exist_ok=True)
+        args = ["--disable-blink-features=AutomationControlled", "--start-maximized"]
+        self.ctx = pw.chromium.launch_persistent_context(
+            self.profile, channel="chrome", headless=False, accept_downloads=True,
+            no_viewport=True, ignore_default_args=["--disable-extensions", "--enable-automation"],
+            args=args)
+        try:
+            self.ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=VOICE_ORIGIN)
+        except Exception:
+            pass
+        self.keepalive = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        self.own.add(self.keepalive)
+        if self.chrome_hidden:
+            self.move_window(self.keepalive, False)
+
+    def ext_id(self):
+        if self.cfg.get("ext_id", "").strip():
+            return self.cfg["ext_id"].strip()
+        ids = set()
+        for w in list(self.ctx.service_workers) + list(self.ctx.background_pages):
+            m = re.match(r"chrome-extension://([a-p]{32})/", w.url)
+            if m:
+                ids.add(m.group(1))
+        if len(ids) == 1:
+            return ids.pop()
+        raise RuntimeError(
+            "VeePN extension ID paoa jayni. Chrome Profile Setup kore VeePN install korun, "
+            "ba Settings e Extension ID boshan.")
+
+    def open_vpn_popup(self):
+        eid = self.ext_id()
+        p = self.new_page()
+        popup = "popup.html"
+        try:
+            p.goto(f"chrome-extension://{eid}/manifest.json", timeout=20000)
+            data = json.loads(p.inner_text("body"))
+            popup = ((data.get("action") or data.get("browser_action") or {}).get("default_popup") or popup)
+        except Exception:
+            pass
+        p.goto(f"chrome-extension://{eid}/{popup}", timeout=30000)
+        p.wait_for_timeout(2500)
+        self.dismiss_popups(p)
+        return p
+
+    def dismiss_popups(self, p):
+        try:
+            for rx in (r"^\s*No,?\s*thanks\b", r"^\s*Maybe later\b", r"^\s*Not now\b"):
+                t = p.get_by_text(re.compile(rx, re.I))
+                for i in range(min(t.count(), 2)):
+                    if t.nth(i).is_visible():
+                        t.nth(i).click(timeout=2000)
+                        p.wait_for_timeout(800)
+        except Exception:
+            pass
+        for s in ("[aria-label*='close' i]", "button:has-text('Close')", "button:has-text('No thanks')",
+                  "button:has-text('Maybe later')", "button:has-text('Skip')"):
+            try:
+                loc = p.locator(s)
+                for i in range(min(loc.count(), 3)):
+                    if loc.nth(i).is_visible():
+                        loc.nth(i).click(timeout=1500)
+                        p.wait_for_timeout(400)
+            except Exception:
+                pass
+
+    def click_power(self, p, label_regex):
+        self.dismiss_popups(p)
+        t = p.get_by_text(label_regex).first
+        for _ in range(8):
+            try:
+                t.wait_for(timeout=2000)
+                break
+            except Exception:
+                self.dismiss_popups(p)
+        t.wait_for(timeout=5000)
+        try:
+            btn = t.locator("xpath=preceding::*[self::button or @role='button'][1]")
+            box = btn.bounding_box()
+            if box and box["width"] >= 80:
+                btn.click(timeout=3000)
+                return
+        except Exception:
+            pass
+        box = t.bounding_box()
+        p.mouse.click(box["x"] + box["width"] / 2, box["y"] - 145)
+
+    def is_connected(self, p):
+        self.dismiss_popups(p)
+        try:
+            return p.get_by_text(re.compile(r"^\s*Connected")).first.is_visible()
+        except Exception:
+            return False
+
+    def vpn_disconnect(self):
+        p = None
+        try:
+            p = self.open_vpn_popup()
+            if self.is_connected(p):
+                self.click_power(p, re.compile(r"^\s*Connected"))
+                p.get_by_text(re.compile(r"Connection is OFF", re.I)).first.wait_for(timeout=20000)
+                self.log("  VPN disconnect hoyeche")
+        except Exception as e:
+            self.log(f"  VPN disconnect kora gelo na: {e}")
+        finally:
+            if p:
+                self.close_page(p)
+
+    def vpn_pick(self, p, item):
+        status = re.compile(r"Connection is OFF|Disconnected", re.I)
+        for how in ("normal", "force", "mouse"):
+            self.dismiss_popups(p)
+            try:
+                if how == "normal":
+                    item.click(timeout=4000)
+                elif how == "force":
+                    item.click(timeout=3000, force=True)
+                else:
+                    b = item.bounding_box()
+                    p.mouse.click(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
+            except Exception:
+                continue
+            try:
+                p.get_by_text(status).first.wait_for(timeout=4000)
+                return
+            except Exception:
+                continue
+        raise RuntimeError("VPN location select kora jayni")
+
+    def vpn_connect(self):
+        locs = [x.strip() for x in self.cfg["vpn_locations"].split(",") if x.strip()]
+        pool = [x for x in locs if x != self.last_vpn] or locs
+        choice = random.choice(pool)
+        self.last_vpn = choice
+        self.log(f"VPN: location -> {choice}")
+        p = self.open_vpn_popup()
+        try:
+            if self.is_connected(p):
+                self.click_power(p, re.compile(r"^\s*Connected"))
+                p.get_by_text(re.compile(r"Connection is OFF", re.I)).first.wait_for(timeout=20000)
+            opened = False
+            for name in VOICE_FREE_LOCS:
+                loc = p.get_by_text(re.compile(rf"^\s*{re.escape(name)}\b")).first
+                try:
+                    if loc.is_visible():
+                        loc.click(timeout=3000)
+                        opened = True
+                        break
+                except Exception:
+                    continue
+            if not opened:
+                box = p.get_by_text("Your IP").first.bounding_box()
+                p.mouse.click(box["x"] + 100, box["y"] - 60)
+            p.wait_for_timeout(1200)
+            item = p.get_by_text(re.compile(rf"^\s*{re.escape(choice)}\b")).first
+            item.scroll_into_view_if_needed(timeout=8000)
+            self.vpn_pick(p, item)
+            p.wait_for_timeout(1200)
+            self.click_power(p, re.compile(r"Connection is OFF|Disconnected", re.I))
+            try:
+                for _ in range(15):
+                    self.dismiss_popups(p)
+                    try:
+                        p.get_by_text(re.compile(r"^\s*Connected")).first.wait_for(timeout=2000)
+                        break
+                    except Exception:
+                        continue
+                else:
+                    raise RuntimeError("connect timeout")
+            except Exception:
+                self.dismiss_popups(p)
+                self.ask("VPN connect hoyni. Extension popup thakle nijer haate bondho kore OK chapen.")
+                if not self.is_connected(p):
+                    raise RuntimeError("VPN connect hoyni")
+            self.log("  VPN connected")
+        except Exception:
+            self.debug(p, "vpn")
+            raise
+        finally:
+            self.close_page(p)
+
+    def clear_speechify_cookies(self):
+        """Shudhu Speechify cookie muchhbe — Google (Gemini) login jeno na mushe."""
+        try:
+            self.ctx.clear_cookies(domain=re.compile(r"speechify", re.I))
+            return
+        except Exception:
+            pass
+        try:                                            # purano Playwright: Google cookie save kore baki muchhe, abar boshay
+            keep = [c for c in self.ctx.cookies()
+                    if re.search(r"google|youtube|gstatic|googleusercontent", c.get("domain", ""), re.I)]
+            self.ctx.clear_cookies()
+            if keep:
+                self.ctx.add_cookies(keep)
+        except Exception:
+            pass
+
+    def speechify(self, page, email, password, text, out_mp3):
+        cfg = self.cfg
+        self.log(f"Speechify: login -> {email}")
+        self.clear_speechify_cookies()
+        page.goto(VOICE_SIGN_IN, timeout=90000)
+        try:
+            cdp = self.ctx.new_cdp_session(page)
+            cdp.send("Storage.clearDataForOrigin", {"origin": VOICE_ORIGIN, "storageTypes": "all"})
+        except Exception:
+            pass
+        page.goto(VOICE_SIGN_IN, timeout=90000)
+        page.get_by_placeholder("Email address").fill(email, timeout=30000)
+        page.get_by_placeholder("Password").fill(password)
+        page.get_by_role("button", name="Continue", exact=True).click()
+        page.get_by_text("Build Something").wait_for(timeout=60000)
+        self.log("  login hoyeche")
+        page.get_by_text("Voiceover", exact=True).first.click()
+        page.wait_for_url("**/voiceover/**", timeout=60000)
+        ta = self.find_editor(page)
+        self.select_voice(page)
+        self.sleep(500, page)
+        self.log("  script paste")
+        # button kokhono "Split & Generate (206 credits)", kokhono shudhu "Split" -- duto-i dhorbe
+        # ("Split by Paragraphs" etc. option card gulo match korbe na)
+        split_btn = page.get_by_role("button", name=re.compile(r"^\s*Split\s*(&\s*Generate.*)?$", re.I)).first
+        ta.click()
+        try:
+            page.evaluate("t => navigator.clipboard.writeText(t)", text)
+            page.keyboard.press("Control+V")
+            split_btn.wait_for(timeout=12000)
+        except Exception:
+            ta.click()
+            ta.fill(text)
+            split_btn.wait_for(timeout=15000)
+        mode = cfg.get("split_mode")
+        if mode:
+            try:
+                page.get_by_text(mode, exact=True).first.click(timeout=3000)
+            except Exception:
+                pass
+        # "Generate speech immediately after splitting" checkbox tick kora thakle button "Split & Generate" hoy
+        try:
+            cb = page.get_by_role("checkbox", name=re.compile(r"Generate speech immediately", re.I)).first
+            if cb.count() and not cb.is_checked():
+                cb.check(timeout=3000)
+                page.wait_for_timeout(400)
+        except Exception:
+            try:
+                page.get_by_text("Generate speech immediately after splitting", exact=False).first.click(timeout=2000)
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+        try:
+            lbl = (split_btn.inner_text(timeout=3000) or "").strip()
+        except Exception:
+            lbl = ""
+        split_btn.click()
+        self.log(f"  {lbl.splitlines()[0] if lbl else 'Split & Generate'}")
+        self.wait_generation(page)
+        self.export_and_download(page, out_mp3)
+
+    def select_voice(self, page):
+        name = self.cfg.get("voice_name", "Albert (M)").strip() or "Albert (M)"
+        short = name.split("(")[0].strip()
+        page.get_by_text(VOICE_CHIP_RE).first.click()
+        page.get_by_text("Voice Library", exact=True).wait_for(timeout=20000)
+
+        def find_row():
+            return (page.locator("div")
+                    .filter(has=page.get_by_text(name, exact=True))
+                    .filter(has=page.get_by_role("button", name="Use Voice"))
+                    .last)
+
+        self.log("  voice: Favorites e khujchhi")
+        page.get_by_text("Favorites", exact=True).click()
+        page.wait_for_timeout(1500)
+        found = page.get_by_text(name, exact=True).count() > 0
+        if not found:
+            self.log(f"  Library te search: {short}")
+            page.get_by_text("Library", exact=True).first.click()
+            page.wait_for_timeout(1000)
+            try:
+                page.get_by_placeholder("Search Voices").fill(short, timeout=5000)
+            except Exception:
+                page.get_by_role("textbox").first.fill(short)
+            page.wait_for_timeout(2500)
+            if page.get_by_text(name, exact=True).count() == 0:
+                self.close_voice_library(page)
+                raise RuntimeError(f"Voice '{name}' paoa jayni")
+        row = find_row()
+        use = row.get_by_role("button", name="Use Voice").first
+        use.wait_for(timeout=15000)
+        if use.is_enabled():
+            use.click()
+        page.wait_for_timeout(1000)
+        if page.get_by_text("Voice Library", exact=True).is_visible():
+            self.close_voice_library(page)
+        self.log(f"  voice: {name}")
+
+    def close_voice_library(self, page):
+        try:
+            page.get_by_role("button", name=re.compile("close", re.I)).first.click(timeout=2000)
+        except Exception:
+            try:
+                page.get_by_text("Voice Library", exact=True).locator("xpath=following::button[1]").click(timeout=2000)
+            except Exception:
+                page.keyboard.press("Escape")
+        page.wait_for_timeout(800)
+
+    def regen_missing(self, page):
+        chips = page.get_by_text(VOICE_CHIP_RE)
+        clicked = 0
+        for i in range(chips.count()):
+            self.check_stop()
+            chip = chips.nth(i)
+            try:
+                chip.scroll_into_view_if_needed(timeout=3000)
+                play = chip.locator("xpath=preceding::button[1]")
+                play.hover(timeout=3000)
+                page.wait_for_timeout(500)
+                if page.get_by_text("Regenerate block").first.is_visible():
+                    play.click()
+                    clicked += 1
+                    page.wait_for_timeout(500)
+            except Exception:
+                continue
+        return clicked
+
+    def wait_generation(self, page):
+        export = page.get_by_role("button", name="Export", exact=True)
+        timeout = self.cfg["gen_timeout_min"] * 60
+        self.sleep(6000, page)
+        for rnd in range(8):
+            t0 = time.time()
+            while not export.is_visible():
+                if time.time() - t0 > timeout:
+                    raise RuntimeError("Generate timeout")
+                self.sleep(3000, page)
+            n = self.regen_missing(page)
+            if n == 0:
+                self.log("  sob block generate hoyeche")
+                return
+            self.log(f"  {n} ta block regenerate (round {rnd + 1})")
+            self.sleep(6000, page)
+        raise RuntimeError("Kichu block generate hoyni")
+
+    def export_and_download(self, page, out_mp3):
+        timeout = self.cfg["export_timeout_min"] * 60
+        export = page.get_by_role("button", name="Export", exact=True)
+        export.click()
+        try:
+            page.get_by_text(".MP3", exact=True).click(timeout=3000)
+        except Exception:
+            pass
+        page.get_by_role("button", name="Export Project").click()
+        self.log("  exporting...")
+        try:
+            page.get_by_role("button", name="View Downloads").click(timeout=20000)
+        except Exception:
+            try:
+                export.locator("xpath=following::button[1]").click(timeout=3000)
+            except Exception:
+                pass
+        self.sleep(2000, page)
+        if "/exports" not in page.url:
+            page.goto(VOICE_ORIGIN + "/exports", wait_until="domcontentloaded", timeout=90000)
+        name = re.compile(r"^\s*Download\s*$")
+        dl = (page.get_by_role("button", name=name)
+              .or_(page.get_by_role("link", name=name))
+              .or_(page.get_by_text(name))).first
+        t0 = time.time()
+        tries = 0
+        while True:
+            self.check_stop()
+            try:
+                dl.wait_for(state="visible", timeout=8000)
+                break
+            except Exception:
+                pass
+            if time.time() - t0 > timeout:
+                self.debug(page, "export_wait")
+                raise RuntimeError("Export file ashenai (timeout)")
+            tries += 1
+            if tries == 3:
+                self.debug(page, "export_wait")
+            self.log("  export ekhono ashenai, reload...")
+            self.sleep(5000, page)
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+        self.log("  Download chapchi")
+        with page.expect_download(timeout=180000) as d:
+            dl.click()
+        os.makedirs(os.path.dirname(out_mp3), exist_ok=True)
+        d.value.save_as(out_mp3)
+        if not os.path.exists(out_mp3) or os.path.getsize(out_mp3) < 1000:
+            raise RuntimeError("MP3 download thik hoyni")
+        self.log(f"  MP3 saved: {out_mp3}")
+
+    def zamzar_dismiss(self, page):
+        try:
+            btn = page.get_by_role("button", name=re.compile(
+                r"^(Accept all|Accept All|Accept|I agree|Agree|Allow all|Got it|OK|Consent)$", re.I))
+            for i in range(min(btn.count(), 2)):
+                if btn.nth(i).is_visible():
+                    btn.nth(i).click(timeout=2000)
+                    page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+    def zamzar_uploaded(self, page, mp3_name, wait_s=30):
+        name = re.compile(re.escape(mp3_name))
+        convert = page.get_by_role("button", name=re.compile(r"^\s*Convert( Now)?\s*$", re.I)).first
+        t0 = time.time()
+        while time.time() - t0 < wait_s:
+            self.check_stop()
+            for loc in (page.get_by_text(name).first, convert):
+                try:
+                    if loc.is_visible():
+                        return True
+                except Exception:
+                    pass
+            self.sleep(1000, page)
+        return False
+
+    def zamzar_upload(self, page, mp3):
+        last = None
+        mp3_name = os.path.basename(mp3)
+        for rnd in range(3):
+            self.check_stop()
+            try:
+                btn = (page.get_by_role("button", name=re.compile(r"Choose Files?", re.I))
+                       .or_(page.get_by_text(re.compile(r"^\s*Choose Files?\s*$", re.I)))).first
+                btn.wait_for(state="visible", timeout=15000)
+                with page.expect_file_chooser(timeout=10000) as fc:
+                    btn.click(timeout=5000)
+                fc.value.set_files(mp3)
+                if self.zamzar_uploaded(page, mp3_name):
+                    return
+            except Exception as e:
+                last = e
+            try:
+                page.locator("input[type=file]").first.set_input_files(mp3, timeout=10000)
+                if self.zamzar_uploaded(page, mp3_name, 20):
+                    return
+            except Exception as e:
+                last = e
+            self.log("  upload hoyni, reload...")
+            self.debug(page, "zamzar_upload")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+            self.sleep(3000, page)
+            self.zamzar_dismiss(page)
+        raise RuntimeError("Zamzar e file upload hoyni" + (f": {last}" if last else ""))
+
+    def zamzar_convert_and_wait(self, page):
+        now_rx = re.compile(r"^\s*Convert Now\s*$", re.I)
+        conv_rx = re.compile(r"^\s*Convert\s*$", re.I)
+        dl_rx = re.compile(r"^\s*Download\s*$")
+        now = (page.get_by_role("button", name=now_rx).or_(page.get_by_role("link", name=now_rx))
+               .or_(page.get_by_text(now_rx))).first
+        pop = (page.get_by_role("button", name=conv_rx).or_(page.get_by_role("link", name=conv_rx))
+               .or_(page.get_by_text(conv_rx))).first
+        dl = (page.get_by_role("button", name=dl_rx).or_(page.get_by_role("link", name=dl_rx))
+              .or_(page.get_by_text(dl_rx))).first
+
+        def visible(loc):
+            try:
+                return loc.is_visible()
+            except Exception:
+                return False
+
+        deadline = time.time() + self.cfg["convert_timeout_min"] * 60
+        started = False
+        last_now = 0.0
+        while time.time() < deadline:
+            self.check_stop()
+            if visible(dl) and ("/files/" in (page.url or "")
+                                or visible(page.get_by_text(re.compile(r"All Done", re.I)).first)):
+                return dl
+            if not started:
+                if visible(pop):
+                    try:
+                        pop.click(timeout=4000)
+                        self.log("  converting...")
+                        started = True
+                    except Exception:
+                        pass
+                elif visible(now) and time.time() - last_now > 6:
+                    try:
+                        now.click(timeout=4000)
+                        self.log("  Convert Now")
+                    except Exception:
+                        pass
+                    last_now = time.time()
+            self.sleep(1500, page)
+        raise RuntimeError("Zamzar convert timeout")
+
+    def zamzar(self, page, mp3, out_srt):
+        self.log("Zamzar: upload")
+        page.goto(VOICE_ZAMZAR, wait_until="domcontentloaded", timeout=90000)
+        self.sleep(3000, page)
+        self.zamzar_dismiss(page)
+        self.zamzar_upload(page, mp3)
+        self.log("  upload ok")
+        self.sleep(2000, page)
+        dl = self.zamzar_convert_and_wait(page)
+        self.log("  SRT ready")
+        with page.expect_download(timeout=90000) as d:
+            dl.click(timeout=10000)
+        d.value.save_as(out_srt)
+        if not os.path.exists(out_srt) or os.path.getsize(out_srt) == 0:
+            raise RuntimeError("SRT download thik hoyni")
+        self.log(f"  SRT saved: {out_srt}")
+
+    def do_speechify(self, text, mp3):
+        if self.cfg.get("vpn_disconnect_after", True):
+            self.vpn_disconnect()
+        skipped = set()
+        for attempt in range(int(self.cfg["max_account_tries"])):
+            self.check_stop()
+            acct = self.peek_account(skipped)
+            if not acct:
+                raise RuntimeError("accounts.txt e aar mail nei")
+            page = self.new_page()
+            try:
+                self.speechify(page, acct[0], acct[1], text, mp3)
+                self.mark_used(acct[2])
+                return
+            except VoiceStopped:
+                self.release_account(acct[2])
+                raise
+            except Exception as e:
+                self.log(f"  Speechify fail ({acct[0]}): {str(e).splitlines()[0][:200]}")
+                self.debug(page, "speechify")
+                skipped.add(acct[2])
+                self.release_account(acct[2])
+            finally:
+                self.close_page(page)
+        raise RuntimeError("Speechify e sob chesta fail")
+
+    def do_srt(self, mp3, srt):
+        for attempt in range(int(self.cfg["max_vpn_tries"])):
+            self.check_stop()
+            try:
+                self.vpn_connect()
+            except VoiceStopped:
+                raise
+            except Exception as e:
+                self.log(f"  VPN problem: {str(e).splitlines()[0][:200]}")
+                continue
+            page = self.new_page()
+            try:
+                self.zamzar(page, mp3, srt)
+                return
+            except VoiceStopped:
+                raise
+            except Exception as e:
+                self.log(f"  Zamzar fail: {str(e).splitlines()[0][:200]}")
+                self.debug(page, "zamzar")
+            finally:
+                self.close_page(page)
+        raise RuntimeError("Zamzar e sob chesta fail")
+
+    # ───────────────────────── Gemini: SRT correction ─────────────────────────
+    def gemini_signed_out(self, page):
+        try:
+            if "accounts.google.com" in (page.url or ""):
+                return True
+            return page.get_by_role("link", name=re.compile(r"^\s*Sign in\s*$", re.I)).first.is_visible()
+        except Exception:
+            return False
+
+    def gemini_open(self, page):
+        page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=90000)
+        self.sleep(3500, page)
+        if self.gemini_signed_out(page):
+            raise RuntimeError("Gemini te login nei — Settings > Gemini > 'Gemini Login Setup' chalan "
+                               "(automation Chrome e Google login block kore)")
+
+    def gemini_agree(self, page):
+        """"Creating content from images and files" popup — Agree chapa (onek poddhoti try kore)."""
+        title = page.get_by_text(re.compile(r"Creating content from images and files", re.I)).first
+
+        def shown():
+            try:
+                return title.is_visible()
+            except Exception:
+                return False
+
+        if not shown():
+            return False
+        rx = re.compile(r"^\s*(I\s+)?Agree\s*$", re.I)
+
+        def js_click():
+            page.evaluate("""() => {
+                const els = [...document.querySelectorAll('button, [role=button], span, div')];
+                const t = els.filter(e => /^\\s*(I\\s+)?agree\\s*$/i.test(e.textContent || '') && e.children.length < 3);
+                if (t.length) { const e = t[t.length - 1]; (e.closest('button') || e).click(); }
+            }""")
+
+        def mouse_click():
+            box = page.get_by_text(rx).last.bounding_box()
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+        steps = [
+            lambda: page.get_by_role("button", name=rx).first.click(timeout=2500),
+            lambda: page.locator("button:has-text('Agree')").last.click(timeout=2500, force=True),
+            lambda: page.get_by_text(rx).last.click(timeout=2500, force=True),
+            mouse_click,
+            js_click,
+            lambda: page.keyboard.press("Enter"),
+        ]
+        for st in steps:
+            try:
+                st()
+            except Exception:
+                pass
+            page.wait_for_timeout(900)
+            if not shown():
+                self.log("  Gemini popup: Agree")
+                return True
+        self.log("  Gemini popup: Agree button click hoyni")
+        self.debug(page, "gemini_agree")
+        return False
+
+    def gemini_editor(self, page):
+        cands = [
+            lambda: page.locator("div.ql-editor[contenteditable='true']"),
+            lambda: page.locator("rich-textarea [contenteditable='true']"),
+            lambda: page.get_by_role("textbox"),
+            lambda: page.locator("[contenteditable='true']"),
+        ]
+        for _ in range(40):
+            self.dismiss_onboarding(page)
+            for mk in cands:
+                try:
+                    loc = mk().first
+                    if loc.is_visible():
+                        return loc
+                except Exception:
+                    continue
+            self.sleep(1500, page)
+        raise RuntimeError("Gemini text box paoa jayni")
+
+    def gemini_fill_prompt(self, page, ta, prompt):
+        want = len(re.sub(r"\s+", "", prompt))
+
+        def got():
+            try:
+                return len(re.sub(r"\s+", "", ta.inner_text(timeout=3000)))
+            except Exception:
+                return 0
+
+        def clear():
+            try:
+                ta.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+            except Exception:
+                pass
+
+        ta.click()
+        try:
+            page.keyboard.insert_text(prompt)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+        if got() >= want * 0.9:
+            return
+        clear()
+        try:
+            ta.fill(prompt, timeout=15000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+        if got() >= want * 0.9:
+            return
+        clear()
+        try:                                    # last resort: clipboard paste
+            page.evaluate("t => navigator.clipboard.writeText(t)", prompt)
+            ta.click()
+            page.keyboard.press("Control+V")
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
+        if got() < want * 0.9:
+            raise RuntimeError("Prompt paste hoyni")
+
+    def gemini_upload(self, page, files):
+        item_rx = re.compile(r"^\s*Upload files?\b", re.I)
+        plus = [
+            lambda: page.locator("button[aria-label*='upload' i]"),
+            lambda: page.get_by_role("button", name=re.compile(r"upload|add files?|attach|add to prompt", re.I)),
+            lambda: page.locator("button[aria-label*='Add' i]"),
+            lambda: page.locator("button[aria-label*='menu' i]"),
+        ]
+        last = None
+        for mk in plus:
+            try:
+                btn = mk().first
+                if not btn.is_visible():
+                    continue
+                btn.click(timeout=4000)
+                item = (page.get_by_role("menuitem", name=item_rx).or_(page.get_by_text(item_rx))).first
+                item.wait_for(state="visible", timeout=5000)
+                with page.expect_file_chooser(timeout=25000) as fc:
+                    item.click(timeout=4000)
+                    for _ in range(8):              # Agree popup ashle chooser tar por-i khole
+                        page.wait_for_timeout(600)
+                        if self.gemini_agree(page):
+                            break
+                fc.value.set_files(files)
+                self.gemini_agree(page)
+                return
+            except Exception as e:
+                last = e
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+        try:
+            page.locator("input[type=file]").first.set_input_files(files, timeout=8000)
+            return
+        except Exception as e:
+            last = e
+        raise RuntimeError("Gemini e file upload hoyni: " + str(last).splitlines()[0][:120] if last else "upload")
+
+    def gemini_send_btn(self, page):
+        return page.locator("button[aria-label*='Submit' i], button[aria-label*='Send' i]").last
+
+    def gemini_wait_ready(self, page, names, timeout=180):
+        """Upload shesh hole (Submit button enable) sathe sathe-i jabe — 0.5s por por check."""
+        send = self.gemini_send_btn(page)
+        bad = page.get_by_text(re.compile(r"isn.t supported|not supported|unsupported|can.t upload|couldn.t upload", re.I)).first
+        self.sleep(1200, page)                     # upload shuru howar jonno ektu somoy
+        t0 = time.time()
+        ok = 0
+        while time.time() - t0 < timeout:
+            self.check_stop()
+            self.gemini_agree(page)
+            try:
+                if bad.is_visible():
+                    raise RuntimeError("UNSUPPORTED file type")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+            try:
+                enabled = send.is_visible() and send.is_enabled() and \
+                    (send.get_attribute("aria-disabled") or "").lower() != "true"
+            except Exception:
+                enabled = False
+            ok = ok + 1 if enabled else 0
+            if ok >= 2:
+                return
+            self.sleep(500, page)
+        raise RuntimeError("Gemini upload complete hoyni (timeout)")
+
+    def gemini_wait_done(self, page):
+        timeout = int(self.cfg.get("gemini_timeout_min", 15)) * 60
+        export = page.get_by_role("button", name=re.compile(r"^\s*Export\b", re.I))
+        open_card = self.gemini_open_card_btn(page)
+        stop = page.locator("button[aria-label*='Stop' i]")
+        limit = page.get_by_text(re.compile(r"reached your limit|usage limit|too many requests", re.I)).first
+        t0 = time.time()
+        stable = 0
+        idle_since = None
+        while True:
+            self.check_stop()
+            if time.time() - t0 > timeout:
+                raise RuntimeError("Gemini timeout")
+            try:
+                if limit.is_visible():
+                    raise RuntimeError("Gemini limit/usage cap hoye geche")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+            try:
+                running = stop.first.is_visible()
+            except Exception:
+                running = False
+            try:
+                ex = export.last
+                ex_ok = ex.is_visible() and ex.is_enabled()
+            except Exception:
+                ex_ok = False
+            if not ex_ok:                       # Export na thakle: file card er "Open" button
+                try:
+                    oc = open_card.last
+                    ex_ok = oc.is_visible() and oc.is_enabled()
+                except Exception:
+                    ex_ok = False
+            if ex_ok and not running:
+                stable += 1
+                if stable >= 2:
+                    self.sleep(800, page)
+                    return
+            else:
+                stable = 0
+            if not running and not ex_ok and time.time() - t0 > 40:
+                idle_since = idle_since or time.time()
+                if time.time() - idle_since > 60:
+                    raise RuntimeError("Gemini file (Export) toiri kore ni")
+            else:
+                idle_since = None
+            self.sleep(1000, page)
+
+    def gemini_open_card_btn(self, page):
+        """File card (output / MD) er 'Open' button — jokhon Export button thake na."""
+        return page.locator("button, a, [role='button']").filter(
+            has_text=re.compile(r"^\s*Open\s*$", re.I))
+
+    def _gemini_save_ok(self, dest_md):
+        if not os.path.exists(dest_md) or os.path.getsize(dest_md) == 0:
+            raise RuntimeError(".md download thik hoyni")
+
+    def gemini_download_via_export(self, page, dest_md):
+        export = page.get_by_role("button", name=re.compile(r"^\s*Export\b", re.I)).last
+        export.click(timeout=8000)
+        md = (page.get_by_role("menuitem", name=re.compile(r"^\s*\.md\s*$", re.I))
+              .or_(page.get_by_text(".md", exact=True))).first
+        md.wait_for(state="visible", timeout=10000)
+        with page.expect_download(timeout=60000) as d:
+            md.click(timeout=5000)
+        d.value.save_as(dest_md)
+        self._gemini_save_ok(dest_md)
+
+    def gemini_download_via_open(self, page, dest_md):
+        """Card e 'Open' -> file viewer khole -> upor daan dike Download button."""
+        self.log("  Export nai — file card er 'Open' button e click")
+        card = self.gemini_open_card_btn(page).last
+        card.scroll_into_view_if_needed(timeout=5000)
+        card.click(timeout=8000)
+        self.sleep(1500, page)
+        dl_sel = ("button[aria-label*='Download' i], [role='button'][aria-label*='Download' i], "
+                  "a[aria-label*='Download' i], button[title*='Download' i], "
+                  "[data-tooltip*='Download' i], [mattooltip*='Download' i]")
+        last = None
+        for _ in range(3):
+            targets = [page] + [f for f in page.frames if f != page.main_frame]
+            for t in targets:
+                try:
+                    btn = t.locator(dl_sel).or_(
+                        t.get_by_role("button", name=re.compile(r"download", re.I))).last
+                    btn.wait_for(state="visible", timeout=6000)
+                    with page.expect_download(timeout=60000) as d:
+                        btn.click(timeout=5000)
+                    d.value.save_as(dest_md)
+                    self._gemini_save_ok(dest_md)
+                    try:
+                        page.keyboard.press("Escape")      # viewer bondho
+                    except Exception:
+                        pass
+                    return
+                except Exception as e:
+                    last = e
+            self.sleep(1500, page)
+        raise RuntimeError("Viewer e Download button kaj korenni: " + (str(last).splitlines()[0][:100] if last else ""))
+
+    def gemini_download_md(self, page, dest_md):
+        export = page.get_by_role("button", name=re.compile(r"^\s*Export\b", re.I))
+        try:
+            has_export = export.last.is_visible()
+        except Exception:
+            has_export = False
+        order = ([self.gemini_download_via_export, self.gemini_download_via_open] if has_export
+                 else [self.gemini_download_via_open, self.gemini_download_via_export])
+        err = None
+        for fn in order:
+            try:
+                fn(page, dest_md)
+                return
+            except Exception as e:
+                err = e
+                self.log(f"  download method fail ({fn.__name__}): {str(e).splitlines()[0][:100]}")
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+        raise err if err else RuntimeError(".md download thik hoyni")
+
+    def gemini_once(self, page, prompt, files, lb_path, out_srt, strict):
+        self.log("Gemini: open")
+        self.gemini_open(page)
+        ta = self.gemini_editor(page)
+        self.log("  prompt paste")
+        self.gemini_fill_prompt(page, ta, prompt)
+        self.log("  script + SRT upload")
+        self.gemini_upload(page, files)
+        self.gemini_wait_ready(page, [os.path.basename(f) for f in files])
+        self.log("  submit")
+        sent = False
+        for how in range(3):
+            try:
+                if how == 0:
+                    self.gemini_send_btn(page).click(timeout=4000)
+                elif how == 1:
+                    self.gemini_send_btn(page).click(timeout=3000, force=True)
+                else:
+                    ta.click()
+                    page.keyboard.press("Enter")
+            except Exception:
+                pass
+            for _ in range(8):                      # submit holo kina — Stop button ashbe ba text box faka hobe
+                self.sleep(500, page)
+                try:
+                    if page.locator("button[aria-label*='Stop' i]").first.is_visible():
+                        sent = True
+                        break
+                    if len(re.sub(r"\s+", "", ta.inner_text(timeout=1500))) < 20:
+                        sent = True
+                        break
+                except Exception:
+                    sent = True
+                    break
+            if sent:
+                break
+        if not sent:
+            raise RuntimeError("Submit button click hoyni")
+        self.log("  Gemini file toiri korche...")
+        self.gemini_wait_done(page)
+        tmp_md = out_srt + ".md.tmp"
+        self.log("  Export -> .md")
+        self.gemini_download_md(page, tmp_md)
+        try:
+            text, n = voice_md_to_srt(read_text(tmp_md))
+        finally:
+            try:
+                os.remove(tmp_md)
+            except OSError:
+                pass
+        if n == 0:
+            raise RuntimeError("Download kora .md te SRT block nei")
+        # 100% match: SRT er block sonkha == script er line (sentence) sonkha. Na mille kichui save hobe na.
+        script_lines = [l.strip() for l in read_text(lb_path).splitlines() if l.strip()]
+        want = len(script_lines)
+        if want:
+            problems = voice_srt_match_problems(text, script_lines)
+            if problems:
+                for pr in problems[:5]:
+                    self.log("    " + pr)
+                if len(problems) > 5:
+                    self.log(f"    ... aro {len(problems) - 5} ta somossha")
+                raise RuntimeError(f"SRT match hoyni: {n}/{want} block, {len(problems)} ta somossha")
+        atomic_write(out_srt, text)
+        self.log(f"  Corrected SRT saved: {out_srt}")
+
+    def gemini_correct(self, lb_path, srt_path, out_srt):
+        prompt = voice_prompt_read().strip() or VOICE_DEFAULT_PROMPT
+        tries = max(1, int(self.cfg.get("gemini_tries", 2)))
+        return self._gemini_loop(prompt, tries, lb_path, srt_path, out_srt)
+
+    def _gemini_loop(self, prompt, tries, lb_path, srt_path, out_srt):
+        use_txt = False
+        tmpd = None
+        last = None
+        attempt = 0
+        while attempt < tries:
+            self.check_stop()
+            files = [lb_path, srt_path]
+            if use_txt:
+                if not tmpd:
+                    tmpd = tempfile.mkdtemp(prefix="gem_")
+                cp = os.path.join(tmpd, os.path.splitext(os.path.basename(srt_path))[0] + "_srt.txt")
+                shutil.copyfile(srt_path, cp)
+                files = [lb_path, cp]
+            page = self.new_page()
+            try:
+                self.gemini_once(page, prompt, files, lb_path, out_srt, strict=(attempt < tries - 1))
+                if tmpd:
+                    rm_tree(tmpd)
+                return
+            except VoiceStopped:
+                if tmpd:
+                    rm_tree(tmpd)
+                raise
+            except Exception as e:
+                last = e
+                msg = str(e).splitlines()[0][:200]
+                self.log(f"  Gemini fail: {msg}")
+                self.debug(page, "gemini")
+                if "UNSUPPORTED" in msg and not use_txt:
+                    use_txt = True                      # .srt nile na — .txt naam diye abar
+                    self.log("  .srt accept kore ni, .txt hishebe upload korchi")
+                    continue
+                attempt += 1
+            finally:
+                self.close_page(page)
+        if tmpd:
+            rm_tree(tmpd)
+        raise RuntimeError("Gemini e sob chesta fail" + (f": {str(last).splitlines()[0][:120]}" if last else ""))
+
+    def do_gemini(self, name, out, force=False):
+        lb = _voice_find_lb(name)
+        if not lb:
+            self.log("Line break script nei — Gemini correction skip")
+            return False
+        srt = next((os.path.join(out, f) for f in sorted(os.listdir(out))
+                    if f.lower().endswith(".srt") and not f.startswith(VOICE_CORR_PREFIX)), None)
+        if not srt:
+            self.log("Original SRT nei — Gemini correction skip")
+            return False
+        corr = os.path.join(out, f"{VOICE_CORR_PREFIX}{name}.srt")
+        if not force and os.path.exists(corr) and os.path.getsize(corr) > 0:
+            self.log("  Corrected SRT age thekei ache")
+            return True
+        self.vpn_disconnect()                           # Gemini VPN e kaj kore na
+        self.gemini_correct(lb, srt, corr)
+        return True
+
+    def run_gemini_only(self, name):
+        from playwright.sync_api import sync_playwright
+        out = os.path.join(self.cfg["output_dir"], name)
+        with sync_playwright() as pw:
+            self.launch(pw)
+            try:
+                self.log(f"===== {name} (Gemini) =====")
+                self.do_gemini(name, out, force=True)
+            finally:
+                if self.cfg.get("vpn_disconnect_after", True):
+                    self.vpn_disconnect()
+                try:
+                    self.ctx.close()
+                except Exception:
+                    pass
+                voice_trim_profile(self.profile)
+
+    def process(self, fpath):
+        name = os.path.splitext(os.path.basename(fpath))[0]
+        text = open(fpath, encoding="utf-8").read().strip()
+        out = os.path.join(self.cfg["output_dir"], name)
+        os.makedirs(out, exist_ok=True)
+        mp3, srt = os.path.join(out, f"{name}.mp3"), os.path.join(out, f"{name}.srt")
+        self.log(f"===== {name} =====")
+        try:
+            if not (os.path.exists(mp3) and os.path.getsize(mp3) > 1000):
+                self.do_speechify(text, mp3)
+            self.do_srt(mp3, srt)
+            if self.cfg.get("gemini_enabled", True):
+                try:
+                    self.do_gemini(name, out)
+                except VoiceStopped:
+                    raise
+                except Exception as e:
+                    self.log(f"Gemini fail: {str(e).splitlines()[0][:200]} (MP3 + SRT ager moto ache)")
+            os.makedirs(VOICE_DONE, exist_ok=True)
+            dest = os.path.join(VOICE_DONE, os.path.basename(fpath))
+            if os.path.exists(dest):
+                os.remove(dest)
+            shutil.move(fpath, dest)
+            lbp = os.path.join(VOICE_LB, f"{name}.txt")
+            if os.path.exists(lbp):
+                os.makedirs(VOICE_LB_DONE, exist_ok=True)
+                d2 = os.path.join(VOICE_LB_DONE, f"{name}.txt")
+                if os.path.exists(d2):
+                    os.remove(d2)
+                shutil.move(lbp, d2)
+            self.log(f"SHESH: {name}  ->  {out}")
+        finally:
+            if self.cfg.get("vpn_disconnect_after", True):
+                self.vpn_disconnect()
+
+    def run(self, files=None):
+        _voice_ensure_dirs()
+        if files is None:
+            files = sorted(
+                [os.path.join(VOICE_SCRIPTS, f) for f in os.listdir(VOICE_SCRIPTS)
+                 if f.lower().endswith(".txt") and os.path.isfile(os.path.join(VOICE_SCRIPTS, f))])
+        if not files:
+            self.log("Scripts folder e kono .txt script nei.")
+            return
+        q = queue.Queue()
+        for f in files:
+            q.put(f)
+        self.run_queue(q)
+
+    def run_queue(self, q):
+        """Ei Chrome shared queue theke ekta ekta script ney — queue faka hole bondho hoy."""
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            self.launch(pw)
+            try:
+                while True:
+                    self.check_stop()
+                    try:
+                        f = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    try:
+                        self.process(f)
+                    except VoiceStopped:
+                        raise
+                    except Exception as e:
+                        self.log(f"FAIL: {os.path.basename(f)}: {str(e).splitlines()[0][:250]}")
+            finally:
+                try:
+                    self.ctx.close()
+                except Exception:
+                    pass
+                voice_trim_profile(self.profile)
+
+
+def voice_clone_profile(i, log):
+    """Thread i er jonno main Chrome profile er copy (extension/login shoho). Ekbar banai, pore reuse."""
+    dst = os.path.join(VOICE_CLONES, f"t{i}")
+    marker = os.path.join(dst, ".clone_ok")
+    try:
+        if os.path.exists(marker):
+            return dst
+        if not os.path.isdir(VOICE_PROFILE):
+            log("Chrome profile nei — age 'Chrome Profile Setup' koro. (Thread " + str(i) + " bad)")
+            return None
+        if os.path.isdir(dst):
+            rm_tree(dst)
+        log(f"Thread {i}: Chrome profile copy hochhe (prothombar kichu somoy lagte pare)...")
+        os.makedirs(VOICE_CLONES, exist_ok=True)
+        shutil.copytree(VOICE_PROFILE, dst, ignore=shutil.ignore_patterns(
+            "Singleton*", "lockfile", "*.lock", "Cache", "Code Cache", "GPUCache", "GrShaderCache",
+            "ShaderCache", "DawnCache", "GraphiteDawnCache", "Crashpad", "BrowserMetrics*"))
+        with open(marker, "w") as fh:
+            fh.write("ok")
+        return dst
+    except Exception as e:
+        log(f"Thread {i}: profile copy fail: {str(e).splitlines()[0][:160]}")
+        try:
+            rm_tree(dst)
+        except Exception:
+            pass
+        return None
+
+
+def voice_run_all(cfg, files, log, ask, stop_event, hidden_getter, runners):
+    """Single thread = ekta Chrome, ekta ekta kore. Multiple = N ta Chrome ekshathe, shared queue theke."""
+    multi = cfg.get("thread_mode") == "multiple"
+    try:
+        n = int(cfg.get("threads") or 1)
+    except (TypeError, ValueError):
+        n = 1
+    n = max(2, min(5, n)) if multi else 1
+    n = max(1, min(n, len(files)))          # script er cheye beshi Chrome khola hobe na
+    q = queue.Queue()
+    for f in files:
+        q.put(f)
+    profiles = [VOICE_PROFILE]
+    for i in range(2, n + 1):               # Chrome gulo khola ager e clone, karon main profile lock hoye jabe
+        p = voice_clone_profile(i, log)
+        if p:
+            profiles.append(p)
+    n = len(profiles)
+    log(f"Threads: {n}  ({'multiple' if n > 1 else 'single'})  •  scripts: {len(files)}")
+    shared = {"lock": threading.RLock(), "reserved": set(), "ask": threading.Lock()}
+
+    def worker(idx, prof):
+        r = VoiceRunner(cfg, log, ask, stop_event, chrome_hidden=hidden_getter(), profile=prof,
+                        shared=shared, tag=(f"T{idx}" if n > 1 else ""))
+        runners.append(r)
+        try:
+            r.run_queue(q)
+        except VoiceStopped:
+            pass
+        except Exception as e:
+            log(f"ERROR (thread {idx}): {str(e).splitlines()[0][:220]}")
+        finally:
+            try:
+                runners.remove(r)
+            except ValueError:
+                pass
+
+    ths = []
+    for idx, prof in enumerate(profiles, 1):
+        t = threading.Thread(target=worker, args=(idx, prof), daemon=True)
+        t.start()
+        ths.append(t)
+        if idx < n:
+            time.sleep(3)                   # Chrome gulo ekshathe launch na kore ektu gap diye
+    for t in ths:
+        t.join()
+    if stop_event.is_set():
+        raise VoiceStopped()
+
+
+def voice_trim_profile(prof):
+    """Chrome profile er cache muchhe dey (login/extension thake) — profile jeno fule na othe."""
+    if not prof or not os.path.isdir(prof):
+        return
+    for rel in ("Default/Cache", "Default/Code Cache", "Default/GPUCache", "Default/DawnGraphiteCache",
+                "Default/DawnWebGPUCache", "Default/Service Worker/CacheStorage",
+                "Default/Service Worker/ScriptCache", "Default/Media Cache",
+                "GrShaderCache", "ShaderCache", "GraphiteDawnCache", "DawnCache"):
+        p = os.path.join(prof, *rel.split("/"))
+        if os.path.isdir(p):
+            try:
+                rm_tree(p)
+            except Exception:
+                pass
+
+
+def _voice_chrome_exe():
+    cands = []
+    for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            cands.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+    cands += ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+              "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    for c in cands:
+        if os.path.exists(c):
+            return c
+    return shutil.which("chrome") or shutil.which("google-chrome")
+
+
+def _voice_profile_in_use(prof):
+    """Ei profile ekhon sotti kono Chrome e khola kina. Shudhu lockfile thakle hobe na —
+    Chrome crash/force-close hole lockfile pore thake (stale), sheta 'in use' na."""
+    lk = os.path.join(prof, "lockfile")
+    if os.path.lexists(lk):
+        try:
+            with open(lk, "ab"):                    # Chrome cholle Windows e ei file lock kora thake
+                pass
+            try:
+                os.remove(lk)                       # stale — porishkar
+            except OSError:
+                pass
+        except OSError:
+            return True
+    sl = os.path.join(prof, "SingletonLock")        # Linux / Mac
+    if os.path.lexists(sl):
+        try:
+            pid = int(os.readlink(sl).rsplit("-", 1)[-1])
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            for f in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                try:
+                    os.remove(os.path.join(prof, f))
+                except OSError:
+                    pass
+    return False
+
+
+def voice_gemini_login_setup(n, redo, log):
+    """Prottek thread er Chrome profile e alada Gemini (Google) account login. Ekbar korlei hoy.
+    Google automation Chrome e login block kore, tai ekhane normal Chrome (automation chhara) khola hoy."""
+    _voice_ensure_dirs()
+    if not os.path.isdir(VOICE_PROFILE):
+        log("Chrome profile nei — age 'Chrome Profile Setup' koro.")
+        return
+    exe = _voice_chrome_exe()
+    if not exe:
+        log("Google Chrome paoa jayni (install kora ache to?)")
+        return
+    for i in range(1, n + 1):
+        prof = VOICE_PROFILE if i == 1 else voice_clone_profile(i, log)
+        if not prof:
+            continue
+        marker = os.path.join(prof, ".gemini_ok")
+        if os.path.exists(marker) and not redo:
+            log(f"Account {i}: ager login ache, skip")
+            continue
+        if _voice_profile_in_use(prof):
+            log(f"Account {i}: ei profile er Chrome sotti-i ekhono khola. Task Manager e 'Google Chrome' "
+                f"(background shoho) shesh kore abar chalan.")
+            return
+        if i > 1:                                   # main theke asha purano Google login muchhe dao
+            for ck in ("Default/Network/Cookies", "Default/Network/Cookies-journal",
+                       "Default/Cookies", "Default/Cookies-journal"):
+                try:
+                    os.remove(os.path.join(prof, *ck.split("/")))
+                except OSError:
+                    pass
+        log(f"Account {i}/{n}: Chrome khulbe — Gemini te {'ekta notun ' if i > 1 else ''}"
+            f"Google account diye login korun, tarpor SOB Chrome window bondho korun.")
+        try:
+            proc = subprocess.Popen([exe, f"--user-data-dir={prof}", "--no-first-run",
+                                     "--no-default-browser-check", "--start-maximized", GEMINI_URL])
+            proc.wait()
+            time.sleep(2)
+            t0 = time.time()
+            while _voice_profile_in_use(prof) and time.time() - t0 < 6 * 3600:
+                time.sleep(1.5)                     # Chrome launcher process age exit hole-o wait
+        except Exception as e:
+            log(f"Account {i}: Chrome khola gelo na: {str(e).splitlines()[0][:150]}")
+            return
+        voice_trim_profile(prof)
+        with open(marker, "w") as fh:
+            fh.write("ok")
+        log(f"Account {i}: shesh")
+    log("Gemini login setup shesh.")
+
+
+def voice_profile_setup(log):
+    os.makedirs(VOICE_PROFILE, exist_ok=True)
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        ctx = pw.chromium.launch_persistent_context(
+            VOICE_PROFILE, channel="chrome", headless=False, no_viewport=True,
+            ignore_default_args=["--disable-extensions", "--enable-automation"],
+            args=["--start-maximized"])
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.goto("https://chromewebstore.google.com/search/veepn")
+        log("Chrome khulechhe. VeePN install kore toolbar e pin korun. Shesh hole window bondho korun. "
+            "(Gemini login ei window te hobe na — 'Gemini Login Setup' use korun.)")
+        ids = set()
+        try:
+            while True:
+                for w in list(ctx.service_workers) + list(ctx.background_pages):
+                    m = re.match(r"chrome-extension://([a-p]{32})/", w.url)
+                    if m:
+                        ids.add(m.group(1))
+                if not ctx.pages:
+                    break
+                page.wait_for_timeout(1500) if not page.is_closed() else time.sleep(1.5)
+        except Exception:
+            pass
+        try:
+            ctx.close()
+        except Exception:
+            pass
+    try:                                    # profile change hoyeche — purano thread-copy gulo bad
+        if os.path.isdir(VOICE_CLONES):         # (je gulo te alada Gemini login ache sei gulo thakbe)
+            for d in os.listdir(VOICE_CLONES):
+                dp = os.path.join(VOICE_CLONES, d)
+                if os.path.isdir(dp) and not os.path.exists(os.path.join(dp, ".gemini_ok")):
+                    rm_tree(dp)
+    except Exception:
+        pass
+    log("Setup shesh. Extension ID: " + (", ".join(ids) if ids else "(auto-detect cholbe)"))
+
 
 
 if __name__ == "__main__":
