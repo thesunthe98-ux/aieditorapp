@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.5.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -5986,9 +5986,10 @@ class App(_Base):
         vp = getattr(self, "_voice_drag_path", None)
         if vp:      # Voice+SRT er generated file: shudhu Audio / SRT section er upor chharle kaj korbe
             e_ = os.path.splitext(vp)[1].lower()
-            key_ = "audio" if e_ in AUDIO_EXTS else ("srt" if e_ == ".srt" else None)
+            key_ = ("audio" if e_ in AUDIO_EXTS else "srt" if e_ == ".srt"
+                    else "script" if e_ == ".txt" else None)
             if not key_ or not self._drop_in_zone(event, key_):
-                self.note("Drop hoyni — file ta " + ("Audio" if key_ != "srt" else "SRT") +
+                self.note("Drop hoyni — file ta " + {"audio": "Audio", "srt": "SRT", "script": "Script"}.get(key_, "") +
                           " section er upor niye chharo.", WARN)
                 return event.action
         try:
@@ -6459,7 +6460,7 @@ class App(_Base):
                                  sashpad=0, bd=0, opaqueresize=True, showhandle=False,
                                  sashcursor="sb_h_double_arrow")
         runpane.pack(fill="both", expand=True)
-        gc, gh = card(runpane, "Generated", "drag kore Audio / SRT section er upor niye chharo", pack=False)
+        gc, gh = card(runpane, "Generated", "drag kore Audio / SRT / Script section er upor niye chharo (mp3, srt, raw script, line break script)", pack=False)
         runpane.add(gc, minsize=260, stretch="always", width=520)
         mkbtn(gh, "Refresh", self.voice_refresh_results, "ghost", pady=2, padx=10).pack(side="right")
         mkbtn(gh, "Output folder", lambda: open_path(VOICE_OUTPUT), "flat", pady=2, padx=10).pack(side="right", padx=4)
@@ -6917,6 +6918,7 @@ class App(_Base):
                 sc_ = mklabel(srow, f"  TXT  {name}.txt  ", 10, ACCENT, bg=PANEL, padx=8, pady=4, cursor="hand2")
                 sc_.pack(side="left")
                 sc_.bind("<Double-Button-1>", lambda e, p=src: open_path(p))
+                self._voice_make_draggable(sc_, src)
                 mklabel(srow, "raw script", 9, MUTED, bg=PANEL2).pack(side="left", padx=8)
             lbsrc = _voice_find_lb(name)
             if lbsrc:
@@ -6925,6 +6927,7 @@ class App(_Base):
                 lc_ = mklabel(lrow, f"  TXT  {name}.txt  ", 10, ACCENT, bg=PANEL, padx=8, pady=4, cursor="hand2")
                 lc_.pack(side="left")
                 lc_.bind("<Double-Button-1>", lambda e, p=lbsrc: open_path(p))
+                self._voice_make_draggable(lc_, lbsrc)
                 mklabel(lrow, "line break script", 9, MUTED, bg=PANEL2).pack(side="left", padx=8)
             for fn in sorted(os.listdir(folder)):
                 fp = os.path.join(folder, fn)
@@ -6997,6 +7000,17 @@ class App(_Base):
         except Exception:
             pass
 
+    def _voice_make_draggable(self, widget, path):
+        """Generated item (txt/mp3/srt) ke drag source banay."""
+        if not DND_OK:
+            return
+        try:
+            widget.drag_source_register(1, DND_FILES)
+            widget.dnd_bind("<<DragInitCmd>>", lambda e, p=path: self._voice_drag_init(e, p))
+            widget.dnd_bind("<<DragEndCmd>>", self._voice_drag_end)
+        except Exception:
+            pass
+
     def _voice_drag_init(self, event, path):
         if not path or not os.path.exists(path):
             return "refuse_drop"
@@ -7022,7 +7036,7 @@ class App(_Base):
         while w is not None:
             for key, nav in self.nav.items():
                 if w is nav or w in (getattr(nav, "ic", None), getattr(nav, "tx", None)):
-                    if key in ("audio", "srt"):
+                    if key in ("audio", "srt", "script"):
                         target = key
                     break
             if target:
@@ -8742,6 +8756,8 @@ class VoiceRunner:
                     ex_ok = oc.is_visible() and oc.is_enabled()
                 except Exception:
                     ex_ok = False
+            if not ex_ok:                       # file card nai: "Code snippet" er download button
+                ex_ok = self.gemini_snippet_ready(page)
             if ex_ok and not running:
                 stable += 1
                 if stable >= 2:
@@ -8761,6 +8777,42 @@ class VoiceRunner:
         """File card (output / MD) er 'Open' button — jokhon Export button thake na."""
         return page.locator("button, a, [role='button']").filter(
             has_text=re.compile(r"^\s*Open\s*$", re.I))
+
+    def gemini_snippet_btn(self, page):
+        """Gemini jodi file card na diye 'Code snippet' box e SRT dey: oi box er Download button
+        (copy button er baam pashe)."""
+        scope = page.locator("code-block, .code-block, [class*='code-block']")
+        sel = ("button[aria-label*='Download' i], [role='button'][aria-label*='Download' i], "
+               "button[title*='Download' i], [data-tooltip*='Download' i], [mattooltip*='Download' i]")
+        return scope.locator(sel)
+
+    def gemini_snippet_ready(self, page):
+        try:
+            b = self.gemini_snippet_btn(page).last
+            return b.is_visible() and b.is_enabled()
+        except Exception:
+            return False
+
+    def gemini_download_via_snippet(self, page, dest_md):
+        """Code snippet er Download button -> .txt download hoy -> app oita SRT e convert kore."""
+        self.log("  File card nai — Code snippet er Download button e click (.txt download hobe)")
+        btn = self.gemini_snippet_btn(page).last
+        btn.scroll_into_view_if_needed(timeout=5000)
+        try:
+            with page.expect_download(timeout=60000) as d:
+                btn.click(timeout=6000)
+            d.value.save_as(dest_md)
+            self._gemini_save_ok(dest_md)
+            return
+        except Exception as e:
+            self.log(f"  snippet download fail: {str(e).splitlines()[0][:100]} — code text copy kore nichhi")
+        # fallback: code box er text sorasori pora
+        blk = page.locator("code-block, .code-block, [class*='code-block']").last
+        txt = blk.inner_text(timeout=8000)
+        if not txt or not txt.strip():
+            raise RuntimeError("Code snippet faka")
+        atomic_write(dest_md, txt)
+        self._gemini_save_ok(dest_md)
 
     def _gemini_save_ok(self, dest_md):
         if not os.path.exists(dest_md) or os.path.getsize(dest_md) == 0:
@@ -8815,8 +8867,15 @@ class VoiceRunner:
             has_export = export.last.is_visible()
         except Exception:
             has_export = False
-        order = ([self.gemini_download_via_export, self.gemini_download_via_open] if has_export
-                 else [self.gemini_download_via_open, self.gemini_download_via_export])
+        if has_export:
+            order = [self.gemini_download_via_export, self.gemini_download_via_open,
+                     self.gemini_download_via_snippet]
+        elif self.gemini_snippet_ready(page):
+            order = [self.gemini_download_via_snippet, self.gemini_download_via_open,
+                     self.gemini_download_via_export]
+        else:
+            order = [self.gemini_download_via_open, self.gemini_download_via_snippet,
+                     self.gemini_download_via_export]
         err = None
         for fn in order:
             try:
@@ -8872,7 +8931,7 @@ class VoiceRunner:
         self.log("  Gemini file toiri korche...")
         self.gemini_wait_done(page)
         tmp_md = out_srt + ".md.tmp"
-        self.log("  Export -> .md")
+        self.log("  Export / Download -> .md / .txt")
         self.gemini_download_md(page, tmp_md)
         try:
             text, n = voice_md_to_srt(read_text(tmp_md))
