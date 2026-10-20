@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.4.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -7115,7 +7115,9 @@ class App(_Base):
             messagebox.showinfo("Busy", "Kaj cholche — age shesh hok ba STOP korun.")
             return
         if not messagebox.askyesno("Regenerate " + label,
-                                   f"'{name}' er {label} notun kore toiri hobe. Purano {label} replace hobe. Cholbe?"):
+                                   (f"'{name}' er MP3 notun kore toiri hobe, tarpor SRT ar Corrected SRT-o notun hobe. Purano file gulo replace hobe. Cholbe?"
+                                    if what == "mp3" else
+                                    f"'{name}' er SRT notun kore toiri hobe, tarpor Corrected SRT-o notun hobe. Purano SRT/Corrected replace hobe. Cholbe?")):
             return
         self.voice_fix_srt(name, what)
 
@@ -7555,6 +7557,10 @@ def _ensure_playwright():
         return False, str(e)
 
 
+class GeminiLoginNeeded(RuntimeError):
+    """Gemini te Google login nei."""
+
+
 class ZamzarRetry(Exception):
     """Zamzar e kaj hocche na -> VPN badle abar prothom theke upload."""
 
@@ -7722,6 +7728,7 @@ class VoiceRunner:
         raise RuntimeError("Script likhar box paoa jayni")
 
     def launch(self, pw):
+        self.pw = pw
         os.makedirs(self.profile, exist_ok=True)
         args = ["--disable-blink-features=AutomationControlled", "--start-maximized"]
         self.ctx = pw.chromium.launch_persistent_context(
@@ -8430,8 +8437,96 @@ class VoiceRunner:
         page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=90000)
         self.sleep(3500, page)
         if self.gemini_signed_out(page):
-            raise RuntimeError("Gemini te login nei — Settings > Gemini > 'Gemini Login Setup' chalan "
-                               "(automation Chrome e Google login block kore)")
+            raise GeminiLoginNeeded("Gemini te login nei")
+
+    def gemini_wait_login(self):
+        """Login nai: automation Chrome bondho kore normal Chrome (Google block kore na) khole rakhe,
+        login hoyeche detect hole Chrome bondho kore abar automation Chrome chalu kore."""
+        import socket
+        exe = _voice_chrome_exe()
+        if not exe:
+            raise RuntimeError("Google Chrome paoa jayni (install kora ache to?)")
+        self.log("Gemini te login nei. Chrome khulchhe — Google account diye login korun. "
+                 "Login hole nijei kaj shuru hobe, Chrome bondho korben na.")
+        try:
+            self.ctx.close()
+        except Exception:
+            pass
+        self.own.clear()
+        self.keepalive = None
+        t0 = time.time()
+        while _voice_profile_in_use(self.profile) and time.time() - t0 < 20:
+            time.sleep(1)
+        sk = socket.socket()
+        sk.bind(("127.0.0.1", 0))
+        port = sk.getsockname()[1]
+        sk.close()
+        proc = subprocess.Popen([exe, f"--user-data-dir={self.profile}", f"--remote-debugging-port={port}",
+                                 "--no-first-run", "--no-default-browser-check", "--start-maximized", GEMINI_URL])
+        browser = None
+        ok = False
+        try:
+            for _ in range(40):
+                self.check_stop()
+                try:
+                    browser = self.pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+                    break
+                except Exception:
+                    time.sleep(1)
+            if browser is None:
+                raise RuntimeError("Login Chrome er sathe connect hoyni")
+            t0 = time.time()
+            good_n = 0
+            last_msg = 0.0
+            while time.time() - t0 < 30 * 60:
+                self.check_stop()
+                good = False
+                try:
+                    for c in browser.contexts:
+                        for pg in c.pages:
+                            if "gemini.google.com" in (pg.url or "") and not self.gemini_signed_out(pg):
+                                if pg.locator("rich-textarea, div.ql-editor, [contenteditable='true']").first.is_visible():
+                                    good = True
+                except Exception:
+                    pass
+                good_n = good_n + 1 if good else 0
+                if good_n >= 2:
+                    ok = True
+                    break
+                if time.time() - last_msg > 60:
+                    self.log("  login-er jonno wait korchi...")
+                    last_msg = time.time()
+                time.sleep(2)
+            if not ok:
+                raise RuntimeError("Gemini login timeout (30 minute)")
+            self.log("  Login detect hoyeche")
+            time.sleep(3)
+            try:
+                browser.new_browser_cdp_session().send("Browser.close")
+            except Exception:
+                pass
+        finally:
+            try:
+                if browser:
+                    browser.close()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=12)
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            t1 = time.time()
+            while _voice_profile_in_use(self.profile) and time.time() - t1 < 20:
+                time.sleep(1)
+        try:
+            with open(os.path.join(self.profile, ".gemini_ok"), "w") as fh:
+                fh.write("ok")
+        except Exception:
+            pass
+        self.launch(self.pw)
 
     def gemini_agree(self, page):
         """"Creating content from images and files" popup — Agree chapa (onek poddhoti try kore)."""
@@ -8812,8 +8907,14 @@ class VoiceRunner:
         tmpd = None
         last = None
         attempt = 0
+        logins = 0
+        need_login = False
         while attempt < tries:
             self.check_stop()
+            if need_login:
+                need_login = False
+                logins += 1
+                self.gemini_wait_login()
             files = [lb_path, srt_path]
             if use_txt:
                 if not tmpd:
@@ -8831,6 +8932,14 @@ class VoiceRunner:
                 if tmpd:
                     rm_tree(tmpd)
                 raise
+            except GeminiLoginNeeded as e:
+                last = e
+                if logins >= 2:
+                    attempt += 1
+                    self.log("  Login-er pore-o Gemini te login nei dekhacche")
+                else:
+                    need_login = True
+                continue
             except Exception as e:
                 last = e
                 msg = str(e).splitlines()[0][:200]
@@ -8902,7 +9011,8 @@ class VoiceRunner:
             if os.path.splitext(f)[1].lower() in AUDIO_EXTS and f != ".regen_tmp.mp3":
                 os.remove(os.path.join(out, f))
         os.replace(tmp, os.path.join(out, f"{name}.mp3"))
-        self.log(f"MP3 notun kore toiri: {name}.mp3  (SRT puran MP3 er — dorkar hole 'Regenerate SRT' chapun)")
+        self.log(f"MP3 notun kore toiri: {name}.mp3  -> ebar SRT + Corrected SRT")
+        self.regen_srt(name, out)
 
     def regen_srt(self, name, out):
         mp3 = self._find_audio(out)
@@ -8913,10 +9023,17 @@ class VoiceRunner:
             os.remove(tmp)
         self.do_srt(mp3, tmp)
         for f in os.listdir(out):
-            if f.lower().endswith(".srt") and not f.startswith(VOICE_CORR_PREFIX) and f != ".regen_tmp.srt":
+            if f.lower().endswith(".srt") and f != ".regen_tmp.srt":      # purano SRT + purano Corrected SRT
                 os.remove(os.path.join(out, f))
         os.replace(tmp, os.path.join(out, f"{name}.srt"))
-        self.log(f"SRT notun kore toiri: {name}.srt  (Corrected SRT dorkar hole 'Gemini fix' chapun)")
+        self.log(f"SRT notun kore toiri: {name}.srt")
+        if self.cfg.get("gemini_enabled", True):
+            try:
+                self.do_gemini(name, out, force=True)
+            except VoiceStopped:
+                raise
+            except Exception as e:
+                self.log(f"Gemini fail: {str(e).splitlines()[0][:200]} (Corrected SRT hoyni — 'Gemini fix' chapun)")
 
     def run_single(self, name, what):
         from playwright.sync_api import sync_playwright
