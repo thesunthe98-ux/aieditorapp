@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6584,7 +6584,7 @@ class App(_Base):
         field(b, 0, "Generate", "gen_timeout_min", 8)
         field(b, 1, "Export", "export_timeout_min", 8)
         field(b, 2, "Convert (SRT)", "convert_timeout_min", 8)
-        field(b, 3, "Zamzar check", "zamzar_check_min", 8, "koto minute por por Converting ache kina dekhbe")
+        field(b, 3, "Zamzar check", "zamzar_check_sec", 8, "koto second por por Converting/Download check korbe")
         b = mkcard(sc, "Gemini", "SRT correction")
         gv = tk.StringVar(value="1" if self._voice_cfg.get("gemini_enabled", True) else "0")
         self.voice_vars["gemini_enabled"] = gv
@@ -6853,9 +6853,9 @@ class App(_Base):
                     val = int(val)
                 except ValueError:
                     val = VOICE_DEFAULTS[k]
-            if k == "zamzar_check_min":
+            if k == "zamzar_check_sec":
                 try:
-                    val = max(0.25, float(val))
+                    val = max(5, int(float(val)))
                 except ValueError:
                     val = VOICE_DEFAULTS[k]
             self._voice_cfg[k] = val
@@ -6905,6 +6905,12 @@ class App(_Base):
                       pady=2, padx=8).pack(side="right", padx=4)
             src = next((os.path.join(b, f"{name}.txt") for b in (VOICE_DONE, VOICE_SCRIPTS)
                         if os.path.exists(os.path.join(b, f"{name}.txt"))), None)
+            if has_mp3:
+                mkbtn(top, "Regenerate SRT", lambda n=name: self.voice_regen(n, "srt"), "ghost",
+                      pady=2, padx=8).pack(side="right", padx=4)
+            if src:
+                mkbtn(top, "Regenerate MP3", lambda n=name: self.voice_regen(n, "mp3"), "ghost",
+                      pady=2, padx=8).pack(side="right", padx=4)
             if src:
                 srow = tk.Frame(card, bg=PANEL2)
                 srow.pack(fill="x", padx=10, pady=(2, 4))
@@ -7103,7 +7109,17 @@ class App(_Base):
             target=lambda: voice_profile_setup(self.voice_log_line), daemon=True)
         self._voice_thread.start()
 
-    def voice_fix_srt(self, name):
+    def voice_regen(self, name, what):
+        label = "MP3" if what == "mp3" else "SRT"
+        if self._voice_alive() or self.proc or self.busy:
+            messagebox.showinfo("Busy", "Kaj cholche — age shesh hok ba STOP korun.")
+            return
+        if not messagebox.askyesno("Regenerate " + label,
+                                   f"'{name}' er {label} notun kore toiri hobe. Purano {label} replace hobe. Cholbe?"):
+            return
+        self.voice_fix_srt(name, what)
+
+    def voice_fix_srt(self, name, what="gemini"):
         if self._voice_alive():
             messagebox.showinfo("Busy", "Voice+SRT cholche — age shesh hok ba STOP korun.")
             return
@@ -7119,7 +7135,7 @@ class App(_Base):
         self.voice_start_btn.configure(state="disabled")
         self.voice_stop_btn.configure(state="normal")
         self.voice_clear_btn.configure(state="disabled")
-        self.voice_status.configure(text="Gemini\u2026", fg=ACCENT)
+        self.voice_status.configure(text={"mp3": "MP3\u2026", "srt": "SRT\u2026"}.get(what, "Gemini\u2026"), fg=ACCENT)
         cfg = dict(self._voice_cfg)
         cfg["output_dir"] = VOICE_OUTPUT
 
@@ -7129,7 +7145,7 @@ class App(_Base):
                 r = VoiceRunner(cfg, self.voice_log_line, self.voice_ask, self._voice_stop,
                                 chrome_hidden=self._voice_chrome_hidden)
                 self._voice_runners.append(r)
-                r.run_gemini_only(name)
+                r.run_single(name, what)
                 self.voice_log_line("--- shesh ---")
             except VoiceStopped:
                 self.voice_log_line("--- STOP kora hoyeche ---")
@@ -7413,7 +7429,7 @@ VOICE_DEFAULTS = {
     "gen_timeout_min": 20,
     "export_timeout_min": 15,
     "convert_timeout_min": 8,
-    "zamzar_check_min": 1,
+    "zamzar_check_sec": 20,
     "gemini_enabled": True,
     "gemini_timeout_min": 15,
     "gemini_tries": 2,
@@ -7721,19 +7737,62 @@ class VoiceRunner:
         if self.chrome_hidden:
             self.move_window(self.keepalive, False)
 
+    def _ext_from_disk(self):
+        """Profile folder e install kora extension scan kore VeePN er ID ber kore (service worker ghumaleo kaj kore)."""
+        found = set()
+        root = os.path.join(self.profile, "Default", "Extensions")
+        try:
+            for eid in os.listdir(root):
+                if not re.fullmatch(r"[a-p]{32}", eid):
+                    continue
+                edir = os.path.join(root, eid)
+                for ver in os.listdir(edir):
+                    blob = ""
+                    for rel in ("manifest.json", os.path.join("_locales", "en", "messages.json"),
+                                os.path.join("_locales", "en_US", "messages.json")):
+                        fp = os.path.join(edir, ver, rel)
+                        if os.path.exists(fp):
+                            try:
+                                blob += open(fp, encoding="utf-8", errors="ignore").read().lower()
+                            except Exception:
+                                pass
+                    if "veepn" in blob:
+                        found.add(eid)
+        except Exception:
+            pass
+        return found
+
     def ext_id(self):
         if self.cfg.get("ext_id", "").strip():
             return self.cfg["ext_id"].strip()
-        ids = set()
-        for w in list(self.ctx.service_workers) + list(self.ctx.background_pages):
-            m = re.match(r"chrome-extension://([a-p]{32})/", w.url)
-            if m:
-                ids.add(m.group(1))
-        if len(ids) == 1:
-            return ids.pop()
+        if getattr(self, "_ext_cached", None):
+            return self._ext_cached
+        t0 = time.time()
+        while True:
+            ids = set()
+            try:
+                for w in list(self.ctx.service_workers) + list(self.ctx.background_pages):
+                    m = re.match(r"chrome-extension://([a-p]{32})/", w.url)
+                    if m:
+                        ids.add(m.group(1))
+            except Exception:
+                pass
+            disk = self._ext_from_disk()
+            if len(disk) == 1:                       # disk scan sobcheye nirbhorjoggo
+                ids = disk
+            elif len(disk) > 1 and ids & disk:
+                ids = ids & disk
+            if len(ids) == 1:
+                self._ext_cached = next(iter(ids))
+                self.log(f"  VeePN extension ID: {self._ext_cached}")
+                return self._ext_cached
+            if time.time() - t0 > 12 or self.stop.is_set():
+                break
+            self.sleep(1000, self.ctx.pages[0] if self.ctx.pages else None)   # Chrome shuru hoyei extension jage na
         raise RuntimeError(
-            "VeePN extension ID paoa jayni. Chrome Profile Setup kore VeePN install korun, "
-            "ba Settings e Extension ID boshan.")
+            "VeePN extension ID paoa jayni. Ei app er Chrome profile e VeePN install nai — "
+            "ekbar 'Chrome Profile Setup' chalie VeePN install korun (ekbar-i, porer bar auto). "
+            "Ba Settings e Extension ID boshan.")
 
     def open_vpn_popup(self):
         eid = self.ext_id()
@@ -8171,6 +8230,16 @@ class VoiceRunner:
                 pass
         return False
 
+    def zamzar_no_files(self, page):
+        """'No files found - Sorry, we couldn't find details for any uploaded files' page."""
+        for rx in (r"No files found", r"couldn.?t find details"):
+            try:
+                if page.get_by_text(re.compile(rx, re.I)).first.is_visible():
+                    return True
+            except Exception:
+                pass
+        return False
+
     def zamzar_converting(self, page):
         """'Converting' spinner / 'Hang tight' message dekha jachche kina."""
         for rx in (r"^\s*Converting", r"Hang tight"):
@@ -8202,19 +8271,24 @@ class VoiceRunner:
             return visible(dl) and ("/files/" in (page.url or "")
                                     or visible(page.get_by_text(re.compile(r"All Done", re.I)).first))
 
-        interval = max(15.0, float(self.cfg.get("zamzar_check_min", 1)) * 60)
-        deadline = time.time() + self.cfg["convert_timeout_min"] * 60
+        interval = max(5.0, float(self.cfg.get("zamzar_check_sec", 20)))
+        start_deadline = time.time() + self.cfg["convert_timeout_min"] * 60   # shudhu Convert chapar age porjonto
         started = False
         next_check = 0.0
         last_now = 0.0
-        clicks_after_start = 0
-        while time.time() < deadline:
+        reclicked = False
+        misses = 0
+        while True:
             self.check_stop()
+            if self.zamzar_no_files(page):
+                raise ZamzarRetry("'No files found' page")
             if self.zamzar_limit_popup(page):
                 raise ZamzarRetry("account popup (free limit)")
             if done():
                 return dl
             if not started:
+                if time.time() > start_deadline:
+                    raise ZamzarRetry("Convert button paoa jayni / convert shuru hoyni")
                 if visible(pop):
                     try:
                         pop.click(timeout=4000)
@@ -8234,27 +8308,26 @@ class VoiceRunner:
                     last_now = time.time()
             elif time.time() >= next_check:
                 next_check = time.time() + interval
-                if self.zamzar_converting(page):
-                    self.log("  check: Converting cholche...")
-                elif done():
+                if done():
                     return dl
-                elif self.zamzar_limit_popup(page):
-                    raise ZamzarRetry("account popup (free limit)")
+                if self.zamzar_converting(page):
+                    misses = 0
+                    self.log("  check: Converting cholche, wait...")
                 else:
-                    # Converting dekha jachche na. Convert/Convert Now button ache hole ekbar chap dibe.
+                    misses += 1
                     btn = pop if visible(pop) else (now if visible(now) else None)
-                    if btn is not None and clicks_after_start < 1:
-                        clicks_after_start += 1
+                    if btn is not None and not reclicked:
+                        reclicked = True
                         try:
                             btn.click(timeout=4000)
                             self.log("  check: Converting nai, Convert abar chaplam")
-                            next_check = time.time() + interval
                         except Exception:
                             pass
-                    else:
+                    elif misses >= 2:
                         raise ZamzarRetry("Converting dekhay nai")
+                    else:
+                        self.log("  check: Converting dekha jachchhe na, abar dekhbo...")
             self.sleep(1500, page)
-        raise ZamzarRetry("Zamzar convert timeout")
 
     def zamzar(self, page, mp3, out_srt):
         self.log("Zamzar: upload")
@@ -8278,6 +8351,8 @@ class VoiceRunner:
             self.check_stop()
             if self.zamzar_limit_popup(page):
                 raise ZamzarRetry("Download e account popup ashlo")
+            if self.zamzar_no_files(page):
+                raise ZamzarRetry("'No files found' page")
             self.sleep(1000, page)
         if not got:
             raise ZamzarRetry("Download shuru hoyni")
@@ -8798,6 +8873,64 @@ class VoiceRunner:
             try:
                 self.log(f"===== {name} (Gemini) =====")
                 self.do_gemini(name, out, force=True)
+            finally:
+                if self.cfg.get("vpn_disconnect_after", True):
+                    self.vpn_disconnect()
+                try:
+                    self.ctx.close()
+                except Exception:
+                    pass
+                voice_trim_profile(self.profile)
+
+    def _find_audio(self, out):
+        for f in sorted(os.listdir(out)):
+            if os.path.splitext(f)[1].lower() in AUDIO_EXTS and not f.startswith(".regen"):
+                return os.path.join(out, f)
+        return None
+
+    def regen_mp3(self, name, out):
+        src = next((os.path.join(b, f"{name}.txt") for b in (VOICE_DONE, VOICE_SCRIPTS)
+                    if os.path.exists(os.path.join(b, f"{name}.txt"))), None)
+        if not src:
+            raise RuntimeError("Raw script (.txt) paoa jayni")
+        text = open(src, encoding="utf-8").read().strip()
+        tmp = os.path.join(out, ".regen_tmp.mp3")
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        self.do_speechify(text, tmp)
+        for f in os.listdir(out):
+            if os.path.splitext(f)[1].lower() in AUDIO_EXTS and f != ".regen_tmp.mp3":
+                os.remove(os.path.join(out, f))
+        os.replace(tmp, os.path.join(out, f"{name}.mp3"))
+        self.log(f"MP3 notun kore toiri: {name}.mp3  (SRT puran MP3 er — dorkar hole 'Regenerate SRT' chapun)")
+
+    def regen_srt(self, name, out):
+        mp3 = self._find_audio(out)
+        if not mp3:
+            raise RuntimeError("Ei folder e MP3 nei")
+        tmp = os.path.join(out, ".regen_tmp.srt")
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        self.do_srt(mp3, tmp)
+        for f in os.listdir(out):
+            if f.lower().endswith(".srt") and not f.startswith(VOICE_CORR_PREFIX) and f != ".regen_tmp.srt":
+                os.remove(os.path.join(out, f))
+        os.replace(tmp, os.path.join(out, f"{name}.srt"))
+        self.log(f"SRT notun kore toiri: {name}.srt  (Corrected SRT dorkar hole 'Gemini fix' chapun)")
+
+    def run_single(self, name, what):
+        from playwright.sync_api import sync_playwright
+        out = os.path.join(self.cfg["output_dir"], name)
+        with sync_playwright() as pw:
+            self.launch(pw)
+            try:
+                self.log(f"===== {name} ({what}) =====")
+                if what == "mp3":
+                    self.regen_mp3(name, out)
+                elif what == "srt":
+                    self.regen_srt(name, out)
+                else:
+                    self.do_gemini(name, out, force=True)
             finally:
                 if self.cfg.get("vpn_disconnect_after", True):
                     self.vpn_disconnect()
