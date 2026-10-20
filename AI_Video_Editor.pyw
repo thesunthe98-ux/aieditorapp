@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.7.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6399,6 +6399,14 @@ class App(_Base):
         self._voice_thread = None
         self._voice_runners = []
         self._voice_jobs = {}
+        self._voice_regens = {}              # name -> what  (cholte thaka regenerate)
+        self._voice_kind = None              # "run" | "setup"
+        self._voice_main_running = False
+        self._voice_stopping = False
+        self._voice_anim_job = None
+        self._voice_anim_i = 0
+        self._voice_slots = VoiceSlots()
+        self._voice_shared = {"lock": threading.RLock(), "reserved": set(), "ask": threading.Lock()}
         self._voice_loading = False
         self._voice_chrome_hidden = False
         self._voice_q = queue.Queue()
@@ -6412,7 +6420,7 @@ class App(_Base):
         ctl = tk.Frame(f, bg=PANEL)
         ctl.pack(fill="x", padx=22, pady=(0, 10))
         row = tk.Frame(ctl, bg=PANEL)
-        row.pack(fill="x", padx=14, pady=10)
+        row.pack(fill="x", padx=14, pady=(10, 4))
         self.voice_start_btn = mkbtn(row, "\u25b6  START", self.voice_start, "primary", padx=20)
         self.voice_start_btn.pack(side="left")
         self.voice_stop_btn = mkbtn(row, "\u25a0  STOP", self.voice_stop, "danger", padx=16)
@@ -6424,6 +6432,10 @@ class App(_Base):
         self.voice_clear_btn.pack(side="left", padx=8)
         self.voice_status = mklabel(row, "Ready", 10, MUTED, bg=PANEL)
         self.voice_status.pack(side="right", padx=8)
+        self.voice_active_lbl = mklabel(row, "", 10, ACCENT, True, bg=PANEL)
+        self.voice_active_lbl.pack(side="right", padx=8)
+        self.voice_act = ActivityBar(ctl)
+        self.voice_act.pack(fill="x", padx=14, pady=(0, 10))
 
         # ── sub-tabs ──
         self._voice_tab = tk.StringVar(value="run")
@@ -6573,7 +6585,7 @@ class App(_Base):
         tm.trace_add("write", _sync_threads)
         _sync_threads()
         b = mkcard(sc, "VPN")
-        field(b, 0, "Locations", "vpn_locations", 60, "comma diye alada")
+        field(b, 0, "Locations", "vpn_locations", 60, "comma diye alada • USA dropdown er jonno: Oregon, Virginia • shudhu ei list er location e connect hobe")
         field(b, 1, "Max VPN tries", "max_vpn_tries", 8)
         dv = tk.StringVar(value="1" if self._voice_cfg.get("vpn_disconnect_after", True) else "0")
         self.voice_vars["vpn_disconnect_after"] = dv
@@ -6601,6 +6613,9 @@ class App(_Base):
         b = mkcard(sc, "Chrome")
         fspan(b, 0, mkbtn(b, "Chrome Profile Setup", self.voice_setup_profile, "ghost"))
         fnote(b, 1, "Prothombar ekbar Chrome profile e VeePN extension + Gemini (Google) login set kore nite hoy.")
+        fspan(b, 2, mkbtn(b, "Thread Profiles Setup (2-5)", self.voice_setup_thread_profiles, "ghost"))
+        fnote(b, 3, "Multiple threads er jonno prottek thread er profile e alada kore VeePN setup. "
+                    "Prottek bar VeePN er 'Loading' shesh howa porjonto wait kore tarpor Chrome bondho korben. Ekbar-i lagbe.")
         mkbtn(sc, "Save settings", self.voice_save_settings, "primary", padx=22).pack(anchor="w", pady=(0, 14))
 
         # ── realtime save: settings, script editor, accounts ──
@@ -6684,7 +6699,73 @@ class App(_Base):
             b.pack(fill="x", pady=1, padx=4)
 
     def _voice_alive(self):
-        return bool(self._voice_thread and self._voice_thread.is_alive())
+        if self._voice_main_running or self._voice_regens:
+            return True
+        return self._voice_kind == "setup" and bool(self._voice_thread and self._voice_thread.is_alive())
+
+    def _voice_running(self):
+        return bool(self._voice_main_running or self._voice_regens)
+
+    def _voice_ui_update(self):
+        """Button state + animation sob ekhane theke thik hoy."""
+        run = self._voice_running()
+        busy = self._voice_alive()
+        if not run:
+            self._voice_stopping = False
+        try:
+            self.voice_start_btn.configure(state="disabled" if (self._voice_main_running or (busy and not run)) else "normal")
+            self.voice_stop_btn.configure(state="normal" if run else "disabled")
+            self.voice_clear_btn.configure(state="disabled" if busy else "normal")
+            self.voice_atext.configure(state="disabled" if busy else "normal")
+            if not busy:
+                self.voice_status.configure(text="Ready", fg=MUTED)
+        except tk.TclError:
+            return
+        self.voice_act.set_active(run)
+        if (run or self._voice_stopping) and self._voice_anim_job is None:
+            self._voice_anim_tick()
+        elif not run and not self._voice_stopping:
+            self._voice_anim_reset()
+
+    def _voice_anim_reset(self):
+        if self._voice_anim_job:
+            try:
+                self.after_cancel(self._voice_anim_job)
+            except Exception:
+                pass
+            self._voice_anim_job = None
+        try:
+            self.voice_start_btn.configure(text="▶  START")
+            self.voice_stop_btn.configure(text="■  STOP", bg=DANGER, activebackground=DANGER)
+            self.voice_active_lbl.configure(text="")
+        except tk.TclError:
+            pass
+
+    def _voice_anim_tick(self):
+        self._voice_anim_job = None
+        run = self._voice_running()
+        if not run and not self._voice_stopping:
+            self._voice_anim_reset()
+            return
+        self._voice_anim_i += 1
+        i = self._voice_anim_i
+        k = (i // 6) % 4
+        dots = "." * k + " " * (3 - k)
+        try:
+            if self._voice_main_running:
+                self.voice_start_btn.configure(text="▶  Running" + dots)
+            if self._voice_stopping:
+                self.voice_stop_btn.configure(text="■  Stopping" + dots)
+                col = _mix(WARN, DANGER, (math.sin(i * 0.3) + 1) / 2)
+            else:
+                self.voice_stop_btn.configure(text="■  STOP")
+                col = _mix(DANGER, DANGER_HOV, (math.sin(i * 0.2) + 1) / 2)
+            self.voice_stop_btn.configure(bg=col, activebackground=col)
+            n = len(self._voice_slots.busy)
+            self.voice_active_lbl.configure(text=f"● {n} Chrome kaj korche" if run else "")
+        except tk.TclError:
+            return
+        self._voice_anim_job = self.after(50, self._voice_anim_tick)
 
     def _voice_sched(self, key, fn, ms):
         j = self._voice_jobs.get(key)
@@ -6901,6 +6982,9 @@ class App(_Base):
             has_srt = any(x.lower().endswith(".srt") and not x.startswith(VOICE_CORR_PREFIX) for x in files_here)
             has_corr = any(x.startswith(VOICE_CORR_PREFIX) and x.lower().endswith(".srt") for x in files_here)
             mklabel(top, f"\U0001f4c1  {name}", 11, FG, True, bg=PANEL2).pack(side="left")
+            if name in self._voice_regens:
+                mklabel(top, "  ⏳ " + {"mp3": "MP3", "srt": "SRT"}.get(self._voice_regens[name], "Gemini")
+                        + " regenerate cholche…", 9, WARN, True, bg=PANEL2).pack(side="left", padx=(8, 0))
             mklabel(top, ("  MP3 \u2713" if has_mp3 else "  MP3 \u2717"), 9, OK if has_mp3 else BAD,
                     bg=PANEL2).pack(side="left", padx=(10, 0))
             mklabel(top, ("SRT \u2713" if has_srt else "SRT \u2717"), 9, OK if has_srt else BAD,
@@ -7151,7 +7235,7 @@ class App(_Base):
                   else "Chrome visible — automation dekhte parben")
 
     def voice_setup_profile(self):
-        if self._voice_thread and self._voice_thread.is_alive():
+        if self._voice_alive():
             messagebox.showwarning("Busy", "Age Voice+SRT STOP korun.")
             return
         ok, err = _ensure_playwright()
@@ -7159,14 +7243,44 @@ class App(_Base):
             messagebox.showerror("Playwright", f"Install fail:\n{err}")
             return
         self.voice_log_line("Chrome Profile Setup shuru...")
+        self._voice_kind = "setup"
         self._voice_thread = threading.Thread(
             target=lambda: voice_profile_setup(self.voice_log_line), daemon=True)
         self._voice_thread.start()
 
+    def voice_setup_thread_profiles(self):
+        if self._voice_alive():
+            messagebox.showwarning("Busy", "Age Voice+SRT STOP korun.")
+            return
+        ok, err = _ensure_playwright()
+        if not ok:
+            messagebox.showerror("Playwright", f"Install fail:\n{err}")
+            return
+        try:
+            dflt = int(self._voice_cfg.get("threads") or 2)
+        except (TypeError, ValueError):
+            dflt = 2
+        n = simpledialog.askinteger("Thread profiles", "Total koyta thread (Chrome) chalaben? (2-5)",
+                                    initialvalue=max(2, min(5, dflt)), minvalue=2, maxvalue=5, parent=self)
+        if not n:
+            return
+        done = [i for i in range(2, n + 1)
+                if os.path.exists(os.path.join(VOICE_CLONES, f"t{i}", ".veepn_ok"))]
+        redo = False
+        if done:
+            redo = messagebox.askyesno(
+                "Thread profiles", f"Thread {', '.join(map(str, done))} e VeePN setup kora ache.\n\n"
+                                   "Ogulo muchhe abar notun kore setup korbo? (No = skip kore baki gulo)")
+        self.voice_log_line(f"Thread Profiles Setup shuru (thread 2 theke {n})...")
+        self._voice_kind = "setup"
+        self._voice_thread = threading.Thread(
+            target=lambda: voice_thread_profiles_setup(n, redo, self.voice_log_line), daemon=True)
+        self._voice_thread.start()
+
     def voice_regen(self, name, what):
         label = "MP3" if what == "mp3" else "SRT"
-        if self._voice_alive() or self.proc or self.busy:
-            messagebox.showinfo("Busy", "Kaj cholche — age shesh hok ba STOP korun.")
+        if self.proc or self.busy:
+            messagebox.showinfo("Busy", "Export cholche — shesh hole abar chalan.")
             return
         if not messagebox.askyesno("Regenerate " + label,
                                    (f"'{name}' er MP3 notun kore toiri hobe, tarpor SRT ar Corrected SRT-o notun hobe. Purano file gulo replace hobe. Cholbe?"
@@ -7176,33 +7290,55 @@ class App(_Base):
         self.voice_fix_srt(name, what)
 
     def voice_fix_srt(self, name, what="gemini"):
-        if self._voice_alive():
-            messagebox.showinfo("Busy", "Voice+SRT cholche — age shesh hok ba STOP korun.")
-            return
+        """Regenerate / Gemini fix. Multiple threads cholle: je Chrome (thread) ekhon free sheta te shuru hoy,
+        baki gulo cholte thake. Shob thread busy thakle hobe na."""
         if self.proc or self.busy:
             messagebox.showinfo("Busy", "Export cholche — shesh hole chalan.")
+            return
+        if self._voice_kind == "setup" and self._voice_alive() and not self._voice_running():
+            messagebox.showinfo("Busy", "Setup cholche — shesh hok.")
+            return
+        if name in self._voice_regens:
+            messagebox.showinfo("Busy", f"'{name}' er kaj ekhon-i cholche.")
+            return
+        if self._voice_stopping:
+            messagebox.showinfo("Stopping", "Stop hochhe — shesh hole abar chalan.")
             return
         ok, err = _ensure_playwright()
         if not ok:
             messagebox.showerror("Playwright", f"Install lagbe:\n{err}")
             return
         self.voice_save_settings(silent=True)
-        self._voice_stop.clear()
-        self.voice_start_btn.configure(state="disabled")
-        self.voice_stop_btn.configure(state="normal")
-        self.voice_clear_btn.configure(state="disabled")
-        self.voice_status.configure(text={"mp3": "MP3\u2026", "srt": "SRT\u2026"}.get(what, "Gemini\u2026"), fg=ACCENT)
         cfg = dict(self._voice_cfg)
         cfg["output_dir"] = VOICE_OUTPUT
+        cands = voice_slot_candidates(cfg)
+        got = None
+        for idx, prof in cands:
+            if self._voice_slots.try_acquire(idx):
+                got = (idx, prof)
+                break
+        if not got:
+            messagebox.showinfo(
+                "Shob Chrome busy",
+                f"Ekhon {len(cands)} ta Chrome (thread) shob-i kaj korche.\n"
+                "Ekta Chrome free hole (kaj shesh hole) abar Regenerate chapun.")
+            return
+        idx, prof = got
+        if not self._voice_alive():
+            self._voice_stop.clear()
+        self._voice_regens[name] = what
+        tag = f"T{idx}" if len(cands) > 1 else ""
+        self.voice_log_line(f"Regenerate ({what}): {name}" + (f"  -> Chrome T{idx} e shuru" if tag else ""))
+        hidden = self._voice_chrome_hidden
 
         def work():
             r = None
             try:
                 r = VoiceRunner(cfg, self.voice_log_line, self.voice_ask, self._voice_stop,
-                                chrome_hidden=self._voice_chrome_hidden)
+                                chrome_hidden=hidden, profile=prof, shared=self._voice_shared, tag=tag)
                 self._voice_runners.append(r)
                 r.run_single(name, what)
-                self.voice_log_line("--- shesh ---")
+                self.voice_log_line(f"--- {name}: shesh ---")
             except VoiceStopped:
                 self.voice_log_line("--- STOP kora hoyeche ---")
             except Exception as e:
@@ -7210,10 +7346,17 @@ class App(_Base):
             finally:
                 if r in self._voice_runners:
                     self._voice_runners.remove(r)
-                self.after(0, self._voice_finish)
+                self._voice_slots.release(idx)
+                self.after(0, lambda: self._voice_regen_done(name))
 
-        self._voice_thread = threading.Thread(target=work, daemon=True)
-        self._voice_thread.start()
+        threading.Thread(target=work, daemon=True).start()
+        self._voice_ui_update()
+        self.voice_refresh_results()
+
+    def _voice_regen_done(self, name):
+        self._voice_regens.pop(name, None)
+        self._voice_ui_update()
+        self.refresh_voice()
 
     def voice_gemini_login(self):
         if self._voice_alive():
@@ -7242,59 +7385,70 @@ class App(_Base):
                 "Gemini login", f"Account {', '.join(map(str, done))} e login kora ache.\n\n"
                                 "Ogulo abar login korbo? (No = skip kore baki gulo)")
         self.voice_log_line(f"Gemini Login Setup shuru ({n} ta account)...")
+        self._voice_kind = "setup"
         self._voice_thread = threading.Thread(
             target=lambda: voice_gemini_login_setup(n, redo, self.voice_log_line), daemon=True)
         self._voice_thread.start()
 
     def voice_start(self):
-        if self._voice_thread and self._voice_thread.is_alive():
+        if self._voice_main_running:
+            return
+        if self._voice_kind == "setup" and self._voice_alive():
+            messagebox.showinfo("Busy", "Setup cholche — shesh hole START chapun.")
             return
         if self.proc or self.busy:
             messagebox.showinfo("Busy", "Export cholche — shesh hole Voice+SRT chalan.")
             return
+        if self._voice_stopping:
+            messagebox.showinfo("Stopping", "Stop hochhe — shesh hole abar chalan.")
+            return
+        self.voice_start_btn.configure(text="⏳  Preparing…")
+        self.voice_status.configure(text="Preparing…", fg=ACCENT)
+        self.update_idletasks()
         self.voice_save_settings()
         self.voice_save_accounts()
         ok, err = _ensure_playwright()
         if not ok:
             messagebox.showerror("Playwright", f"Install lagbe:\n{err}")
+            self._voice_ui_update()
+            self._voice_anim_reset()
             return
         files = sorted(
             [os.path.join(VOICE_SCRIPTS, f) for f in os.listdir(VOICE_SCRIPTS)
              if f.lower().endswith(".txt") and os.path.isfile(os.path.join(VOICE_SCRIPTS, f))])
         if not files:
             messagebox.showwarning("Scripts", "Queue e kono script nei. Age script save korun.")
+            self._voice_ui_update()
+            self._voice_anim_reset()
             return
-        self._voice_stop.clear()
-        self.voice_start_btn.configure(state="disabled")
-        self.voice_stop_btn.configure(state="normal")
-        self.voice_status.configure(text="Running\u2026", fg=ACCENT)
+        if not self._voice_alive():
+            self._voice_stop.clear()
         cfg = dict(self._voice_cfg)
         cfg["output_dir"] = VOICE_OUTPUT
-        self.voice_clear_btn.configure(state="disabled")
-        self.voice_atext.configure(state="disabled")
-        del self._voice_runners[:]
+        self._voice_main_running = True
+        self._voice_kind = "run"
 
         def work():
             try:
                 voice_run_all(cfg, files, self.voice_log_line, self.voice_ask, self._voice_stop,
-                              lambda: self._voice_chrome_hidden, self._voice_runners)
+                              lambda: self._voice_chrome_hidden, self._voice_runners,
+                              self._voice_shared, self._voice_slots)
                 self.voice_log_line("--- shesh ---")
             except VoiceStopped:
                 self.voice_log_line("--- STOP kora hoyeche ---")
             except Exception as e:
                 self.voice_log_line(f"ERROR: {e}")
             finally:
-                del self._voice_runners[:]
                 self.after(0, self._voice_finish)
 
         self._voice_thread = threading.Thread(target=work, daemon=True)
         self._voice_thread.start()
+        self.voice_status.configure(text="Running…", fg=ACCENT)
+        self._voice_ui_update()
 
     def _voice_finish(self):
-        self.voice_start_btn.configure(state="normal")
-        self.voice_stop_btn.configure(state="disabled")
-        self.voice_clear_btn.configure(state="normal")
-        self.voice_status.configure(text="Ready", fg=MUTED)
+        self._voice_main_running = False
+        self._voice_ui_update()
         cur = self._voice_cur_script
         if cur and not os.path.exists(os.path.join(VOICE_SCRIPTS, cur)):
             self.voice_new_script()          # script ta done e chole geche
@@ -7372,8 +7526,14 @@ class App(_Base):
         self.note("✓ Voice+SRT sob faka (accounts thakche)", OK)
 
     def voice_stop(self):
+        if not self._voice_running():
+            return
         self._voice_stop.set()
+        self._voice_stopping = True
+        self.voice_stop_btn.configure(text="\u25a0  Stopping")
+        self.voice_status.configure(text="Stopping\u2026", fg=WARN)
         self.voice_log_line("Stop kora hochhe\u2026")
+        self._voice_ui_update()
 
 
 # ═════════════════════════════ VOICE + SRT AUTOMATION ═════════════════════════════
@@ -7474,7 +7634,7 @@ Script file-এর প্রতিটি sentence-এর জন্য সঠি�
 VOICE_DEFAULTS = {
     "output_dir": VOICE_OUTPUT,
     "ext_id": "",
-    "vpn_locations": "France, Netherlands, Singapore, United Kingdom, Optimal location",
+    "vpn_locations": "France, Russia, United Kingdom, Oregon, Virginia",
     "max_account_tries": 3,
     "max_vpn_tries": 8,
     "vpn_load_wait_sec": 15,
@@ -7490,10 +7650,12 @@ VOICE_DEFAULTS = {
     "gemini_enabled": True,
     "gemini_timeout_min": 2,
     "gemini_tries": 2,
-    "defaults_ver": 1,
+    "defaults_ver": 2,
 }
 
 # Notun default gulo purono saved config e-o ekbar boshiye dey (ekbar-i; tarpor user change korle thakbe)
+VOICE_DEFAULTS_V2 = {"vpn_locations": "France, Russia, United Kingdom, Oregon, Virginia"}
+VOICE_US_STATES = ("Oregon", "Virginia")
 VOICE_DEFAULTS_V1 = {"split_mode": "Split by Paragraphs", "vpn_load_wait_sec": 15,
                      "convert_timeout_min": 5, "zamzar_check_sec": 20, "gemini_timeout_min": 2}
 VOICE_FREE_LOCS = ["Optimal location", "France", "Netherlands", "Russia", "Singapore",
@@ -7594,6 +7756,9 @@ def _voice_load_cfg():
         if int(cfg.get("defaults_ver", 0) or 0) < 1:
             cfg.update(VOICE_DEFAULTS_V1)
             cfg["defaults_ver"] = 1
+        if int(cfg.get("defaults_ver", 0) or 0) < 2:
+            cfg.update(VOICE_DEFAULTS_V2)
+            cfg["defaults_ver"] = 2
     cfg["output_dir"] = VOICE_OUTPUT  # always keep inside app workspace
     return cfg
 
@@ -7717,11 +7882,23 @@ class VoiceRunner:
             except Exception:
                 pass
 
+    def _used_emails(self):
+        used = set()
+        try:
+            for l in open(VOICE_USED, encoding="utf-8").read().splitlines():
+                l = l.strip()
+                if l:
+                    used.add(l.split(":", 1)[0].strip().lower())
+        except Exception:
+            pass
+        return used
+
     def peek_account(self, skip):
-        """Ekta mail neya + reserve kore rakha — onno thread same mail nite parbe na."""
+        """Ekta mail neya + reserve kore rakha. Ager e login hoye jaoa (used) mail kokhono dewa hobe na."""
         with self.shared["lock"]:
             if not os.path.exists(VOICE_ACCOUNTS):
                 return None
+            used = self._used_emails()
             for line in open(VOICE_ACCOUNTS, encoding="utf-8").read().splitlines():
                 line = line.strip()
                 if not line or line in skip or line in self.shared["reserved"]:
@@ -7730,6 +7907,8 @@ class VoiceRunner:
                     email, pw = line.split(":", 1)
                 else:
                     email, pw = line, line
+                if email.strip().lower() in used:
+                    continue
                 self.shared["reserved"].add(line)
                 return email.strip(), pw.strip(), line
         return None
@@ -7739,13 +7918,16 @@ class VoiceRunner:
             self.shared["reserved"].discard(line)
 
     def mark_used(self, line):
+        """Mail ke accounts.txt theke soriye accounts_used.txt e rakhe (ekbar-i, duplicate hoy na)."""
         with self.shared["lock"]:
+            email = line.split(":", 1)[0].strip().lower()
             lines = [l.strip() for l in open(VOICE_ACCOUNTS, encoding="utf-8").read().splitlines() if l.strip()]
-            if line in lines:
-                lines.remove(line)
-            atomic_write(VOICE_ACCOUNTS, "\n".join(lines) + ("\n" if lines else ""))
-            with open(VOICE_USED, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            keep = [l for l in lines if l.split(":", 1)[0].strip().lower() != email]
+            if keep != lines:
+                atomic_write(VOICE_ACCOUNTS, "\n".join(keep) + ("\n" if keep else ""))
+            if email not in self._used_emails():
+                with open(VOICE_USED, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
             self.shared["reserved"].discard(line)
 
     def debug(self, page, tag):
@@ -8006,8 +8188,43 @@ class VoiceRunner:
                 continue
         raise RuntimeError("VPN location select kora jayni")
 
+    def vpn_list_open(self, p):
+        try:
+            return p.get_by_text(re.compile(r"^\s*Free locations\s*$", re.I)).first.is_visible()
+        except Exception:
+            return False
+
+    def vpn_expand_us(self, p, state):
+        """United States row er dropdown khule Oregon / Virginia dekhay."""
+        rx = re.compile(rf"^\s*{state}\b")
+
+        def shown():
+            try:
+                return p.get_by_text(rx).first.is_visible()
+            except Exception:
+                return False
+        if shown():
+            return
+        us = p.get_by_text(re.compile(r"^\s*United States\b")).first
+        us.scroll_into_view_if_needed(timeout=8000)
+        for how in ("text", "edge"):
+            try:
+                if how == "text":
+                    us.click(timeout=3000)
+                else:
+                    b = us.bounding_box()
+                    w = p.evaluate("window.innerWidth")
+                    p.mouse.click(w - 70, b["y"] + b["height"] / 2)
+            except Exception:
+                continue
+            for _ in range(6):
+                p.wait_for_timeout(500)
+                if shown():
+                    return
+        raise RuntimeError("USA dropdown khola jayni")
+
     def vpn_connect(self):
-        locs = [x.strip() for x in self.cfg["vpn_locations"].split(",") if x.strip()]
+        locs = voice_vpn_choices(self.cfg.get("vpn_locations", "")) or voice_vpn_choices(VOICE_DEFAULTS["vpn_locations"])
         pool = [x for x in locs if x != self.last_vpn] or locs
         choice = random.choice(pool)
         self.last_vpn = choice
@@ -8017,8 +8234,8 @@ class VoiceRunner:
             if self.is_connected(p):
                 self.click_power(p, re.compile(r"^\s*Connected"))
                 p.get_by_text(re.compile(r"Connection is OFF", re.I)).first.wait_for(timeout=20000)
-            opened = False
-            for name in VOICE_FREE_LOCS:
+            opened = self.vpn_list_open(p)          # list age-i khola thakle kono location e click korbo na
+            for name in ([] if opened else VOICE_FREE_LOCS):
                 loc = p.get_by_text(re.compile(rf"^\s*{re.escape(name)}\b")).first
                 try:
                     if loc.is_visible():
@@ -8031,6 +8248,8 @@ class VoiceRunner:
                 box = p.get_by_text("Your IP").first.bounding_box()
                 p.mouse.click(box["x"] + 100, box["y"] - 60)
             p.wait_for_timeout(1200)
+            if choice in VOICE_US_STATES:
+                self.vpn_expand_us(p, choice)
             item = p.get_by_text(re.compile(rf"^\s*{re.escape(choice)}\b")).first
             item.scroll_into_view_if_needed(timeout=8000)
             self.vpn_pick(p, item)
@@ -8090,6 +8309,11 @@ class VoiceRunner:
         page.get_by_role("button", name="Continue", exact=True).click()
         page.get_by_text("Build Something").wait_for(timeout=60000)
         self.log("  login hoyeche")
+        acct_line = getattr(self, "_cur_acct", None)
+        if acct_line:                                   # login hoyei mail 'used' — voice generate hok ba na hok, ar use hobe na
+            self.mark_used(acct_line)
+            self._cur_acct = None
+            self.log("  mail used list e geche (ar use hobe na)")
         page.get_by_text("Voiceover", exact=True).first.click()
         page.wait_for_url("**/voiceover/**", timeout=60000)
         ta = self.find_editor(page)
@@ -8485,6 +8709,7 @@ class VoiceRunner:
                 raise RuntimeError("accounts.txt e aar mail nei")
             page = self.new_page()
             try:
+                self._cur_acct = acct[2]
                 self.speechify(page, acct[0], acct[1], text, mp3)
                 self.mark_used(acct[2])
                 return
@@ -9296,58 +9521,147 @@ class VoiceRunner:
 
 
 def voice_clone_profile(i, log):
-    """Thread i er jonno main Chrome profile er copy (extension/login shoho). Ekbar banai, pore reuse."""
+    """Thread i er alada Chrome profile. Main theke copy ar hoy na — prottek profile e VeePN
+    alada kore ekbar setup korte hoy ('Thread Profiles Setup'). Setup hoye thakle path dey, na hole None."""
     dst = os.path.join(VOICE_CLONES, f"t{i}")
-    marker = os.path.join(dst, ".clone_ok")
-    try:
-        if os.path.exists(marker):
-            return dst
-        if not os.path.isdir(VOICE_PROFILE):
-            log("Chrome profile nei — age 'Chrome Profile Setup' koro. (Thread " + str(i) + " bad)")
-            return None
-        if os.path.isdir(dst):
-            rm_tree(dst)
-        log(f"Thread {i}: Chrome profile copy hochhe (prothombar kichu somoy lagte pare)...")
-        os.makedirs(VOICE_CLONES, exist_ok=True)
-        shutil.copytree(VOICE_PROFILE, dst, ignore=shutil.ignore_patterns(
-            "Singleton*", "lockfile", "*.lock", "Cache", "Code Cache", "GPUCache", "GrShaderCache",
-            "ShaderCache", "DawnCache", "GraphiteDawnCache", "Crashpad", "BrowserMetrics*"))
-        with open(marker, "w") as fh:
-            fh.write("ok")
+    if os.path.exists(os.path.join(dst, ".veepn_ok")):
         return dst
-    except Exception as e:
-        log(f"Thread {i}: profile copy fail: {str(e).splitlines()[0][:160]}")
+    log(f"Thread {i}: ei profile e VeePN setup kora nei — Settings > Chrome > 'Thread Profiles Setup' "
+        f"chalie ekbar setup koro. (Thread {i} bad)")
+    return None
+
+
+class ActivityBar(tk.Canvas):
+    """Chhoto 'kaj cholche' bar — active thakle ekta alo ghure."""
+
+    def __init__(self, parent, height=5):
+        super().__init__(parent, height=height, bg=parent["bg"], highlightthickness=0, bd=0)
+        self.on, self._job, self._p = False, None, 0.0
+        self.bind("<Configure>", lambda e: self._draw())
+
+    def set_active(self, flag):
+        flag = bool(flag)
+        if flag == self.on:
+            return
+        self.on = flag
+        if flag and self._job is None:
+            self._tick()
+        elif not flag:
+            self._draw()
+
+    def _tick(self):
+        self._job = None
+        if not self.on:
+            self._draw()
+            return
+        self._p = (self._p + 0.018) % 1.0
+        self._draw()
         try:
-            rm_tree(dst)
-        except Exception:
+            self._job = self.after(30, self._tick)
+        except tk.TclError:
             pass
-        return None
+
+    def _draw(self):
+        try:
+            self.delete("all")
+            W, H = self.winfo_width(), self.winfo_height()
+            if W < 10:
+                return
+            self.create_rectangle(0, 0, W, H, fill=PANEL2, outline="")
+            if self.on:
+                seg = W * 0.3
+                x = -seg + (W + seg) * self._p
+                self.create_rectangle(max(0, x), 0, min(W, x + seg), H, fill=ACCENT, outline="")
+        except tk.TclError:
+            pass
+
+    def _retheme(self):
+        self._draw()
 
 
-def voice_run_all(cfg, files, log, ask, stop_event, hidden_getter, runners):
-    """Single thread = ekta Chrome, ekta ekta kore. Multiple = N ta Chrome ekshathe, shared queue theke."""
+class VoiceSlots:
+    """Kon Chrome slot (thread) ekhon busy — run + regenerate ek-i slot share kore."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.busy = set()
+
+    def try_acquire(self, idx):
+        with self.lock:
+            if idx in self.busy:
+                return False
+            self.busy.add(idx)
+            return True
+
+    def release(self, idx):
+        with self.lock:
+            self.busy.discard(idx)
+
+
+def voice_slot_candidates(cfg, log=None):
+    """[(slot, profile_dir)] — settings er thread sonkha onujayi, jegulo te VeePN setup kora ache."""
     multi = cfg.get("thread_mode") == "multiple"
     try:
         n = int(cfg.get("threads") or 1)
     except (TypeError, ValueError):
         n = 1
     n = max(2, min(5, n)) if multi else 1
-    n = max(1, min(n, len(files)))          # script er cheye beshi Chrome khola hobe na
+    out = [(1, VOICE_PROFILE)]
+    for i in range(2, n + 1):
+        p = os.path.join(VOICE_CLONES, f"t{i}")
+        if os.path.exists(os.path.join(p, ".veepn_ok")):
+            out.append((i, p))
+        elif log:
+            log(f"Thread {i}: VeePN setup kora nei \u2014 Settings > Chrome > 'Thread Profiles Setup' chalan. (Thread {i} bad)")
+    return out
+
+
+def voice_vpn_choices(raw):
+    """Settings er location list -> shudhu ei gulo-i connect hobe. 'United States' = Oregon + Virginia."""
+    out = []
+    for x in [s.strip() for s in str(raw).split(",") if s.strip()]:
+        t = " ".join(re.sub(r"[^a-z ]+", " ", x.lower()).split())
+        st = re.sub(r"^(united states|usa|us)\b\s*", "", t).strip()
+        if st in ("oregon", "virginia"):
+            c = [st.title()]
+        elif t in ("united states", "usa", "us"):
+            c = list(VOICE_US_STATES)
+        else:
+            c = [x]
+        for y in c:
+            if y not in out:
+                out.append(y)
+    return out
+
+
+def voice_run_all(cfg, files, log, ask, stop_event, hidden_getter, runners, shared=None, slots=None):
+    """Single thread = ekta Chrome. Multiple = N ta Chrome ekshathe, shared queue theke.
+    Regenerate e kaj kora slot gulo skip kora hoy."""
+    shared = shared or {"lock": threading.RLock(), "reserved": set(), "ask": threading.Lock()}
+    slots = slots or VoiceSlots()
+    cands = voice_slot_candidates(cfg, log)
+    multi = len(cands) > 1
+    want = max(1, min(len(cands), len(files)))
     q = queue.Queue()
     for f in files:
         q.put(f)
-    profiles = [VOICE_PROFILE]
-    for i in range(2, n + 1):               # Chrome gulo khola ager e clone, karon main profile lock hoye jabe
-        p = voice_clone_profile(i, log)
-        if p:
-            profiles.append(p)
-    n = len(profiles)
-    log(f"Threads: {n}  ({'multiple' if n > 1 else 'single'})  •  scripts: {len(files)}")
-    shared = {"lock": threading.RLock(), "reserved": set(), "ask": threading.Lock()}
+    claimed = []
+    for idx, prof in cands:
+        if len(claimed) >= want:
+            break
+        if slots.try_acquire(idx):
+            claimed.append((idx, prof))
+        else:
+            log(f"Thread {idx}: onno kaje busy \u2014 skip")
+    if not claimed:
+        log("Kono free Chrome nei \u2014 ekta kaj shesh hole abar START chapun.")
+        return
+    n = len(claimed)
+    log(f"Threads: {n}  ({'multiple' if multi else 'single'})  \u2022  scripts: {len(files)}")
 
     def worker(idx, prof):
         r = VoiceRunner(cfg, log, ask, stop_event, chrome_hidden=hidden_getter(), profile=prof,
-                        shared=shared, tag=(f"T{idx}" if n > 1 else ""))
+                        shared=shared, tag=(f"T{idx}" if multi else ""))
         runners.append(r)
         try:
             r.run_queue(q)
@@ -9360,14 +9674,15 @@ def voice_run_all(cfg, files, log, ask, stop_event, hidden_getter, runners):
                 runners.remove(r)
             except ValueError:
                 pass
+            slots.release(idx)          # Chrome bondho \u2014 ei slot ebar regenerate er jonno free
 
     ths = []
-    for idx, prof in enumerate(profiles, 1):
+    for k, (idx, prof) in enumerate(claimed, 1):
         t = threading.Thread(target=worker, args=(idx, prof), daemon=True)
         t.start()
         ths.append(t)
-        if idx < n:
-            time.sleep(3)                   # Chrome gulo ekshathe launch na kore ektu gap diye
+        if k < n:
+            time.sleep(3)               # Chrome gulo ekshathe launch na kore ektu gap diye
     for t in ths:
         t.join()
     if stop_event.is_set():
@@ -9379,8 +9694,7 @@ def voice_trim_profile(prof):
     if not prof or not os.path.isdir(prof):
         return
     for rel in ("Default/Cache", "Default/Code Cache", "Default/GPUCache", "Default/DawnGraphiteCache",
-                "Default/DawnWebGPUCache", "Default/Service Worker/CacheStorage",
-                "Default/Service Worker/ScriptCache", "Default/Media Cache",
+                "Default/DawnWebGPUCache", "Default/Media Cache",
                 "GrShaderCache", "ShaderCache", "GraphiteDawnCache", "DawnCache"):
         p = os.path.join(prof, *rel.split("/"))
         if os.path.isdir(p):
@@ -9456,13 +9770,6 @@ def voice_gemini_login_setup(n, redo, log):
             log(f"Account {i}: ei profile er Chrome sotti-i ekhono khola. Task Manager e 'Google Chrome' "
                 f"(background shoho) shesh kore abar chalan.")
             return
-        if i > 1:                                   # main theke asha purano Google login muchhe dao
-            for ck in ("Default/Network/Cookies", "Default/Network/Cookies-journal",
-                       "Default/Cookies", "Default/Cookies-journal"):
-                try:
-                    os.remove(os.path.join(prof, *ck.split("/")))
-                except OSError:
-                    pass
         log(f"Account {i}/{n}: Chrome khulbe — Gemini te {'ekta notun ' if i > 1 else ''}"
             f"Google account diye login korun, tarpor SOB Chrome window bondho korun.")
         try:
@@ -9483,18 +9790,22 @@ def voice_gemini_login_setup(n, redo, log):
     log("Gemini login setup shesh.")
 
 
-def voice_profile_setup(log):
-    os.makedirs(VOICE_PROFILE, exist_ok=True)
+def voice_profile_setup(log, prof=None, label=""):
+    """Ekta Chrome profile e VeePN install + pura load howa porjonto setup. Window bondho korle shesh."""
+    prof = prof or VOICE_PROFILE
+    os.makedirs(prof, exist_ok=True)
+    tag = f"[{label}] " if label else ""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         ctx = pw.chromium.launch_persistent_context(
-            VOICE_PROFILE, channel="chrome", headless=False, no_viewport=True,
+            prof, channel="chrome", headless=False, no_viewport=True,
             ignore_default_args=["--disable-extensions", "--enable-automation"],
             args=["--start-maximized"])
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto("https://chromewebstore.google.com/search/veepn")
-        log("Chrome khulechhe. VeePN install kore toolbar e pin korun. Shesh hole window bondho korun. "
-            "(Gemini login ei window te hobe na — 'Gemini Login Setup' use korun.)")
+        log(tag + "Chrome khulechhe. VeePN install kore toolbar e pin korun, tarpor VeePN icon e click kore "
+                  "'Loading' shesh howa porjonto (2 min porjonto) wait korun jeno VeePN pura khole. "
+                  "Tarpor window bondho korun. (Gemini login ei window te hobe na — 'Gemini Login Setup' use korun.)")
         ids = set()
         try:
             while True:
@@ -9511,16 +9822,40 @@ def voice_profile_setup(log):
             ctx.close()
         except Exception:
             pass
-    try:                                    # profile change hoyeche — purano thread-copy gulo bad
-        if os.path.isdir(VOICE_CLONES):         # (je gulo te alada Gemini login ache sei gulo thakbe)
-            for d in os.listdir(VOICE_CLONES):
-                dp = os.path.join(VOICE_CLONES, d)
-                if os.path.isdir(dp) and not os.path.exists(os.path.join(dp, ".gemini_ok")):
-                    rm_tree(dp)
+    try:
+        with open(os.path.join(prof, ".veepn_ok"), "w") as fh:
+            fh.write("ok")
     except Exception:
         pass
-    log("Setup shesh. Extension ID: " + (", ".join(ids) if ids else "(auto-detect cholbe)"))
+    log(tag + "Setup shesh. Extension ID: " + (", ".join(ids) if ids else "(auto-detect cholbe)"))
 
+
+def voice_thread_profiles_setup(n, redo, log):
+    """Thread 2..n er prottek profile e alada kore VeePN setup (main theke copy na)."""
+    _voice_ensure_dirs()
+    os.makedirs(VOICE_CLONES, exist_ok=True)
+    for i in range(2, n + 1):
+        prof = os.path.join(VOICE_CLONES, f"t{i}")
+        if os.path.exists(os.path.join(prof, ".veepn_ok")) and not redo:
+            log(f"Thread {i}: VeePN age thekei setup ache, skip")
+            continue
+        if os.path.isdir(prof) and _voice_profile_in_use(prof):
+            log(f"Thread {i}: ei profile er Chrome ekhono khola — bondho kore abar chalan.")
+            return
+        if os.path.isdir(prof):                     # purano (copy kora / adhura) profile muchhe fresh shuru
+            try:
+                rm_tree(prof)
+            except Exception as e:
+                log(f"Thread {i}: purano profile muchha gelo na: {str(e).splitlines()[0][:120]}")
+                return
+        log(f"Thread {i}/{n}: notun profile e VeePN setup shuru...")
+        try:
+            voice_profile_setup(log, prof, f"Thread {i}")
+        except Exception as e:
+            log(f"Thread {i}: setup fail: {str(e).splitlines()[0][:160]}")
+            return
+        voice_trim_profile(prof)
+    log("Thread profiles setup shesh. Ebar Multiple threads e START chapte paren.")
 
 
 if __name__ == "__main__":
