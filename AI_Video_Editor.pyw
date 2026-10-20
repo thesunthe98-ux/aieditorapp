@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.6.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6578,6 +6578,8 @@ class App(_Base):
         dv = tk.StringVar(value="1" if self._voice_cfg.get("vpn_disconnect_after", True) else "0")
         self.voice_vars["vpn_disconnect_after"] = dv
         fspan(b, 2, mktoggle(b, "Shesh hole VPN disconnect koro", dv, bg=PANEL))
+        field(b, 3, "VPN load wait", "vpn_load_wait_sec", 8,
+              "seconds — VeePN 'Loading' e atke thakle ei somoy por reload kore abar chesta korbe")
         b = mkcard(sc, "Account & Extension")
         field(b, 0, "Extension ID", "ext_id", 40)
         field(b, 1, "Max mail tries", "max_account_tries", 8)
@@ -6590,8 +6592,8 @@ class App(_Base):
         gv = tk.StringVar(value="1" if self._voice_cfg.get("gemini_enabled", True) else "0")
         self.voice_vars["gemini_enabled"] = gv
         fspan(b, 0, mktoggle(b, "MP3 + SRT er por Gemini diye corrected SRT banao", gv, bg=PANEL))
-        field(b, 1, "Gemini timeout", "gemini_timeout_min", 8, "minutes")
-        field(b, 2, "Max Gemini tries", "gemini_tries", 8)
+        field(b, 1, "Gemini timeout", "gemini_timeout_min", 8, "minutes — submit theke download porjonto ei somoy e na holei abar notun kore submit")
+        field(b, 2, "Max Gemini tries", "gemini_tries", 8, "koybar submit korbe (2 = 1ta timeout/fail hole 1bar abar)")
         fspan(b, 3, mkbtn(b, "Gemini Login Setup (alada account)", self.voice_gemini_login, "ghost"))
         fnote(b, 4, "Prottek thread (Chrome) er jonno alada Google account. Ekbar login korlei hobe. "
                     "Account 1 = main Chrome, 2-5 = onno Chrome gulo. Normal Chrome khulbe (Google automation "
@@ -6847,9 +6849,16 @@ class App(_Base):
             if k == "thread_mode":
                 self._voice_cfg[k] = "multiple" if val.lower().startswith("multiple") else "single"
                 continue
-            if k in ("max_account_tries", "max_vpn_tries", "gen_timeout_min",
+            if k == "gemini_timeout_min":
+                try:
+                    val = max(0.5, float(val))
+                    if val == int(val):
+                        val = int(val)
+                except ValueError:
+                    val = VOICE_DEFAULTS[k]
+            elif k in ("max_account_tries", "max_vpn_tries", "vpn_load_wait_sec", "gen_timeout_min",
                      "export_timeout_min", "convert_timeout_min", "threads",
-                     "gemini_timeout_min", "gemini_tries"):
+                     "gemini_tries"):
                 try:
                     val = int(val)
                 except ValueError:
@@ -6898,8 +6907,10 @@ class App(_Base):
                     bg=PANEL2).pack(side="left", padx=(6, 0))
             mklabel(top, ("Corrected \u2713" if has_corr else "Corrected \u2717"), 9, OK if has_corr else MUTED,
                     bg=PANEL2).pack(side="left", padx=(6, 0))
-            mkbtn(top, "Use in project", lambda n=name: self._voice_use_folder(n), "primary",
+            mkbtn(top, "\U0001f5d1 Delete", lambda n=name: self.voice_delete_folder(n), "danger",
                   pady=2, padx=10).pack(side="right")
+            mkbtn(top, "Use in project", lambda n=name: self._voice_use_folder(n), "primary",
+                  pady=2, padx=10).pack(side="right", padx=4)
             mkbtn(top, "Open folder", lambda p=folder: open_path(p), "flat", pady=2, padx=8).pack(side="right", padx=4)
             if _voice_find_lb(name) and has_srt:
                 mkbtn(top, "Gemini fix", lambda n=name: self.voice_fix_srt(n), "ghost",
@@ -6960,6 +6971,35 @@ class App(_Base):
                 if is_audio:
                     mkbtn(row, "\u25b6 Play", lambda p=fp: self._voice_play(p), "ghost", pady=2, padx=10).pack(side="right")
                     mkbtn(row, "\u25a0", self._voice_play_stop, "flat", pady=2, padx=8).pack(side="right", padx=4)
+
+    def voice_delete_folder(self, name):
+        """Voice+SRT: ekta generated folder (MP3 + SRT) computer theke delete kore."""
+        folder = os.path.join(VOICE_OUTPUT, name)
+        if not os.path.isdir(folder):
+            self.voice_refresh_results()
+            return
+        if self._voice_alive():
+            messagebox.showinfo("Busy", "Voice+SRT cholche — age STOP koro, tarpor Delete koro.")
+            return
+        if not messagebox.askyesno(
+                "Delete folder",
+                f"'{name}' folder delete korbe?\n\n"
+                "• Ei folder er MP3 + SRT (computer theke muchhe jabe)\n\n"
+                "Script queue / raw script / project e boshano audio-SRT muchbe na.",
+                icon="warning"):
+            return
+        self._voice_play_stop()
+        self._voice_drag_path = None
+        try:
+            rm_tree(folder)
+        except Exception as e:
+            messagebox.showerror("Delete", f"Delete hoyni: {e}")
+        if os.path.isdir(folder):
+            self.note(f"Delete puro hoyni — file open thakte pare: {name}", WARN)
+        else:
+            self.note(f"✓ Deleted: {name}", OK)
+        self.voice_refresh_results()
+        self.refresh_usage()
 
     def _voice_play(self, path):
         self._voice_play_stop()
@@ -7437,6 +7477,7 @@ VOICE_DEFAULTS = {
     "vpn_locations": "France, Netherlands, Singapore, United Kingdom, Optimal location",
     "max_account_tries": 3,
     "max_vpn_tries": 8,
+    "vpn_load_wait_sec": 15,
     "vpn_disconnect_after": True,
     "voice_name": "Albert (M)",
     "split_mode": "Split by Paragraphs",
@@ -7444,12 +7485,17 @@ VOICE_DEFAULTS = {
     "threads": 1,
     "gen_timeout_min": 20,
     "export_timeout_min": 15,
-    "convert_timeout_min": 8,
+    "convert_timeout_min": 5,
     "zamzar_check_sec": 20,
     "gemini_enabled": True,
-    "gemini_timeout_min": 15,
+    "gemini_timeout_min": 2,
     "gemini_tries": 2,
+    "defaults_ver": 1,
 }
+
+# Notun default gulo purono saved config e-o ekbar boshiye dey (ekbar-i; tarpor user change korle thakbe)
+VOICE_DEFAULTS_V1 = {"split_mode": "Split by Paragraphs", "vpn_load_wait_sec": 15,
+                     "convert_timeout_min": 5, "zamzar_check_sec": 20, "gemini_timeout_min": 2}
 VOICE_FREE_LOCS = ["Optimal location", "France", "Netherlands", "Russia", "Singapore",
                    "United Kingdom", "United States"]
 VOICE_SPLIT_MODES = ["Split by Paragraphs", "Split by Sentences", "Split by Lines"]
@@ -7545,6 +7591,9 @@ def _voice_load_cfg():
             cfg.update(json.load(open(VOICE_CONFIG, encoding="utf-8")))
         except Exception:
             pass
+        if int(cfg.get("defaults_ver", 0) or 0) < 1:
+            cfg.update(VOICE_DEFAULTS_V1)
+            cfg["defaults_ver"] = 1
     cfg["output_dir"] = VOICE_OUTPUT  # always keep inside app workspace
     return cfg
 
@@ -7827,8 +7876,51 @@ class VoiceRunner:
             pass
         p.goto(f"chrome-extension://{eid}/{popup}", timeout=30000)
         p.wait_for_timeout(2500)
+        try:
+            self.vpn_wait_loaded(p, eid, popup)
+        except Exception:
+            self.close_page(p)
+            raise
         self.dismiss_popups(p)
         return p
+
+    def vpn_wait_loaded(self, p, eid, popup):
+        """VeePN 'Loading — We're setting up your extension' screen e atke thakle:
+        X second wait -> na hole page reload -> abar wait (max 3 bar), tarpor error (VPN tries e abar hobe)."""
+        try:
+            wait = max(10, int(self.cfg.get("vpn_load_wait_sec", 60)))
+        except (TypeError, ValueError):
+            wait = 60
+        rx = re.compile(r"setting up your extension|take up to 2 minutes|^\s*Loading\b", re.I)
+
+        def loading():
+            try:
+                return p.get_by_text(rx).first.is_visible()
+            except Exception:
+                return False
+
+        for rnd in range(3):
+            if not loading():
+                return
+            if rnd == 0:
+                self.log("  VeePN 'Loading' dekhacche — load howar jonno wait korchi...")
+            t0 = time.time()
+            while time.time() - t0 < wait:
+                self.sleep(2000, p)
+                if not loading():
+                    self.log("  VeePN load hoyeche")
+                    return
+            if rnd < 2:
+                self.log(f"  VeePN {wait}s e load hoyni — page reload kore abar chesta (try {rnd + 2}/3)")
+                try:
+                    p.goto(f"chrome-extension://{eid}/{popup}", timeout=30000)
+                except Exception:
+                    try:
+                        p.reload(timeout=30000)
+                    except Exception:
+                        pass
+                p.wait_for_timeout(2500)
+        raise RuntimeError("VeePN extension 'Loading' e atke ache (reload kore-o load hoyni)")
 
     def dismiss_popups(self, p):
         try:
@@ -8721,8 +8813,14 @@ class VoiceRunner:
             self.sleep(500, page)
         raise RuntimeError("Gemini upload complete hoyni (timeout)")
 
+    def _gem_timeout_sec(self):
+        try:
+            return max(30.0, float(self.cfg.get("gemini_timeout_min", 15)) * 60)
+        except (TypeError, ValueError):
+            return 15 * 60.0
+
     def gemini_wait_done(self, page):
-        timeout = int(self.cfg.get("gemini_timeout_min", 15)) * 60
+        timeout = self._gem_timeout_sec()
         export = page.get_by_role("button", name=re.compile(r"^\s*Export\b", re.I))
         open_card = self.gemini_open_card_btn(page)
         stop = page.locator("button[aria-label*='Stop' i]")
@@ -8733,7 +8831,7 @@ class VoiceRunner:
         while True:
             self.check_stop()
             if time.time() - t0 > timeout:
-                raise RuntimeError("Gemini timeout")
+                raise RuntimeError("Gemini timeout (%s min e file toiri hoyni)" % self.cfg.get("gemini_timeout_min", 15))
             try:
                 if limit.is_visible():
                     raise RuntimeError("Gemini limit/usage cap hoye geche")
@@ -8878,6 +8976,9 @@ class VoiceRunner:
                      self.gemini_download_via_export]
         err = None
         for fn in order:
+            dl = getattr(self, "_gem_deadline", None)
+            if dl and time.time() > dl:
+                raise RuntimeError("Gemini timeout (download %s min er moddhe hoyni)" % self.cfg.get("gemini_timeout_min", 15))
             try:
                 fn(page, dest_md)
                 return
@@ -8928,7 +9029,8 @@ class VoiceRunner:
                 break
         if not sent:
             raise RuntimeError("Submit button click hoyni")
-        self.log("  Gemini file toiri korche...")
+        self._gem_deadline = time.time() + self._gem_timeout_sec()   # submit theke download porjonto
+        self.log("  Gemini file toiri korche... (timeout %s min)" % self.cfg.get("gemini_timeout_min", 15))
         self.gemini_wait_done(page)
         tmp_md = out_srt + ".md.tmp"
         self.log("  Export / Download -> .md / .txt")
@@ -9003,6 +9105,8 @@ class VoiceRunner:
                 last = e
                 msg = str(e).splitlines()[0][:200]
                 self.log(f"  Gemini fail: {msg}")
+                if "timeout" in msg.lower() and attempt + 1 < tries:
+                    self.log(f"  Timeout — notun kore abar submit korchi (try {attempt + 2}/{tries})")
                 self.debug(page, "gemini")
                 if "UNSUPPORTED" in msg and not use_txt:
                     use_txt = True                      # .srt nile na — .txt naam diye abar
