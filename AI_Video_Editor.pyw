@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6584,6 +6584,7 @@ class App(_Base):
         field(b, 0, "Generate", "gen_timeout_min", 8)
         field(b, 1, "Export", "export_timeout_min", 8)
         field(b, 2, "Convert (SRT)", "convert_timeout_min", 8)
+        field(b, 3, "Zamzar check", "zamzar_check_min", 8, "koto minute por por Converting ache kina dekhbe")
         b = mkcard(sc, "Gemini", "SRT correction")
         gv = tk.StringVar(value="1" if self._voice_cfg.get("gemini_enabled", True) else "0")
         self.voice_vars["gemini_enabled"] = gv
@@ -6850,6 +6851,11 @@ class App(_Base):
                      "gemini_timeout_min", "gemini_tries"):
                 try:
                     val = int(val)
+                except ValueError:
+                    val = VOICE_DEFAULTS[k]
+            if k == "zamzar_check_min":
+                try:
+                    val = max(0.25, float(val))
                 except ValueError:
                     val = VOICE_DEFAULTS[k]
             self._voice_cfg[k] = val
@@ -7398,7 +7404,7 @@ VOICE_DEFAULTS = {
     "ext_id": "",
     "vpn_locations": "France, Netherlands, Singapore, United Kingdom, Optimal location",
     "max_account_tries": 3,
-    "max_vpn_tries": 4,
+    "max_vpn_tries": 8,
     "vpn_disconnect_after": True,
     "voice_name": "Albert (M)",
     "split_mode": "Split by Paragraphs",
@@ -7407,6 +7413,7 @@ VOICE_DEFAULTS = {
     "gen_timeout_min": 20,
     "export_timeout_min": 15,
     "convert_timeout_min": 8,
+    "zamzar_check_min": 1,
     "gemini_enabled": True,
     "gemini_timeout_min": 15,
     "gemini_tries": 2,
@@ -7530,6 +7537,10 @@ def _ensure_playwright():
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+class ZamzarRetry(Exception):
+    """Zamzar e kaj hocche na -> VPN badle abar prothom theke upload."""
 
 
 class VoiceStopped(Exception):
@@ -8149,6 +8160,27 @@ class VoiceRunner:
             self.zamzar_dismiss(page)
         raise RuntimeError("Zamzar e file upload hoyni" + (f": {last}" if last else ""))
 
+    def zamzar_limit_popup(self, page):
+        """'Your files are ready to download / Create Zamzar account' popup."""
+        for rx in (r"Your files are ready to download", r"Create Zamzar account",
+                   r"used up your free conversions"):
+            try:
+                if page.get_by_text(re.compile(rx, re.I)).first.is_visible():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def zamzar_converting(self, page):
+        """'Converting' spinner / 'Hang tight' message dekha jachche kina."""
+        for rx in (r"^\s*Converting", r"Hang tight"):
+            try:
+                if page.get_by_text(re.compile(rx, re.I)).first.is_visible():
+                    return True
+            except Exception:
+                pass
+        return False
+
     def zamzar_convert_and_wait(self, page):
         now_rx = re.compile(r"^\s*Convert Now\s*$", re.I)
         conv_rx = re.compile(r"^\s*Convert\s*$", re.I)
@@ -8166,13 +8198,21 @@ class VoiceRunner:
             except Exception:
                 return False
 
+        def done():
+            return visible(dl) and ("/files/" in (page.url or "")
+                                    or visible(page.get_by_text(re.compile(r"All Done", re.I)).first))
+
+        interval = max(15.0, float(self.cfg.get("zamzar_check_min", 1)) * 60)
         deadline = time.time() + self.cfg["convert_timeout_min"] * 60
         started = False
+        next_check = 0.0
         last_now = 0.0
+        clicks_after_start = 0
         while time.time() < deadline:
             self.check_stop()
-            if visible(dl) and ("/files/" in (page.url or "")
-                                or visible(page.get_by_text(re.compile(r"All Done", re.I)).first)):
+            if self.zamzar_limit_popup(page):
+                raise ZamzarRetry("account popup (free limit)")
+            if done():
                 return dl
             if not started:
                 if visible(pop):
@@ -8180,17 +8220,41 @@ class VoiceRunner:
                         pop.click(timeout=4000)
                         self.log("  converting...")
                         started = True
+                        next_check = time.time() + interval
                     except Exception:
                         pass
                 elif visible(now) and time.time() - last_now > 6:
                     try:
                         now.click(timeout=4000)
                         self.log("  Convert Now")
+                        started = True
+                        next_check = time.time() + interval
                     except Exception:
                         pass
                     last_now = time.time()
+            elif time.time() >= next_check:
+                next_check = time.time() + interval
+                if self.zamzar_converting(page):
+                    self.log("  check: Converting cholche...")
+                elif done():
+                    return dl
+                elif self.zamzar_limit_popup(page):
+                    raise ZamzarRetry("account popup (free limit)")
+                else:
+                    # Converting dekha jachche na. Convert/Convert Now button ache hole ekbar chap dibe.
+                    btn = pop if visible(pop) else (now if visible(now) else None)
+                    if btn is not None and clicks_after_start < 1:
+                        clicks_after_start += 1
+                        try:
+                            btn.click(timeout=4000)
+                            self.log("  check: Converting nai, Convert abar chaplam")
+                            next_check = time.time() + interval
+                        except Exception:
+                            pass
+                    else:
+                        raise ZamzarRetry("Converting dekhay nai")
             self.sleep(1500, page)
-        raise RuntimeError("Zamzar convert timeout")
+        raise ZamzarRetry("Zamzar convert timeout")
 
     def zamzar(self, page, mp3, out_srt):
         self.log("Zamzar: upload")
@@ -8202,9 +8266,22 @@ class VoiceRunner:
         self.sleep(2000, page)
         dl = self.zamzar_convert_and_wait(page)
         self.log("  SRT ready")
-        with page.expect_download(timeout=90000) as d:
+        got = []
+        page.once("download", lambda d: got.append(d))
+        try:
             dl.click(timeout=10000)
-        d.value.save_as(out_srt)
+        except Exception:
+            if self.zamzar_limit_popup(page):
+                raise ZamzarRetry("Download e account popup ashlo")
+        t0 = time.time()
+        while not got and time.time() - t0 < 90:
+            self.check_stop()
+            if self.zamzar_limit_popup(page):
+                raise ZamzarRetry("Download e account popup ashlo")
+            self.sleep(1000, page)
+        if not got:
+            raise ZamzarRetry("Download shuru hoyni")
+        got[0].save_as(out_srt)
         if not os.path.exists(out_srt) or os.path.getsize(out_srt) == 0:
             raise RuntimeError("SRT download thik hoyni")
         self.log(f"  SRT saved: {out_srt}")
@@ -8245,12 +8322,19 @@ class VoiceRunner:
             except Exception as e:
                 self.log(f"  VPN problem: {str(e).splitlines()[0][:200]}")
                 continue
+            try:
+                self.ctx.clear_cookies(domain="zamzar.com")
+            except Exception:
+                pass
             page = self.new_page()
             try:
                 self.zamzar(page, mp3, srt)
                 return
             except VoiceStopped:
                 raise
+            except ZamzarRetry as e:
+                self.log(f"  Zamzar retry ({e}) -> VPN change kore abar prothom theke upload")
+                self.debug(page, "zamzar")
             except Exception as e:
                 self.log(f"  Zamzar fail: {str(e).splitlines()[0][:200]}")
                 self.debug(page, "zamzar")
