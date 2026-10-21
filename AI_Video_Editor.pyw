@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.7.0"
+APP_VERSION = "2.8.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6412,6 +6412,10 @@ class App(_Base):
         self._voice_q = queue.Queue()
         self._voice_cur_script = None
         self._voice_drag_path = None
+        self._voice_live = {}               # script name -> live kaj er obostha (kon dhape ache)
+        self._voice_tag_cur = {}            # chrome thread tag -> ekhon kon script e kaj korche
+        self._voice_live_w = {}             # script name -> live row er widget gulo
+        self._voice_live_i = 0
 
         self.header(f, "Voice + SRT",
                     "Script \u2192 Speechify (MP3) \u2192 VeePN \u2192 Zamzar (SRT). Prottek script er MP3+SRT alada folder e.")
@@ -6668,7 +6672,11 @@ class App(_Base):
                 tag = "err" if ("fail" in low or "error" in low or "problem" in low) else (
                     "ok" if ("shesh" in low or "saved" in low) else (
                         "step" if "=====" in line else None))
-                if "MP3 saved" in line or "SRT saved" in line or "SHESH" in line:
+                try:
+                    _need = self._voice_track(line)
+                except Exception:
+                    _need = False
+                if _need or "MP3 saved" in line or "SRT saved" in line or "SHESH" in line:
                     self.after(300, self.voice_refresh_results)     # show new files live
                 self.voice_log.configure(state="normal")
                 self.voice_log.insert("end", line + "\n", tag)
@@ -6678,7 +6686,186 @@ class App(_Base):
                                             fg=BAD if tag == "err" else (OK if tag == "ok" else MUTED))
         except queue.Empty:
             pass
+        try:
+            self._voice_live_tick()
+        except Exception:
+            pass
         self.after(200, self._voice_poll)
+
+    # ───────── live progress (Generated section e dekhabe ekhon ki kaj cholche) ─────────
+    _VL_NAME = {"mp3": "MP3", "srt": "SRT", "gemini": "Gemini"}
+    _VL_NUM = {"mp3": "\u2460", "srt": "\u2461", "gemini": "\u2462"}
+
+    def _voice_cur_stage(self, d):
+        gone = d["done"] | d["skipped"] | d["bad"]
+        for s_ in d["stages"]:
+            if s_ not in gone:
+                return s_
+        return None
+
+    def _voice_track(self, line):
+        """Log line pore bojhe: kon script e, kon dhape (MP3 / SRT / Gemini) kaj cholche.
+        True dile Generated list notun kore ankte hobe."""
+        msg = line[11:].strip()
+        m = re.match(r"^\[(T\d+)\]\s*(.*)$", msg)
+        tag, body = (m.group(1), m.group(2).strip()) if m else ("", msg)
+        now = time.time()
+        h = re.match(r"^=+\s*(.+?)\s*=+$", body)
+        if h:
+            inner = h.group(1)
+            m2 = re.match(r"^(.*?)\s*\((mp3|srt|gemini)\)$", inner, re.I)
+            name, what = (m2.group(1).strip(), m2.group(2).lower()) if m2 else (inner, "all")
+            gem = bool(self._voice_cfg.get("gemini_enabled", True))
+            if what == "gemini":
+                stages = ["gemini"]
+            elif what == "srt":
+                stages = ["srt"] + (["gemini"] if gem else [])
+            else:
+                stages = ["mp3", "srt"] + (["gemini"] if gem else [])
+            done = set()
+            if what == "all":
+                try:
+                    mp = os.path.join(VOICE_OUTPUT, name, name + ".mp3")
+                    if os.path.exists(mp) and os.path.getsize(mp) > 1000:
+                        done.add("mp3")          # MP3 age thekei ache — Speechify skip hobe
+                except OSError:
+                    pass
+            self._voice_live[name] = {"tag": tag, "stages": stages, "done": done, "skipped": set(),
+                                      "bad": set(), "state": "run", "t0": now, "st0": now,
+                                      "detail": "Shuru hochhe\u2026"}
+            self._voice_tag_cur[tag] = name
+            return True
+        name = self._voice_tag_cur.get(tag)
+        d = self._voice_live.get(name) if name else None
+        if not d or d["state"] != "run" or not body or body.startswith("---"):
+            return False
+        low = body.lower()
+        st = d["stages"]
+        before = self._voice_cur_stage(d)
+        if low.startswith(("mp3 saved", "mp3 notun kore")) and "mp3" in st:
+            d["done"].add("mp3")
+        elif low.startswith(("srt saved", "srt notun kore")) and "srt" in st:
+            d["done"].add("srt")
+        elif (low.startswith("corrected srt saved") or "corrected srt age thekei" in low) and "gemini" in st:
+            d["done"].add("gemini")
+        elif "gemini correction skip" in low and "gemini" in st:
+            d["skipped"].add("gemini")
+        elif low.startswith("gemini fail") and ("ager moto ache" in low or "hoyni" in low) and "gemini" in st:
+            d["bad"].add("gemini")
+        elif low.startswith("shesh:"):
+            d["state"] = "done"
+            d["tend"] = now
+            for s_ in st:
+                if s_ not in d["bad"] and s_ not in d["skipped"]:
+                    d["done"].add(s_)
+            d["detail"] = "Shesh"
+            return True
+        elif low.startswith("fail:"):
+            d["state"] = "fail"
+            d["tend"] = now
+            if before:
+                d["bad"].add(before)
+            d["detail"] = body[:140]
+            return True
+        d["detail"] = body[:110]
+        if self._voice_cur_stage(d) != before:
+            d["st0"] = now
+        return False
+
+    def _voice_live_finalize(self, only=None):
+        """Kaj shesh/stop hole je gulo 'run' obosthay atke ache shegulor obostha thik kore."""
+        changed = False
+        for n, d in self._voice_live.items():
+            if d["state"] != "run":
+                continue
+            if only is not None and n != only:
+                continue
+            if only is None and n in self._voice_regens:
+                continue
+            d["state"] = "done" if self._voice_cur_stage(d) is None else "stopped"
+            d["tend"] = time.time()
+            changed = True
+        if changed:
+            try:
+                self.voice_refresh_results()
+            except tk.TclError:
+                pass
+
+    def _voice_live_row(self, card, name, d):
+        fr = tk.Frame(card, bg=PANEL)
+        fr.pack(fill="x", padx=10, pady=(4, 4))
+        r1 = tk.Frame(fr, bg=PANEL)
+        r1.pack(fill="x", padx=8, pady=(6, 0))
+        chips = {}
+        for s_ in d["stages"]:
+            lb = mklabel(r1, "", 9, MUTED, True, bg=PANEL)
+            lb.pack(side="left", padx=(0, 12))
+            chips[s_] = lb
+        tl = mklabel(r1, "", 9, MUTED, bg=PANEL)
+        tl.pack(side="right")
+        dl = mklabel(fr, "", 9, FG, bg=PANEL, justify="left", anchor="w", wraplength=420)
+        dl.pack(fill="x", padx=8, pady=(2, 7))
+        fr.bind("<Configure>", lambda e, l=dl: l.configure(wraplength=max(140, e.width - 24)))
+        self._voice_live_w[name] = {"frame": fr, "chips": chips, "time": tl, "detail": dl, "cache": {}}
+        self._voice_live_update(self._voice_live_w[name], d)
+
+    def _voice_live_tick(self):
+        if not self._voice_live_w:
+            return
+        self._voice_live_i += 1
+        for name in list(self._voice_live_w):
+            w = self._voice_live_w.get(name)
+            d = self._voice_live.get(name)
+            try:
+                if not w or not d or not w["frame"].winfo_exists():
+                    self._voice_live_w.pop(name, None)
+                    continue
+                self._voice_live_update(w, d)
+            except tk.TclError:
+                self._voice_live_w.pop(name, None)
+
+    def _voice_live_update(self, w, d):
+        i = self._voice_live_i
+        now = time.time()
+        dots = ("." * ((i // 2) % 4)).ljust(3)
+        pulse = (math.sin(i * 0.9) + 1) / 2
+        run = d["state"] == "run"
+        cur = self._voice_cur_stage(d)
+        cache = w["cache"]
+
+        def put(key, widget, **kw):
+            sig = tuple(sorted(kw.items()))
+            if cache.get(key) != sig:
+                cache[key] = sig
+                widget.configure(**kw)
+
+        for s_, lb in w["chips"].items():
+            nm = f"{self._VL_NUM[s_]} {self._VL_NAME[s_]}"
+            if s_ in d["done"]:
+                put(s_, lb, text=nm + " \u2713", fg=OK)
+            elif s_ in d["skipped"]:
+                put(s_, lb, text=nm + " \u2013 skip", fg=MUTED)
+            elif s_ in d["bad"]:
+                put(s_, lb, text=nm + " \u2717", fg=BAD)
+            elif s_ == cur and run:
+                put(s_, lb, text=nm + " " + dots, fg=_mix(ACCENT, FG, pulse))
+            elif s_ == cur:
+                put(s_, lb, text=nm + " \u25a0", fg=WARN)
+            else:
+                put(s_, lb, text=nm, fg=MUTED)
+        tot = (now if run else d.get("tend", now)) - d["t0"]
+        ttxt = "\u23f1 " + fmt_dur(tot)
+        if run and cur:
+            ttxt += "   (dhap: " + fmt_dur(now - d["st0"]) + ")"
+        put("time", w["time"], text=ttxt)
+        det = d["detail"]
+        if d["state"] == "fail":
+            put("det", w["detail"], text="\u2717 " + det, fg=BAD)
+        elif d["state"] == "stopped":
+            put("det", w["detail"], text="\u25a0 Bondho hoye geche \u2014 " + det, fg=WARN)
+        else:
+            warn = re.search(r"fail|problem|retry|reload|abar", det.lower())
+            put("det", w["detail"], text="\u25b8 " + det, fg=WARN if warn else FG)
 
     def voice_refresh_scripts(self):
         for w in self.voice_slist.inner.winfo_children():
@@ -6960,6 +7147,7 @@ class App(_Base):
             self.voice_log_line("Settings saved")
 
     def voice_refresh_results(self):
+        self._voice_live_w = {}
         for w in self.voice_results.inner.winfo_children():
             w.destroy()
         out = VOICE_OUTPUT
@@ -6967,11 +7155,38 @@ class App(_Base):
         if os.path.isdir(out):
             folders = sorted((d for d in os.listdir(out) if os.path.isdir(os.path.join(out, d))),
                              key=lambda d: os.path.getmtime(os.path.join(out, d)), reverse=True)
-        if not folders:
+        # queue te ache kintu ekhono shuru hoyni
+        pending = set()
+        if self._voice_main_running:
+            try:
+                pending = {os.path.splitext(x)[0] for x in os.listdir(VOICE_SCRIPTS)
+                           if x.lower().endswith(".txt") and os.path.isfile(os.path.join(VOICE_SCRIPTS, x))}
+            except Exception:
+                pending = set()
+            pending -= {n for n, d_ in self._voice_live.items() if d_["state"] in ("run", "fail")}
+        if not folders and not pending:
             mklabel(self.voice_results.inner, "Ekhono kono output nei \u2014 START chapun.", 10, MUTED,
                     bg=PANEL).pack(anchor="w", padx=8, pady=8)
             return
+        # je gulo ekhon cholche shegulo ageh
+        folders = sorted(folders, key=lambda n: 0 if self._voice_live.get(n, {}).get("state") == "run" else 1)
+        pend_shown = [False]
+
+        def _pend_cards():
+            if pend_shown[0]:
+                return
+            pend_shown[0] = True
+            for pn in sorted(pending - set(folders)):
+                pc = tk.Frame(self.voice_results.inner, bg=PANEL2)
+                pc.pack(fill="x", padx=6, pady=4)
+                pr_ = tk.Frame(pc, bg=PANEL2)
+                pr_.pack(fill="x", padx=10, pady=8)
+                mklabel(pr_, f"\U0001f4c4  {pn}", 11, FG, True, bg=PANEL2).pack(side="left")
+                mklabel(pr_, "  \u23f3 queue e opekkha korche\u2026", 9, MUTED, bg=PANEL2).pack(side="left", padx=(8, 0))
+
         for name in folders:
+            if self._voice_live.get(name, {}).get("state") != "run":
+                _pend_cards()
             folder = os.path.join(out, name)
             card = tk.Frame(self.voice_results.inner, bg=PANEL2)
             card.pack(fill="x", padx=6, pady=4)
@@ -6999,6 +7214,12 @@ class App(_Base):
             if _voice_find_lb(name) and has_srt:
                 mkbtn(top, "Gemini fix", lambda n=name: self.voice_fix_srt(n), "ghost",
                       pady=2, padx=8).pack(side="right", padx=4)
+            d_ = self._voice_live.get(name)
+            if d_ and d_["state"] in ("run", "fail", "stopped"):
+                self._voice_live_row(card, name, d_)
+            elif name in pending:
+                mklabel(card, "  \u23f3 queue e ache \u2014 ager script shesh hole shuru hobe", 9, MUTED,
+                        bg=PANEL2).pack(anchor="w", padx=12, pady=(0, 4))
             src = next((os.path.join(b, f"{name}.txt") for b in (VOICE_DONE, VOICE_SCRIPTS)
                         if os.path.exists(os.path.join(b, f"{name}.txt"))), None)
             if has_mp3:
@@ -7055,6 +7276,8 @@ class App(_Base):
                 if is_audio:
                     mkbtn(row, "\u25b6 Play", lambda p=fp: self._voice_play(p), "ghost", pady=2, padx=10).pack(side="right")
                     mkbtn(row, "\u25a0", self._voice_play_stop, "flat", pady=2, padx=8).pack(side="right", padx=4)
+
+        _pend_cards()
 
     def voice_delete_folder(self, name):
         """Voice+SRT: ekta generated folder (MP3 + SRT) computer theke delete kore."""
@@ -7355,6 +7578,7 @@ class App(_Base):
 
     def _voice_regen_done(self, name):
         self._voice_regens.pop(name, None)
+        self.after(600, lambda n=name: self._voice_live_finalize(n))
         self._voice_ui_update()
         self.refresh_voice()
 
@@ -7449,6 +7673,7 @@ class App(_Base):
     def _voice_finish(self):
         self._voice_main_running = False
         self._voice_ui_update()
+        self.after(600, self._voice_live_finalize)
         cur = self._voice_cur_script
         if cur and not os.path.exists(os.path.join(VOICE_SCRIPTS, cur)):
             self.voice_new_script()          # script ta done e chole geche
@@ -7490,6 +7715,8 @@ class App(_Base):
             return
         self._voice_play_stop()
         self._voice_drag_path = None
+        self._voice_live.clear()
+        self._voice_tag_cur.clear()
         for k in ("script", "acct", "cfg"):
             j = self._voice_jobs.pop(k, None)
             if j:
