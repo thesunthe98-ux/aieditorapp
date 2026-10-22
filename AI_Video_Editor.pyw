@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.9.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6651,6 +6651,17 @@ class App(_Base):
 
     def refresh_voice(self):
         _voice_ensure_dirs()
+        if not self._voice_main_running and not self._voice_regens:
+            try:
+                _cfg_now = dict(self._voice_cfg)
+                _cfg_now["output_dir"] = VOICE_OUTPUT
+                voice_sweep_done(_cfg_now, self.voice_log_line)
+                cur = self._voice_cur_script
+                if cur and not os.path.exists(os.path.join(VOICE_SCRIPTS, cur)) \
+                        and not os.path.exists(os.path.join(VOICE_LB, cur)):
+                    self.voice_new_script()                  # editor e khola script ta done e chole geche
+            except Exception:
+                pass
         self.voice_refresh_scripts()
         self.voice_refresh_accounts()
         self.voice_refresh_results()
@@ -7637,11 +7648,15 @@ class App(_Base):
             self._voice_ui_update()
             self._voice_anim_reset()
             return
+        _cfg_now = dict(self._voice_cfg)
+        _cfg_now["output_dir"] = VOICE_OUTPUT
+        voice_sweep_done(_cfg_now, self.voice_log_line)      # jegulor sob ready (manual kora-o) shegulo soriye dao
+        self.voice_refresh_scripts()
         files = sorted(
             [os.path.join(VOICE_SCRIPTS, f) for f in os.listdir(VOICE_SCRIPTS)
              if f.lower().endswith(".txt") and os.path.isfile(os.path.join(VOICE_SCRIPTS, f))])
         if not files:
-            messagebox.showwarning("Scripts", "Queue e kono script nei. Age script save korun.")
+            messagebox.showwarning("Scripts", "Queue e kono script nei (sob ready ba kono script save kora nei).")
             self._voice_ui_update()
             self._voice_anim_reset()
             return
@@ -7877,6 +7892,7 @@ VOICE_DEFAULTS = {
     "gemini_enabled": True,
     "gemini_timeout_min": 2,
     "gemini_tries": 2,
+    "gemini_login_check_sec": 20,
     "defaults_ver": 2,
 }
 
@@ -7918,6 +7934,92 @@ def _voice_find_lb(name):
         if os.path.exists(p) and os.path.getsize(p) > 0:
             return p
     return None
+
+
+def voice_state(name, cfg=None):
+    """Output folder dekhe bole dey: (mp3 ache?, srt ache?, corrected srt ache?, corrected srt dorkar?)."""
+    cfg = cfg or {}
+    out = os.path.join(cfg.get("output_dir") or VOICE_OUTPUT, name)
+    mp3_ok = srt_ok = corr_ok = False
+    try:
+        names = os.listdir(out)
+    except OSError:
+        names = []
+    for f in names:
+        fp = os.path.join(out, f)
+        if f.startswith(".regen") or not os.path.isfile(fp):
+            continue
+        try:
+            size = os.path.getsize(fp)
+        except OSError:
+            continue
+        ext = os.path.splitext(f)[1].lower()
+        if ext in AUDIO_EXTS:
+            if size > 1000:
+                mp3_ok = True
+        elif ext == ".srt" and size > 0:
+            if f.startswith(VOICE_CORR_PREFIX):
+                corr_ok = True
+            else:
+                srt_ok = True
+    need = bool(cfg.get("gemini_enabled", True)) and _voice_find_lb(name) is not None
+    return mp3_ok, srt_ok, corr_ok, need
+
+
+def voice_script_complete(name, cfg=None):
+    """MP3 + SRT (+ Corrected SRT, jodi Gemini on ar line-break script ache) sob ready kina."""
+    m, s_, c, need = voice_state(name, cfg)
+    return bool(m and s_ and (c or not need))
+
+
+def _voice_move_pair(name, to_done):
+    pairs = ((VOICE_SCRIPTS, VOICE_DONE), (VOICE_LB, VOICE_LB_DONE))
+    moved = False
+    for a, b in pairs:
+        src_dir, dst_dir = (a, b) if to_done else (b, a)
+        src = os.path.join(src_dir, f"{name}.txt")
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(dst_dir, f"{name}.txt")
+        if not to_done and os.path.exists(dst):         # queue e already ache — done er copy ta rekhe dao
+            continue
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+            if os.path.exists(dst):
+                os.remove(dst)
+            shutil.move(src, dst)
+            moved = True
+        except OSError:
+            pass
+    return moved
+
+
+def voice_move_to_done(name):
+    """Script (+ line-break script) queue theke done e soray. Age-i soranor thakle kichu kore na."""
+    return _voice_move_pair(name, True)
+
+
+def voice_restore_to_queue(name):
+    """Done e thaka script abar queue e ferot ane (shudhu jodi kichu baki thake)."""
+    return _voice_move_pair(name, False)
+
+
+def voice_sweep_done(cfg, log=None):
+    """Queue er je script er sob (MP3+SRT+Corrected) ready, shegulo done e soray. Soranor naam list return kore."""
+    names = set()
+    for base in (VOICE_SCRIPTS, VOICE_LB):
+        try:
+            names.update(os.path.splitext(f)[0] for f in os.listdir(base)
+                         if f.lower().endswith(".txt") and os.path.isfile(os.path.join(base, f)))
+        except OSError:
+            pass
+    moved = []
+    for n in sorted(names):
+        if voice_script_complete(n, cfg) and voice_move_to_done(n):
+            moved.append(n)
+            if log:
+                log(f"'{n}' er sob ready (MP3 + SRT + Corrected) \u2014 queue theke soriye done e rakha holo")
+    return moved
 
 
 _SRT_TIME_RX = re.compile(r"^\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*$")
@@ -8983,11 +9085,79 @@ class VoiceRunner:
         raise RuntimeError("Zamzar e sob chesta fail")
 
     # ───────────────────────── Gemini: SRT correction ─────────────────────────
+    # ── login helpers ──
+    _G_AUTH = ("SID", "__Secure-1PSID", "__Secure-3PSID", "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID")
+    _G_EDITOR = "rich-textarea, div.ql-editor, [contenteditable='true'], textarea"
+
+    def _g_cookie_file(self):
+        return os.path.join(self.profile, ".gemini_cookies.json")
+
+    def _g_has_auth(self, cookies):
+        return any(c.get("name") in self._G_AUTH and "google" in (c.get("domain") or "") for c in (cookies or []))
+
+    def _g_save_cookies(self, cookies):
+        """Google login cookie gulo profile folder e backup rakhe (Chrome profile e save na hole eta diye abar boshano jabe)."""
+        keep = [c for c in (cookies or []) if re.search(r"google|youtube", c.get("domain") or "", re.I)]
+        if not self._g_has_auth(keep):
+            return False
+        try:
+            atomic_write(self._g_cookie_file(), json.dumps(keep))
+            return True
+        except Exception:
+            return False
+
+    def _g_restore_cookies(self):
+        try:
+            data = json.loads(read_text(self._g_cookie_file()))
+        except Exception:
+            return False
+        fallback = int(time.time()) + 30 * 86400
+        n = 0
+        for c in data:
+            c = dict(c)
+            ex = c.get("expires")
+            if not isinstance(ex, (int, float)) or ex <= 0:
+                c["expires"] = fallback                 # session cookie hole-o jeno profile e theke jay
+            try:
+                self.ctx.add_cookies([c])
+                n += 1
+            except Exception:
+                pass
+        return n > 0
+
+    def _g_backup_cookies(self):
+        if time.time() - getattr(self, "_g_bk_t", 0) < 600:
+            return
+        self._g_bk_t = time.time()
+        try:
+            self._g_save_cookies(self.ctx.cookies())
+        except Exception:
+            pass
+
+    @staticmethod
+    def _g_any_visible(page, sel, limit=8):
+        """Selector er je kono ekta element visible hole True (shudhu prothom ta na — oita hidden hote pare)."""
+        try:
+            loc = page.locator(sel)
+            for i in range(min(loc.count(), limit)):
+                try:
+                    if loc.nth(i).is_visible():
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
+
     def gemini_signed_out(self, page):
         try:
             if "accounts.google.com" in (page.url or ""):
                 return True
-            return page.get_by_role("link", name=re.compile(r"^\s*Sign in\s*$", re.I)).first.is_visible()
+            rx = re.compile(r"^\s*Sign in\s*$", re.I)
+            for role in ("link", "button"):
+                if page.get_by_role(role, name=rx).first.is_visible():
+                    return True
+            return False
         except Exception:
             return False
 
@@ -8995,7 +9165,14 @@ class VoiceRunner:
         page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=90000)
         self.sleep(3500, page)
         if self.gemini_signed_out(page):
-            raise GeminiLoginNeeded("Gemini te login nei")
+            if self._g_restore_cookies():
+                self.log("  Login nei dekhacche — save kora Google session diye abar chesta korchi")
+                page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=90000)
+                self.sleep(3500, page)
+            if self.gemini_signed_out(page):
+                raise GeminiLoginNeeded("Gemini te login nei")
+        else:
+            self._g_backup_cookies()
 
     def gemini_wait_login(self):
         """Login nai: automation Chrome bondho kore normal Chrome (Google block kore na) khole rakhe,
@@ -9004,8 +9181,13 @@ class VoiceRunner:
         exe = _voice_chrome_exe()
         if not exe:
             raise RuntimeError("Google Chrome paoa jayni (install kora ache to?)")
-        self.log("Gemini te login nei. Chrome khulchhe — Google account diye login korun. "
-                 "Login hole nijei kaj shuru hobe, Chrome bondho korben na.")
+        try:
+            check_sec = max(5, int(self.cfg.get("gemini_login_check_sec", 20)))
+        except (TypeError, ValueError):
+            check_sec = 20
+        self.log("Gemini te login nei. Chrome khulchhe — Google account diye LOGIN korun. "
+                 f"Prottek {check_sec} second por check korbo; login hole sathe sathe kaj shuru hobe, "
+                 "Chrome nijer haate bondho korben na.")
         try:
             self.ctx.close()
         except Exception:
@@ -9023,6 +9205,39 @@ class VoiceRunner:
                                  "--no-first-run", "--no-default-browser-check", "--start-maximized", GEMINI_URL])
         browser = None
         ok = False
+        saved = []
+
+        def all_cookies():
+            out = []
+            for c in browser.contexts:
+                try:
+                    out += c.cookies()
+                except Exception:
+                    pass
+            return out
+
+        def probe():
+            """(logged_in, diagnostic text). Login = Gemini tab e 'Sign in' nei + (text box dekha jay ba Google login cookie ache)."""
+            try:
+                ck = all_cookies()
+                auth = self._g_has_auth(ck)
+                seen = []
+                good = False
+                for c in browser.contexts:
+                    for pg in c.pages:
+                        url = pg.url or ""
+                        if "gemini.google.com" not in url:
+                            seen.append("other-tab")
+                            continue
+                        so = self.gemini_signed_out(pg)
+                        ed = self._g_any_visible(pg, self._G_EDITOR)
+                        seen.append(f"gemini(SignIn={'ache' if so else 'nei'}, textbox={'ache' if ed else 'nei'})")
+                        if not so and (ed or auth):
+                            good = True
+                return good, f"{', '.join(seen) or 'kono tab nei'}; login-cookie={'ache' if auth else 'nei'}"
+            except Exception as e:
+                return False, "check error: " + ((str(e).splitlines() or [type(e).__name__])[0][:100])
+
         try:
             for _ in range(40):
                 self.check_stop()
@@ -9034,31 +9249,27 @@ class VoiceRunner:
             if browser is None:
                 raise RuntimeError("Login Chrome er sathe connect hoyni")
             t0 = time.time()
-            good_n = 0
-            last_msg = 0.0
             while time.time() - t0 < 30 * 60:
                 self.check_stop()
-                good = False
-                try:
-                    for c in browser.contexts:
-                        for pg in c.pages:
-                            if "gemini.google.com" in (pg.url or "") and not self.gemini_signed_out(pg):
-                                if pg.locator("rich-textarea, div.ql-editor, [contenteditable='true']").first.is_visible():
-                                    good = True
-                except Exception:
-                    pass
-                good_n = good_n + 1 if good else 0
-                if good_n >= 2:
-                    ok = True
-                    break
-                if time.time() - last_msg > 60:
-                    self.log("  login-er jonno wait korchi...")
-                    last_msg = time.time()
-                time.sleep(2)
+                good, why = probe()
+                if good:
+                    time.sleep(2)                       # ekta chhoto double-check (false positive thekate)
+                    good, why = probe()
+                    if good:
+                        ok = True
+                        break
+                self.log(f"  Login ekhono hoyni [{why}] — Chrome e Gemini te login korun. {check_sec} sec por abar check korbo...")
+                for _ in range(check_sec):              # 1 sec kore ghumai — jeno STOP sathe sathe kaj kore
+                    self.check_stop()
+                    time.sleep(1)
             if not ok:
                 raise RuntimeError("Gemini login timeout (30 minute)")
-            self.log("  Login detect hoyeche")
-            time.sleep(3)
+            self.log(f"  Login detect hoyeche [{why}] — ekhoni kaj shuru korchi")
+            time.sleep(6)                               # Chrome ke cookie/session disk e likhte somoy dao
+            try:
+                saved = all_cookies()
+            except Exception:
+                saved = []
             try:
                 browser.new_browser_cdp_session().send("Browser.close")
             except Exception:
@@ -9070,7 +9281,7 @@ class VoiceRunner:
             except Exception:
                 pass
             try:
-                proc.wait(timeout=12)
+                proc.wait(timeout=30)                   # nijer-i bondho hote dao (zor kore marle cookie hariye jay)
             except Exception:
                 try:
                     proc.terminate()
@@ -9084,7 +9295,15 @@ class VoiceRunner:
                 fh.write("ok")
         except Exception:
             pass
+        self._g_save_cookies(saved)
         self.launch(self.pw)
+        try:                                            # profile e login session thikmoto save hoyeche kina
+            if self._g_has_auth(self.ctx.cookies()):
+                self.log("  Login session profile e save hoyeche \u2713")
+            elif self._g_restore_cookies():
+                self.log("  Profile e session save hoyni — backup diye Google login boshano holo")
+        except Exception:
+            pass
 
     def gemini_agree(self, page):
         """"Creating content from images and files" popup — Agree chapa (onek poddhoti try kore)."""
@@ -9650,6 +9869,18 @@ class VoiceRunner:
             except Exception as e:
                 self.log(f"Gemini fail: {str(e).splitlines()[0][:200]} (Corrected SRT hoyni — 'Gemini fix' chapun)")
 
+    def sync_queue(self, name):
+        """Regenerate / Gemini fix er por: sob ready hole script queue theke soray, na hole (done e thakle) queue e ferot ane."""
+        try:
+            if voice_script_complete(name, self.cfg):
+                if voice_move_to_done(name):
+                    self.log(f"  '{name}' er sob ready (MP3 + SRT + Corrected) — script queue theke soriye done e rakha holo")
+            elif voice_restore_to_queue(name):
+                self.log(f"  '{name}' er kichu baki ache — script abar queue e rakha holo "
+                         "(START dile shudhu baki ta toiri hobe)")
+        except Exception:
+            pass
+
     def run_single(self, name, what):
         from playwright.sync_api import sync_playwright
         out = os.path.join(self.cfg["output_dir"], name)
@@ -9671,6 +9902,7 @@ class VoiceRunner:
                 except Exception:
                     pass
                 voice_trim_profile(self.profile)
+                self.sync_queue(name)
 
     def process(self, fpath):
         name = os.path.splitext(os.path.basename(fpath))[0]
@@ -9682,7 +9914,16 @@ class VoiceRunner:
         try:
             if not (os.path.exists(mp3) and os.path.getsize(mp3) > 1000):
                 self.do_speechify(text, mp3)
-            self.do_srt(mp3, srt)
+                for _f in os.listdir(out):               # notun MP3 hole purano SRT / Corrected SRT ar kaj-er na
+                    if _f.lower().endswith(".srt"):
+                        try:
+                            os.remove(os.path.join(out, _f))
+                        except OSError:
+                            pass
+            if voice_state(name, self.cfg)[1]:
+                self.log("  SRT age thekei ache — skip")
+            else:
+                self.do_srt(mp3, srt)
             if self.cfg.get("gemini_enabled", True):
                 try:
                     self.do_gemini(name, out)
@@ -9690,19 +9931,12 @@ class VoiceRunner:
                     raise
                 except Exception as e:
                     self.log(f"Gemini fail: {str(e).splitlines()[0][:200]} (MP3 + SRT ager moto ache)")
-            os.makedirs(VOICE_DONE, exist_ok=True)
-            dest = os.path.join(VOICE_DONE, os.path.basename(fpath))
-            if os.path.exists(dest):
-                os.remove(dest)
-            shutil.move(fpath, dest)
-            lbp = os.path.join(VOICE_LB, f"{name}.txt")
-            if os.path.exists(lbp):
-                os.makedirs(VOICE_LB_DONE, exist_ok=True)
-                d2 = os.path.join(VOICE_LB_DONE, f"{name}.txt")
-                if os.path.exists(d2):
-                    os.remove(d2)
-                shutil.move(lbp, d2)
-            self.log(f"SHESH: {name}  ->  {out}")
+            if voice_script_complete(name, self.cfg):
+                voice_move_to_done(name)                # sob ready — script queue theke muche jabe
+                self.log(f"SHESH: {name}  ->  {out}")
+            else:
+                self.log(f"SHESH: {name}  ->  {out}  (Corrected SRT baki — script queue e-i thaklo; "
+                         "abar START dile shudhu baki ta toiri hobe)")
         finally:
             if self.cfg.get("vpn_disconnect_after", True):
                 self.vpn_disconnect()
@@ -9721,18 +9955,27 @@ class VoiceRunner:
             q.put(f)
         self.run_queue(q)
 
-    def run_queue(self, q):
-        """Ei Chrome shared queue theke ekta ekta script ney — queue faka hole bondho hoy."""
+    def run_queue(self, q, first=None):
+        """Ei Chrome shared queue theke ekta ekta script ney — je Chrome age free hoy shei porer script ney.
+        Onno Chrome er jonno wait kore na. 'first' = dispatcher je script ta age-i diye diyeche."""
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
-            self.launch(pw)
+            try:
+                self.launch(pw)
+            except BaseException:
+                if first is not None:
+                    q.put(first)                        # Chrome khulte na parle script ta queue te ferot
+                raise
             try:
                 while True:
                     self.check_stop()
-                    try:
-                        f = q.get_nowait()
-                    except queue.Empty:
-                        break
+                    if first is not None:
+                        f, first = first, None
+                    else:
+                        try:
+                            f = q.get_nowait()
+                        except queue.Empty:
+                            break
                     try:
                         self.process(f)
                     except VoiceStopped:
@@ -9863,55 +10106,81 @@ def voice_vpn_choices(raw):
 
 def voice_run_all(cfg, files, log, ask, stop_event, hidden_getter, runners, shared=None, slots=None):
     """Single thread = ekta Chrome. Multiple = N ta Chrome ekshathe, shared queue theke.
-    Regenerate e kaj kora slot gulo skip kora hoy."""
+    Kono Chrome er kaj shesh hole shob gulo shesh howar jonne wait kora hoy na — je Chrome free hoy
+    shei sathe sathe queue theke porer script niye kaj shuru kore. Regenerate e busy thaka slot
+    free hoye gele sheta-o porer script pay."""
     shared = shared or {"lock": threading.RLock(), "reserved": set(), "ask": threading.Lock()}
     slots = slots or VoiceSlots()
     cands = voice_slot_candidates(cfg, log)
     multi = len(cands) > 1
-    want = max(1, min(len(cands), len(files)))
     q = queue.Queue()
     for f in files:
         q.put(f)
-    claimed = []
-    for idx, prof in cands:
-        if len(claimed) >= want:
-            break
-        if slots.try_acquire(idx):
-            claimed.append((idx, prof))
-        else:
-            log(f"Thread {idx}: onno kaje busy \u2014 skip")
-    if not claimed:
-        log("Kono free Chrome nei \u2014 ekta kaj shesh hole abar START chapun.")
-        return
-    n = len(claimed)
-    log(f"Threads: {n}  ({'multiple' if multi else 'single'})  \u2022  scripts: {len(files)}")
+    log(f"Threads: {len(cands)}  ({'multiple' if multi else 'single'})  \u2022  scripts: {len(files)}")
 
-    def worker(idx, prof):
+    def worker(idx, prof, first, res):
         r = VoiceRunner(cfg, log, ask, stop_event, chrome_hidden=hidden_getter(), profile=prof,
                         shared=shared, tag=(f"T{idx}" if multi else ""))
         runners.append(r)
         try:
-            r.run_queue(q)
+            r.run_queue(q, first)
         except VoiceStopped:
             pass
         except Exception as e:
+            res["crash"] = True
             log(f"ERROR (thread {idx}): {str(e).splitlines()[0][:220]}")
         finally:
             try:
                 runners.remove(r)
             except ValueError:
                 pass
-            slots.release(idx)          # Chrome bondho \u2014 ei slot ebar regenerate er jonno free
+            slots.release(idx)          # Chrome bondho \u2014 ei slot ebar free (porer script ba regenerate er jonno)
 
-    ths = []
-    for k, (idx, prof) in enumerate(claimed, 1):
-        t = threading.Thread(target=worker, args=(idx, prof), daemon=True)
-        t.start()
-        ths.append(t)
-        if k < n:
-            time.sleep(3)               # Chrome gulo ekshathe launch na kore ektu gap diye
-    for t in ths:
-        t.join()
+    active = {}                         # slot -> (thread, result)
+    crashes = {}                        # slot -> porpor koybar Chrome chalu hoyni
+    last_launch = 0.0
+    warned_busy = False
+    try:
+        while not stop_event.is_set():
+            for idx in [i for i, (t, _r) in active.items() if not t.is_alive()]:
+                _t, res = active.pop(idx)
+                crashes[idx] = crashes.get(idx, 0) + 1 if res.get("crash") else 0
+            if q.empty():
+                if not active:
+                    break
+                time.sleep(1)
+                continue
+            launched = False
+            for idx, prof in cands:
+                if idx in active or crashes.get(idx, 0) >= 2:
+                    continue
+                if time.time() - last_launch < 3:       # Chrome gulo ekshathe launch na kore ektu gap
+                    break
+                if not slots.try_acquire(idx):
+                    continue
+                try:
+                    f = q.get_nowait()
+                except queue.Empty:
+                    slots.release(idx)
+                    break
+                res = {}
+                t = threading.Thread(target=worker, args=(idx, prof, f, res), daemon=True)
+                active[idx] = (t, res)
+                t.start()
+                last_launch = time.time()
+                launched = True
+                warned_busy = False
+            if not launched and not active:
+                if all(crashes.get(i, 0) >= 2 for i, _p in cands):
+                    log("Kono Chrome chalu hoyni \u2014 kaj bondho korlam.")
+                    break
+                if not warned_busy:
+                    log("Shob Chrome onno kaje busy \u2014 ekta free hole nijei kaj shuru hobe...")
+                    warned_busy = True
+            time.sleep(1)
+    finally:
+        for t, _r in list(active.values()):
+            t.join()
     if stop_event.is_set():
         raise VoiceStopped()
 
