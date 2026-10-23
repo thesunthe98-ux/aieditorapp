@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.9.0"
+APP_VERSION = "2.9.1"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6610,16 +6610,11 @@ class App(_Base):
         fspan(b, 0, mktoggle(b, "MP3 + SRT er por Gemini diye corrected SRT banao", gv, bg=PANEL))
         field(b, 1, "Gemini timeout", "gemini_timeout_min", 8, "minutes — submit theke download porjonto ei somoy e na holei abar notun kore submit")
         field(b, 2, "Max Gemini tries", "gemini_tries", 8, "koybar submit korbe (2 = 1ta timeout/fail hole 1bar abar)")
-        fspan(b, 3, mkbtn(b, "Gemini Login Setup (alada account)", self.voice_gemini_login, "ghost"))
-        fnote(b, 4, "Prottek thread (Chrome) er jonno alada Google account. Ekbar login korlei hobe. "
-                    "Account 1 = main Chrome, 2-5 = onno Chrome gulo. Normal Chrome khulbe (Google automation "
-                    "Chrome e login dey na) — login kore SOB window bondho korun.")
         b = mkcard(sc, "Chrome")
         fspan(b, 0, mkbtn(b, "Chrome Profile Setup", self.voice_setup_profile, "ghost"))
-        fnote(b, 1, "Prothombar ekbar Chrome profile e VeePN extension + Gemini (Google) login set kore nite hoy.")
-        fspan(b, 2, mkbtn(b, "Thread Profiles Setup (2-5)", self.voice_setup_thread_profiles, "ghost"))
-        fnote(b, 3, "Multiple threads er jonno prottek thread er profile e alada kore VeePN setup. "
-                    "Prottek bar VeePN er 'Loading' shesh howa porjonto wait kore tarpor Chrome bondho korben. Ekbar-i lagbe.")
+        fnote(b, 1, "Click korle 5 ta main profile ek ek kore khulbe (clone na). Prottek Chrome e VPN (VeePN) page "
+                    "ar ekta tab e Gemini auto khulbe — VeePN install/load + Google login kore Chrome bondho korun, "
+                    "tarpor porer Chrome khulbe. Ekbar-i lagbe.")
         mkbtn(sc, "Save settings", self.voice_save_settings, "primary", padx=22).pack(anchor="w", pady=(0, 14))
 
         # ── realtime save: settings, script editor, accounts ──
@@ -7469,46 +7464,23 @@ class App(_Base):
                   else "Chrome visible — automation dekhte parben")
 
     def voice_setup_profile(self):
-        if self._voice_alive():
-            messagebox.showwarning("Busy", "Age Voice+SRT STOP korun.")
+        if self._voice_kind == "setup" and self._voice_thread and self._voice_thread.is_alive():
+            messagebox.showinfo("Setup cholche",
+                                "Chrome Profile Setup ekhono cholche. Khola Chrome window gulo bondho korun "
+                                "(Task Manager e 'Google Chrome' ar 'python' o dekhte paren), tahole porer profile khulbe.")
+            return
+        if self._voice_main_running or self._voice_regens:
+            messagebox.showwarning("Busy", "Voice+SRT ba Regenerate cholche — age STOP korun.")
             return
         ok, err = _ensure_playwright()
         if not ok:
             messagebox.showerror("Playwright", f"Install fail:\n{err}")
             return
-        self.voice_log_line("Chrome Profile Setup shuru...")
+        self.voice_log_line("Chrome Profile Setup shuru (5 ta profile, ek ek kore)...")
         self._voice_kind = "setup"
+        eid = str(self._voice_cfg.get("ext_id", "") or "").strip()
         self._voice_thread = threading.Thread(
-            target=lambda: voice_profile_setup(self.voice_log_line), daemon=True)
-        self._voice_thread.start()
-
-    def voice_setup_thread_profiles(self):
-        if self._voice_alive():
-            messagebox.showwarning("Busy", "Age Voice+SRT STOP korun.")
-            return
-        ok, err = _ensure_playwright()
-        if not ok:
-            messagebox.showerror("Playwright", f"Install fail:\n{err}")
-            return
-        try:
-            dflt = int(self._voice_cfg.get("threads") or 2)
-        except (TypeError, ValueError):
-            dflt = 2
-        n = simpledialog.askinteger("Thread profiles", "Total koyta thread (Chrome) chalaben? (2-5)",
-                                    initialvalue=max(2, min(5, dflt)), minvalue=2, maxvalue=5, parent=self)
-        if not n:
-            return
-        done = [i for i in range(2, n + 1)
-                if os.path.exists(os.path.join(VOICE_CLONES, f"t{i}", ".veepn_ok"))]
-        redo = False
-        if done:
-            redo = messagebox.askyesno(
-                "Thread profiles", f"Thread {', '.join(map(str, done))} e VeePN setup kora ache.\n\n"
-                                   "Ogulo muchhe abar notun kore setup korbo? (No = skip kore baki gulo)")
-        self.voice_log_line(f"Thread Profiles Setup shuru (thread 2 theke {n})...")
-        self._voice_kind = "setup"
-        self._voice_thread = threading.Thread(
-            target=lambda: voice_thread_profiles_setup(n, redo, self.voice_log_line), daemon=True)
+            target=lambda: voice_chrome_setup_all(5, eid, self.voice_log_line), daemon=True)
         self._voice_thread.start()
 
     def voice_regen(self, name, what):
@@ -7592,38 +7564,6 @@ class App(_Base):
         self.after(600, lambda n=name: self._voice_live_finalize(n))
         self._voice_ui_update()
         self.refresh_voice()
-
-    def voice_gemini_login(self):
-        if self._voice_alive():
-            messagebox.showwarning("Busy", "Age Voice+SRT STOP korun.")
-            return
-        ok, err = _ensure_playwright()
-        if not ok:
-            messagebox.showerror("Playwright", f"Install fail:\n{err}")
-            return
-        if not os.path.isdir(VOICE_PROFILE):
-            messagebox.showwarning("Chrome profile", "Age 'Chrome Profile Setup' chalan.")
-            return
-        try:
-            dflt = int(self._voice_cfg.get("threads") or 1)
-        except (TypeError, ValueError):
-            dflt = 1
-        n = simpledialog.askinteger("Gemini accounts", "Koyta Gemini account login korben? (1-5)",
-                                    initialvalue=max(1, min(5, dflt)), minvalue=1, maxvalue=5, parent=self)
-        if not n:
-            return
-        done = [i for i in range(1, n + 1) if os.path.exists(os.path.join(
-            VOICE_PROFILE if i == 1 else os.path.join(VOICE_CLONES, f"t{i}"), ".gemini_ok"))]
-        redo = False
-        if done:
-            redo = messagebox.askyesno(
-                "Gemini login", f"Account {', '.join(map(str, done))} e login kora ache.\n\n"
-                                "Ogulo abar login korbo? (No = skip kore baki gulo)")
-        self.voice_log_line(f"Gemini Login Setup shuru ({n} ta account)...")
-        self._voice_kind = "setup"
-        self._voice_thread = threading.Thread(
-            target=lambda: voice_gemini_login_setup(n, redo, self.voice_log_line), daemon=True)
-        self._voice_thread.start()
 
     def voice_start(self):
         if self._voice_main_running:
@@ -10352,6 +10292,115 @@ def voice_thread_profiles_setup(n, redo, log):
             return
         voice_trim_profile(prof)
     log("Thread profiles setup shesh. Ebar Multiple threads e START chapte paren.")
+
+
+def _voice_ext_id_from_profile(prof):
+    """Profile folder e install kora VeePN er extension ID (disk scan)."""
+    root = os.path.join(prof, "Default", "Extensions")
+    try:
+        for eid in os.listdir(root):
+            if not re.fullmatch(r"[a-p]{32}", eid):
+                continue
+            edir = os.path.join(root, eid)
+            for ver in os.listdir(edir):
+                blob = ""
+                for rel in ("manifest.json", os.path.join("_locales", "en", "messages.json"),
+                            os.path.join("_locales", "en_US", "messages.json")):
+                    fp = os.path.join(edir, ver, rel)
+                    if os.path.exists(fp):
+                        try:
+                            blob += open(fp, encoding="utf-8", errors="ignore").read().lower()
+                        except Exception:
+                            pass
+                if "veepn" in blob:
+                    return eid
+    except Exception:
+        pass
+    return None
+
+
+VEEPN_STORE_URL = "https://chromewebstore.google.com/detail/free-vpn-for-chrome-vpn-p/majdfhpaihoncoakbjgbdhglocklcgno?hl=en"
+VEEPN_EXT_ID = "majdfhpaihoncoakbjgbdhglocklcgno"
+
+
+def voice_chrome_setup_all(n, cfg_ext_id, log):
+    """Ek button: main profile (1) + t2..t{n} — ek ek kore Chrome khole. Clone na, shob main profile.
+    Prottek Chrome e: tab1 = VeePN page (install na thakle Web Store), tab2 = Gemini. Window bondho korle porerta."""
+    _voice_ensure_dirs()
+    os.makedirs(VOICE_CLONES, exist_ok=True)
+    from playwright.sync_api import sync_playwright
+    for i in range(1, n + 1):
+        prof = VOICE_PROFILE if i == 1 else os.path.join(VOICE_CLONES, f"t{i}")
+        os.makedirs(prof, exist_ok=True)
+        if _voice_profile_in_use(prof):
+            log(f"Profile {i}: ei profile er Chrome ekhono khola — bondho kore abar chalan.")
+            return
+        eid = cfg_ext_id or _voice_ext_id_from_profile(prof) or VEEPN_EXT_ID
+        installed = bool(_voice_ext_id_from_profile(prof))
+        log(f"Profile {i}/{n}: Chrome khulchhe — VPN te connect/setup korun, Gemini te login korun, "
+            f"tarpor Chrome bondho korun.")
+        try:
+            with sync_playwright() as pw:
+                ctx = pw.chromium.launch_persistent_context(
+                    prof, channel="chrome", headless=False, no_viewport=True,
+                    ignore_default_args=["--disable-extensions", "--enable-automation"],
+                    args=["--disable-blink-features=AutomationControlled", "--start-maximized"])
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                vpn_url = None
+                if installed or cfg_ext_id:
+                    popup = "popup.html"
+                    try:
+                        page.goto(f"chrome-extension://{eid}/manifest.json", timeout=15000)
+                        data = json.loads(page.inner_text("body"))
+                        popup = ((data.get("action") or data.get("browser_action") or {})
+                                 .get("default_popup") or popup)
+                    except Exception:
+                        pass
+                    vpn_url = f"chrome-extension://{eid}/{popup}"
+                try:
+                    page.goto(vpn_url or VEEPN_STORE_URL, timeout=30000)
+                    if not vpn_url:
+                        log(f"Profile {i}: VeePN install nei — Web Store page khulechhe, 'Add to Chrome' e click kore pin korun.")
+                except Exception:
+                    pass
+                try:
+                    gp = ctx.new_page()
+                    gp.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+                closed = [False]
+                try:
+                    ctx.on("close", lambda *_: closed.__setitem__(0, True))
+                except Exception:
+                    pass
+                try:
+                    while not closed[0] and ctx.pages:
+                        try:
+                            ctx.pages[0].wait_for_timeout(1000)     # playwright event gulo process hoy
+                        except Exception:
+                            break
+                except Exception:
+                    pass
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"Profile {i}: Chrome khola gelo na: {str(e).splitlines()[0][:150]}")
+            return
+        voice_trim_profile(prof)
+        for mk in (".veepn_ok", ".gemini_ok"):
+            try:
+                with open(os.path.join(prof, mk), "w") as fh:
+                    fh.write("ok")
+            except Exception:
+                pass
+        log(f"Profile {i}: shesh.")
+    log("Chrome Profile Setup shesh (5 ta profile). Ebar Multiple threads e START chapte paren.")
 
 
 if __name__ == "__main__":
