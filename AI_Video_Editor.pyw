@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.9.4"
+APP_VERSION = "2.9.5"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6518,6 +6518,15 @@ class App(_Base):
         self.voice_sname = tk.StringVar()
         mkentry(name_row, self.voice_sname, 30).pack(side="left", padx=10)
         mkbtn(name_row, "Save", self.voice_save_script, "primary", pady=3, padx=16).pack(side="left")
+        mklabel(name_row, "Voice name", 10, MUTED, bg=PANEL).pack(side="left", padx=(24, 0))
+        self.voice_svoice = tk.StringVar()
+        self.voice_vcombo = ttk.Combobox(name_row, textvariable=self.voice_svoice,
+                                         values=_voice_voices_load()["names"], state="normal", width=22)
+        self.voice_vcombo.pack(side="left", padx=10)
+        self.voice_vcombo.bind("<<ComboboxSelected>>", lambda e: self._voice_voice_commit())
+        self.voice_vcombo.bind("<Return>", lambda e: self._voice_voice_commit())
+        self.voice_vcombo.bind("<FocusOut>", lambda e: self._voice_voice_commit())
+        self.voice_vcombo.bind("<Button-3>", self._voice_voice_forget)
         boxes = tk.Frame(ec, bg=PANEL)
         boxes.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         boxes.columnconfigure(0, weight=1, uniform="vbox")
@@ -6568,10 +6577,9 @@ class App(_Base):
                 mklabel(body, hint, 9, MUTED, bg=PANEL).grid(row=r, column=2, sticky="w", padx=12)
 
         b = mkcard(sc, "Voice")
-        field(b, 0, "Voice name", "voice_name", 28)
         sm = tk.StringVar(value=str(self._voice_cfg.get("split_mode", "Split by Paragraphs")))
         self.voice_vars["split_mode"] = sm
-        frow(b, 1, "Split mode", ttk.Combobox(b, textvariable=sm, values=VOICE_SPLIT_MODES,
+        frow(b, 0, "Split mode", ttk.Combobox(b, textvariable=sm, values=VOICE_SPLIT_MODES,
                                               state="normal", width=26))
         b = mkcard(sc, "Threads", "ekshathe koita Chrome")
         _lbl = {"single": "Single thread", "multiple": "Multiple threads"}
@@ -6637,6 +6645,8 @@ class App(_Base):
             _v.trace_add("write", lambda *a: self._voice_sched("cfg", lambda: self.voice_save_settings(silent=True), 500))
         self.voice_sname.trace_add("write", lambda *a: None if self._voice_loading else
                                    self._voice_sched("script", self._voice_autosave_script, 900))
+        self.voice_svoice.trace_add("write", lambda *a: None if self._voice_loading else
+                                    self._voice_sched("script", self._voice_autosave_script, 900))
         self.voice_stext.bind("<<Modified>>", self._voice_text_modified)
         self.voice_ltext.bind("<<Modified>>", self._voice_text_modified)
         self.voice_atext.bind("<<Modified>>", self._voice_acct_modified)
@@ -7073,14 +7083,71 @@ class App(_Base):
             except OSError:
                 pass
         changed = (cur != fn)
+        self._voice_store_voice(name, old=(os.path.splitext(cur)[0] if cur and cur != fn else None))
         self._voice_cur_script = fn
         if changed:
             self.voice_refresh_scripts()
+
+    def _voice_store_voice(self, name, remember=False, old=None):
+        """Ei script er voice name file e rakhe. remember=True hole voice name ta dropdown list e-o joma hoy."""
+        v = self.voice_svoice.get().strip()
+        d = _voice_voices_load()
+        changed = False
+        if old and old != name and old in d["map"]:
+            del d["map"][old]
+            changed = True
+        if v:
+            if d["map"].get(name) != v:
+                d["map"][name] = v
+                changed = True
+            if remember and v not in d["names"]:
+                d["names"].append(v)
+                changed = True
+        elif name in d["map"]:
+            del d["map"][name]
+            changed = True
+        if changed:
+            try:
+                _voice_voices_save(d)
+            except Exception:
+                pass
+        try:
+            self.voice_vcombo.configure(values=d["names"])
+        except Exception:
+            pass
+
+    def _voice_voice_commit(self):
+        cur = self._voice_cur_script
+        if cur:
+            self._voice_store_voice(os.path.splitext(cur)[0], remember=True)
+        else:
+            v = self.voice_svoice.get().strip()
+            if v:                                   # script ekhono save hoyni — shudhu nam ta mone rakho
+                d = _voice_voices_load()
+                if v not in d["names"]:
+                    d["names"].append(v)
+                    try:
+                        _voice_voices_save(d)
+                    except Exception:
+                        pass
+                    self.voice_vcombo.configure(values=d["names"])
+
+    def _voice_voice_forget(self, e=None):
+        v = self.voice_svoice.get().strip()
+        d = _voice_voices_load()
+        if v and v in d["names"] and messagebox.askyesno("Voice name", f"'{v}' dropdown list theke muchben?"):
+            d["names"].remove(v)
+            try:
+                _voice_voices_save(d)
+            except Exception:
+                pass
+            self.voice_vcombo.configure(values=d["names"])
 
     def voice_new_script(self):
         self._voice_cur_script = None
         self._voice_loading = True
         self.voice_sname.set("")
+        self.voice_svoice.set("")
         self._voice_loading = False
         for w in (self.voice_stext, self.voice_ltext):
             w.delete("1.0", "end")
@@ -7098,6 +7165,7 @@ class App(_Base):
         atomic_write(os.path.join(VOICE_SCRIPTS, f"{name}.txt"), text)
         if ltext:
             atomic_write(os.path.join(VOICE_LB, f"{name}.txt"), ltext)
+        self._voice_store_voice(name, remember=True)
         self._voice_cur_script = f"{name}.txt"
         self.voice_refresh_scripts()
         self.voice_log_line(f"Script saved: {name}")
@@ -7106,6 +7174,7 @@ class App(_Base):
         self._voice_cur_script = fname
         self._voice_loading = True
         self.voice_sname.set(os.path.splitext(fname)[0])
+        self.voice_svoice.set(str(_voice_voices_load()["map"].get(os.path.splitext(fname)[0], "") or ""))
         self._voice_loading = False
         for w, base in ((self.voice_stext, VOICE_SCRIPTS), (self.voice_ltext, VOICE_LB)):
             p = os.path.join(base, fname)
@@ -7122,6 +7191,12 @@ class App(_Base):
                     os.remove(os.path.join(base, self._voice_cur_script))
                 except Exception:
                     pass
+            try:
+                _d = _voice_voices_load()
+                if _d["map"].pop(os.path.splitext(self._voice_cur_script)[0], None) is not None:
+                    _voice_voices_save(_d)
+            except Exception:
+                pass
             self.voice_new_script()
 
     def voice_refresh_accounts(self):
@@ -7697,6 +7772,7 @@ class App(_Base):
         self.voice_start_btn.configure(text="⏳  Preparing…")
         self.voice_status.configure(text="Preparing…", fg=ACCENT)
         self.update_idletasks()
+        self._voice_voice_commit()
         self.voice_save_settings()
         self.voice_save_accounts()
         ok, err = _ensure_playwright()
@@ -7854,6 +7930,7 @@ VOICE_OUTPUT = os.path.join(VOICE_BASE, "Output")
 VOICE_DEBUG = os.path.join(VOICE_BASE, "debug")
 VOICE_LB = os.path.join(VOICE_SCRIPTS, "linebreak")          # "line break script" gulo (Gemini te jabe)
 VOICE_LB_DONE = os.path.join(VOICE_DONE, "linebreak")
+VOICE_VOICES = os.path.join(VOICE_BASE, "script_voices.json")   # script -> voice name + mone rakha voice name list
 VOICE_PROMPT = os.path.join(VOICE_BASE, "prompt.txt")        # Gemini prompt (user edit korte pare)
 VOICE_CORR_PREFIX = "corrected srt - "
 GEMINI_URL = "https://gemini.google.com/"
@@ -8151,6 +8228,32 @@ def _voice_load_cfg():
             cfg["defaults_ver"] = 2
     cfg["output_dir"] = VOICE_OUTPUT  # always keep inside app workspace
     return cfg
+
+
+def _voice_voices_load():
+    d = {}
+    try:
+        d = json.load(open(VOICE_VOICES, encoding="utf-8"))
+    except Exception:
+        d = {}
+    if not isinstance(d, dict):
+        d = {}
+    m, n = d.get("map"), d.get("names")
+    return {"map": m if isinstance(m, dict) else {},
+            "names": [x for x in n if isinstance(x, str) and x.strip()] if isinstance(n, list) else []}
+
+
+def _voice_voices_save(d):
+    _voice_ensure_dirs()
+    atomic_write(VOICE_VOICES, json.dumps(d, indent=2, ensure_ascii=False))
+
+
+def voice_for_script(name, cfg=None):
+    """Script er jonne select kora voice. Kichu select kora na thakle purano default (Albert (M))."""
+    v = str(_voice_voices_load()["map"].get(name, "") or "").strip()
+    if v:
+        return v
+    return str((cfg or {}).get("voice_name") or VOICE_DEFAULTS["voice_name"]).strip() or "Albert (M)"
 
 
 def _voice_save_cfg(cfg):
@@ -9008,7 +9111,7 @@ class VoiceRunner:
         except Exception:
             pass
 
-    def speechify(self, page, email, password, text, out_mp3):
+    def speechify(self, page, email, password, text, out_mp3, voice=None):
         cfg = self.cfg
         self.log(f"Speechify: login -> {email}")
         self.clear_speechify_cookies()
@@ -9032,7 +9135,7 @@ class VoiceRunner:
         page.get_by_text("Voiceover", exact=True).first.click()
         page.wait_for_url("**/voiceover/**", timeout=60000)
         ta = self.find_editor(page)
-        self.select_voice(page)
+        self.select_voice(page, voice)
         self.sleep(500, page)
         self.log("  script paste")
         # button kokhono "Split & Generate (206 credits)", kokhono shudhu "Split" -- duto-i dhorbe
@@ -9074,8 +9177,9 @@ class VoiceRunner:
         self.wait_generation(page)
         self.export_and_download(page, out_mp3)
 
-    def select_voice(self, page):
-        name = self.cfg.get("voice_name", "Albert (M)").strip() or "Albert (M)"
+    def select_voice(self, page, voice=None):
+        name = (voice or self.cfg.get("voice_name") or "Albert (M)").strip() or "Albert (M)"
+        self.log(f"  voice name: {name}")
         short = name.split("(")[0].strip()
         page.get_by_text(VOICE_CHIP_RE).first.click()
         page.get_by_text("Voice Library", exact=True).wait_for(timeout=20000)
@@ -9413,7 +9517,7 @@ class VoiceRunner:
             raise RuntimeError("SRT download thik hoyni")
         self.log(f"  SRT saved: {out_srt}")
 
-    def do_speechify(self, text, mp3):
+    def do_speechify(self, text, mp3, voice=None):
         if self.cfg.get("vpn_disconnect_after", True):
             self.vpn_disconnect()
         skipped = set()
@@ -9425,7 +9529,7 @@ class VoiceRunner:
             page = self.new_page()
             try:
                 self._cur_acct = acct[2]
-                self.speechify(page, acct[0], acct[1], text, mp3)
+                self.speechify(page, acct[0], acct[1], text, mp3, voice)
                 self.mark_used(acct[2])
                 return
             except VoiceStopped:
@@ -10226,7 +10330,7 @@ class VoiceRunner:
         tmp = os.path.join(out, ".regen_tmp.mp3")
         if os.path.exists(tmp):
             os.remove(tmp)
-        self.do_speechify(text, tmp)
+        self.do_speechify(text, tmp, voice_for_script(name, self.cfg))
         for f in os.listdir(out):
             if os.path.splitext(f)[1].lower() in AUDIO_EXTS and f != ".regen_tmp.mp3":
                 os.remove(os.path.join(out, f))
@@ -10299,7 +10403,7 @@ class VoiceRunner:
         self.log(f"===== {name} =====")
         try:
             if not (os.path.exists(mp3) and os.path.getsize(mp3) > 1000):
-                self.do_speechify(text, mp3)
+                self.do_speechify(text, mp3, voice_for_script(name, self.cfg))
                 for _f in os.listdir(out):               # notun MP3 hole purano SRT / Corrected SRT ar kaj-er na
                     if _f.lower().endswith(".srt"):
                         try:
