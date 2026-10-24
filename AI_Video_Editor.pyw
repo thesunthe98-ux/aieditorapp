@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.9.2"
+APP_VERSION = "2.9.3"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -7256,9 +7256,27 @@ class App(_Base):
             top = tk.Frame(card, bg=PANEL2)
             top.pack(fill="x", padx=10, pady=(8, 2))
             files_here = [x for x in os.listdir(folder) if os.path.isfile(os.path.join(folder, x))]
-            has_mp3 = any(os.path.splitext(x)[1].lower() in AUDIO_EXTS for x in files_here)
-            has_srt = any(x.lower().endswith(".srt") and not x.startswith(VOICE_CORR_PREFIX) for x in files_here)
-            has_corr = any(x.startswith(VOICE_CORR_PREFIX) and x.lower().endswith(".srt") for x in files_here)
+            # Regenerate / Gemini fix cholle: je file gulo notun hobe, shegulor tick shuru te uthe jabe;
+            # notun file toiri hole (regenerate shuru howar por banano) tabei tick boshbe.
+            _rg = self._voice_regens.get(name)
+            _t0 = getattr(self, "_voice_regen_t0", {}).get(name)
+            _stale = ({"mp3": {"mp3", "srt", "corr"}, "srt": {"srt", "corr"}}.get(_rg, {"corr"})
+                      if (_rg and _t0) else set())
+
+            def _ok(kind, x):
+                if x.startswith(".regen_tmp"):
+                    return False
+                if kind not in _stale:
+                    return True
+                try:
+                    return os.path.getmtime(os.path.join(folder, x)) >= _t0 - 1
+                except OSError:
+                    return False
+            has_mp3 = any(os.path.splitext(x)[1].lower() in AUDIO_EXTS and _ok("mp3", x) for x in files_here)
+            has_srt = any(x.lower().endswith(".srt") and not x.startswith(VOICE_CORR_PREFIX) and _ok("srt", x)
+                          for x in files_here)
+            has_corr = any(x.startswith(VOICE_CORR_PREFIX) and x.lower().endswith(".srt") and _ok("corr", x)
+                           for x in files_here)
             mklabel(top, f"\U0001f4c1  {name}", 11, FG, True, bg=PANEL2).pack(side="left")
             if name in self._voice_regens:
                 mklabel(top, "  ⏳ " + {"mp3": "MP3", "srt": "SRT"}.get(self._voice_regens[name], "Gemini")
@@ -7598,6 +7616,9 @@ class App(_Base):
         if not self._voice_alive():
             self._voice_stop.clear()
         self._voice_regens[name] = what
+        if not hasattr(self, "_voice_regen_t0"):
+            self._voice_regen_t0 = {}
+        self._voice_regen_t0[name] = time.time()
         tag = f"T{idx}" if len(cands) > 1 else ""
         self.voice_log_line(f"Regenerate ({what}): {name}" + (f"  -> Chrome T{idx} e shuru" if tag else ""))
         hidden = self._voice_chrome_hidden
@@ -7628,6 +7649,7 @@ class App(_Base):
 
     def _voice_regen_done(self, name, what=None, fail_msg=None):
         self._voice_regens.pop(name, None)
+        getattr(self, "_voice_regen_t0", {}).pop(name, None)
         if fail_msg:
             d = self._voice_live.get(name)
             if not d:
