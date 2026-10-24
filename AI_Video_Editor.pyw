@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.9.3"
+APP_VERSION = "2.9.4"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6597,17 +6597,23 @@ class App(_Base):
                     tc.set("1")
         tm.trace_add("write", _sync_threads)
         _sync_threads()
-        b = mkcard(sc, "VPN")
-        field(b, 0, "Locations", "vpn_locations", 60, "comma diye alada • USA dropdown er jonno: Oregon, Virginia • shudhu ei list er location e connect hobe")
-        field(b, 1, "Max VPN tries", "max_vpn_tries", 8)
+        b = mkcard(sc, "VPN", "kon VPN diye kaj hobe — Chrome e duto-i install thakbe")
+        vp = tk.StringVar(value=str(self._voice_cfg.get("vpn_provider", "VeePN")))
+        self.voice_vars["vpn_provider"] = vp
+        frow(b, 0, "VPN provider", ttk.Combobox(b, textvariable=vp, values=VOICE_VPN_PROVIDERS,
+                                                state="readonly", width=26))
+        field(b, 1, "VeePN locations", "vpn_locations", 60, "comma diye alada • USA dropdown er jonno: Oregon, Virginia • shudhu ei list er location e connect hobe")
+        field(b, 2, "UrbanVPN locations", "urban_locations", 60, "comma diye alada • UrbanVPN er list e jemon lekha ache temon (jemon: United States (USA), Germany, United Kingdom (UK))")
+        field(b, 3, "Max VPN tries", "max_vpn_tries", 8)
         dv = tk.StringVar(value="1" if self._voice_cfg.get("vpn_disconnect_after", True) else "0")
         self.voice_vars["vpn_disconnect_after"] = dv
-        fspan(b, 2, mktoggle(b, "Shesh hole VPN disconnect koro", dv, bg=PANEL))
-        field(b, 3, "VPN load wait", "vpn_load_wait_sec", 8,
-              "seconds — VeePN 'Loading' e atke thakle ei somoy por reload kore abar chesta korbe")
+        fspan(b, 4, mktoggle(b, "Shesh hole VPN disconnect koro", dv, bg=PANEL))
+        field(b, 5, "VPN load wait", "vpn_load_wait_sec", 8,
+              "seconds — VeePN 'Loading' e atke thakle ei somoy por reload kore abar chesta korbe (shudhu VeePN)")
         b = mkcard(sc, "Account & Extension")
-        field(b, 0, "Extension ID", "ext_id", 40)
-        field(b, 1, "Max mail tries", "max_account_tries", 8)
+        field(b, 0, "VeePN Extension ID", "ext_id", 40)
+        field(b, 1, "UrbanVPN Extension ID", "urban_ext_id", 40, "faka rakhle auto detect")
+        field(b, 2, "Max mail tries", "max_account_tries", 8)
         b = mkcard(sc, "Timeouts", "minutes")
         field(b, 0, "Generate", "gen_timeout_min", 8)
         field(b, 1, "Export", "export_timeout_min", 8)
@@ -7164,6 +7170,8 @@ class App(_Base):
                 except ValueError:
                     val = VOICE_DEFAULTS[k]
             self._voice_cfg[k] = val
+        if str(self._voice_cfg.get("vpn_provider", "")) not in VOICE_VPN_PROVIDERS:
+            self._voice_cfg["vpn_provider"] = "VeePN"
         if self._voice_cfg.get("thread_mode") == "multiple":
             self._voice_cfg["threads"] = max(2, min(5, int(self._voice_cfg.get("threads") or 2)))
         else:
@@ -7563,7 +7571,9 @@ class App(_Base):
         self._voice_kind = "setup"
         eid = str(self._voice_cfg.get("ext_id", "") or "").strip()
         self._voice_thread = threading.Thread(
-            target=lambda: voice_chrome_setup_all(5, eid, self.voice_log_line), daemon=True)
+            target=lambda: voice_chrome_setup_all(
+                5, eid, self.voice_log_line,
+                str(self._voice_cfg.get("urban_ext_id", "") or "").strip()), daemon=True)
         self._voice_thread.start()
 
     def voice_regen(self, name, what):
@@ -7923,6 +7933,9 @@ Script file-এর প্রতিটি sentence-এর জন্য সঠি�
 VOICE_DEFAULTS = {
     "output_dir": VOICE_OUTPUT,
     "ext_id": "",
+    "vpn_provider": "VeePN",
+    "urban_ext_id": "",
+    "urban_locations": "United States (USA), Germany, United Kingdom (UK)",
     "vpn_locations": "France, Russia, United Kingdom, Oregon, Virginia",
     "max_account_tries": 3,
     "max_vpn_tries": 8,
@@ -7950,6 +7963,7 @@ VOICE_DEFAULTS_V1 = {"split_mode": "Split by Paragraphs", "vpn_load_wait_sec": 1
                      "convert_timeout_min": 5, "zamzar_check_sec": 20, "gemini_timeout_min": 2}
 VOICE_FREE_LOCS = ["Optimal location", "France", "Netherlands", "Russia", "Singapore",
                    "United Kingdom", "United States"]
+VOICE_VPN_PROVIDERS = ["VeePN", "UrbanVPN"]
 VOICE_SPLIT_MODES = ["Split by Paragraphs", "Split by Sentences", "Split by Lines"]
 VOICE_CLONES = os.path.join(VOICE_BASE, "chrome_profiles")
 VOICE_CHIP_RE = re.compile(r"\((M|F)\)\s*$")
@@ -8365,13 +8379,20 @@ class VoiceRunner:
         if self.chrome_hidden:
             self.move_window(self.keepalive, False)
 
-    def _ext_from_disk(self):
-        """Profile folder e install kora extension scan kore VeePN er ID ber kore (service worker ghumaleo kaj kore)."""
+    def is_urban(self):
+        return str(self.cfg.get("vpn_provider", "VeePN")).strip().lower().startswith("urban")
+
+    def _ext_from_disk(self, key="veepn"):
+        """Profile folder e install kora extension scan kore VeePN/UrbanVPN er ID ber kore (service worker ghumaleo kaj kore)."""
         found = set()
+        keys = ("urban vpn", "urbanvpn") if key == "urban" else ("veepn",)
         root = os.path.join(self.profile, "Default", "Extensions")
         try:
             for eid in os.listdir(root):
                 if not re.fullmatch(r"[a-p]{32}", eid):
+                    continue
+                if key == "urban" and eid == URBAN_EXT_ID:
+                    found.add(eid)
                     continue
                 edir = os.path.join(root, eid)
                 for ver in os.listdir(edir):
@@ -8384,13 +8405,31 @@ class VoiceRunner:
                                 blob += open(fp, encoding="utf-8", errors="ignore").read().lower()
                             except Exception:
                                 pass
-                    if "veepn" in blob:
+                    if any(k in blob for k in keys):
                         found.add(eid)
         except Exception:
             pass
         return found
 
+    def ext_id_urban(self):
+        v = str(self.cfg.get("urban_ext_id", "") or "").strip()
+        if v:
+            return v
+        if getattr(self, "_urban_cached", None):
+            return self._urban_cached
+        disk = self._ext_from_disk("urban")
+        if disk:
+            self._urban_cached = sorted(disk)[0]
+            self.log(f"  UrbanVPN extension ID: {self._urban_cached}")
+            return self._urban_cached
+        raise RuntimeError(
+            "UrbanVPN extension ID paoa jayni. Ei app er Chrome profile e UrbanVPN install nai — "
+            "'Chrome Profile Setup' chalie UrbanVPN install korun (ekbar-i). "
+            "Ba Settings e UrbanVPN Extension ID boshan.")
+
     def ext_id(self):
+        if self.is_urban():
+            return self.ext_id_urban()
         if self.cfg.get("ext_id", "").strip():
             return self.cfg["ext_id"].strip()
         if getattr(self, "_ext_cached", None):
@@ -8426,14 +8465,35 @@ class VoiceRunner:
         eid = self.ext_id()
         p = self.new_page()
         popup = "popup.html"
+        mf = f"chrome-extension://{eid}/manifest.json"
         try:
-            p.goto(f"chrome-extension://{eid}/manifest.json", timeout=20000)
+            p.goto(mf, timeout=20000)
+        except Exception:
+            # extension disable kora thakle (jemon UrbanVPN 'Disable other extension' dile) -> chrome://extensions theke on kore abar
+            self.log("  VPN extension disabled mone hocche — chrome://extensions theke enable korchi")
+            try:
+                self.ext_set_enabled(eid, True)
+                p.goto(mf, timeout=20000)
+            except Exception:
+                pass
+        try:
             data = json.loads(p.inner_text("body"))
             popup = ((data.get("action") or data.get("browser_action") or {}).get("default_popup") or popup)
         except Exception:
             pass
         p.goto(f"chrome-extension://{eid}/{popup}", timeout=30000)
         p.wait_for_timeout(2500)
+        if self.is_urban():
+            try:
+                p.set_viewport_size({"width": 380, "height": 730})   # popup er moto size (layout milanor jonno)
+                p.wait_for_timeout(500)
+            except Exception:
+                pass
+            try:
+                self.urban_dismiss(p)
+            except Exception:
+                pass
+            return p
         try:
             self.vpn_wait_loaded(p, eid, popup)
         except Exception:
@@ -8529,7 +8589,284 @@ class VoiceRunner:
         except Exception:
             return False
 
+    # ───────── chrome://extensions on/off ─────────
+    def ext_set_enabled(self, eid, want=True):
+        """chrome://extensions e gie ei extension er toggle on/off kore."""
+        p = self.new_page()
+        try:
+            p.goto("chrome://extensions/", timeout=20000)
+            p.wait_for_timeout(1500)
+            tog = p.locator(f"extensions-item[id='{eid}'] #enableToggle")
+            tog.wait_for(timeout=8000)
+            try:
+                on = bool(tog.evaluate("e => e.checked"))
+            except Exception:
+                on = (tog.get_attribute("aria-pressed") == "true")
+            if on != bool(want):
+                tog.click(timeout=4000)
+                p.wait_for_timeout(1500)
+                self.log(f"  extension {eid[:8]}… {'enable' if want else 'disable'} kora hoyeche")
+            return True
+        except Exception as e:
+            self.log(f"  chrome://extensions e toggle kora gelo na: {str(e).splitlines()[0][:120]}")
+            return False
+        finally:
+            self.close_page(p)
+
+    # ───────── UrbanVPN ─────────
+    def urban_interruption(self, p):
+        """'Service interruption' -> 'Disable other extension' click; na hole nijei VeePN disable kore reload."""
+        rx = re.compile(r"Service interruption|being interrupted", re.I)
+        self.log("  UrbanVPN: 'Service interruption' — 'Disable other extension' chapchi")
+        try:
+            b = p.get_by_role("button", name=re.compile(r"Disable other extension", re.I)).first
+            if not b.is_visible():
+                b = p.get_by_text(re.compile(r"Disable other extension", re.I)).first
+            b.click(timeout=3000)
+        except Exception:
+            pass
+        for _ in range(8):
+            p.wait_for_timeout(700)
+            try:
+                if not p.get_by_text(rx).first.is_visible():
+                    self.log("  UrbanVPN: onno extension disable hoyeche")
+                    return
+            except Exception:
+                return
+        # Chrome nijer confirm dialog dekhale click kora jay na -> chrome://extensions diye disable
+        ids = set(self._ext_from_disk("veepn"))
+        vid = str(self.cfg.get("ext_id", "") or "").strip()
+        if vid:
+            ids.add(vid)
+        for i in ids:
+            self.ext_set_enabled(i, False)
+        try:
+            p.reload(timeout=20000)
+        except Exception:
+            pass
+        p.wait_for_timeout(2500)
+
+    def urban_close_x(self, p):
+        """'Enjoy using UrbanVPN?' rating popup er upore-dane X."""
+        try:
+            for s in ("[aria-label*='close' i]", "button[class*='close' i]", "[class*='close' i]"):
+                loc = p.locator(s)
+                for i in range(min(loc.count(), 3)):
+                    if loc.nth(i).is_visible():
+                        loc.nth(i).click(timeout=1500)
+                        return
+        except Exception:
+            pass
+        try:
+            pt = p.evaluate("""() => {
+                let best = null;
+                for (const el of document.querySelectorAll('button,[role=button],svg,img,a,div,span')) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 10 || r.height < 10 || r.width > 60 || r.height > 60) continue;
+                    if (r.top > 80 || r.bottom < 0) continue;
+                    const cs = getComputedStyle(el);
+                    if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+                    if (!best || r.right > best.r) best = {x: r.left + r.width / 2, y: r.top + r.height / 2, r: r.right};
+                }
+                return best;
+            }""")
+            if pt:
+                p.mouse.click(pt["x"], pt["y"])
+        except Exception:
+            pass
+
+    def urban_dismiss(self, p):
+        """'Want to use Urban VPN?' -> Accept, 'Enjoy using UrbanVPN?' (rate us) -> X."""
+        for _ in range(4):
+            acted = False
+            try:
+                if p.get_by_text(re.compile(r"Service interruption", re.I)).first.is_visible():
+                    self.urban_interruption(p)
+                    acted = True
+            except Exception:
+                pass
+            try:
+                if p.get_by_text(re.compile(r"Want to use Urban\s?VPN", re.I)).first.is_visible():
+                    b = p.get_by_role("button", name=re.compile(r"^\s*Accept\s*$", re.I)).first
+                    if not b.is_visible():
+                        b = p.get_by_text(re.compile(r"^\s*Accept\s*$")).first
+                    b.click(timeout=3000)
+                    p.wait_for_timeout(1500)
+                    acted = True
+            except Exception:
+                pass
+            try:
+                if p.get_by_text(re.compile(r"Enjoy using Urban\s?VPN|rating us on", re.I)).first.is_visible():
+                    self.urban_close_x(p)
+                    p.wait_for_timeout(800)
+                    acted = True
+            except Exception:
+                pass
+            if not acted:
+                break
+
+    def urban_status(self, p):
+        self.urban_dismiss(p)
+        for name, rx in (("connected", r"^\s*Connected\s*$"), ("not", r"^\s*Not connected\s*$"),
+                         ("connecting", r"^\s*Connecting")):
+            try:
+                if p.get_by_text(re.compile(rx)).first.is_visible():
+                    return name
+            except Exception:
+                pass
+        return None
+
+    def urban_connected(self, p):
+        return self.urban_status(p) == "connected"
+
+    def urban_wait_status(self, p, names, timeout):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            st = self.urban_status(p)
+            if st in names:
+                return st
+            if self.stop.is_set():
+                break
+            p.wait_for_timeout(600)
+        return None
+
+    def urban_power(self, p, dy=182):
+        """Bhetorer boro gol (play/pause) button — status lekhar thik upore."""
+        self.urban_dismiss(p)
+        t = p.get_by_text(re.compile(r"^\s*(Not connected|Connected|Connecting.*)\s*$")).first
+        t.wait_for(timeout=8000)
+        box = t.bounding_box()
+        p.mouse.click(box["x"] + box["width"] / 2 - 12, box["y"] + box["height"] / 2 - dy)
+
+    def urban_pick(self, p, name):
+        inp = p.locator("input[placeholder*='Search' i], input[type='search'], input[type='text']").first
+
+        def opened():
+            try:
+                return inp.is_visible()
+            except Exception:
+                return False
+        if not opened():
+            pts = []
+            try:
+                bx = p.get_by_text(re.compile(r"Get Premium", re.I)).first.bounding_box()
+            except Exception:
+                bx = None
+            if bx:
+                cy = bx["y"] + bx["height"] / 2 + 62
+                pts += [(bx["x"] - 60, cy), (bx["x"] - 160, cy), (bx["x"] + 40, cy)]
+            pts += [(150, 92), (120, 92)]
+            for x, y in pts:
+                try:
+                    p.mouse.click(x, y)
+                except Exception:
+                    continue
+                p.wait_for_timeout(800)
+                self.urban_dismiss(p)
+                if opened():
+                    break
+            if not opened():
+                raise RuntimeError("UrbanVPN location list khola jayni")
+        q = re.sub(r"\s*\(.*?\)\s*", " ", name).strip() or name
+        try:
+            inp.click(timeout=2000)
+            inp.fill("")
+            inp.type(q, delay=40)
+        except Exception:
+            pass
+        p.wait_for_timeout(1000)
+        try:
+            ib = inp.bounding_box()
+            min_y = (ib["y"] + ib["height"]) if ib else 0
+        except Exception:
+            min_y = 0
+        item = None
+        for rx in (rf"^\s*{re.escape(name)}\s*$", rf"^\s*{re.escape(name)}", rf"^\s*{re.escape(q)}\b",
+                   re.escape(q)):
+            loc = p.get_by_text(re.compile(rx, re.I))
+            try:
+                for i in range(min(loc.count(), 6)):
+                    cand = loc.nth(i)
+                    if not cand.is_visible():
+                        continue
+                    cb = cand.bounding_box()
+                    if cb and cb["y"] > min_y - 2:
+                        item = cand
+                        break
+            except Exception:
+                pass
+            if item is not None:
+                break
+        if item is None:
+            raise RuntimeError(f"UrbanVPN e '{name}' paoa jayni")
+        for how in ("normal", "force", "mouse"):
+            try:
+                if how == "normal":
+                    item.click(timeout=3000)
+                elif how == "force":
+                    item.click(timeout=3000, force=True)
+                else:
+                    b = item.bounding_box()
+                    p.mouse.click(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2)
+                return
+            except Exception:
+                continue
+        raise RuntimeError(f"UrbanVPN '{name}' select kora jayni")
+
+    def vpn_connect_urban(self):
+        locs = [s.strip() for s in str(self.cfg.get("urban_locations", "") or "").split(",") if s.strip()]
+        if not locs:
+            locs = [s.strip() for s in VOICE_DEFAULTS["urban_locations"].split(",")]
+        pool = [x for x in locs if x != self.last_vpn] or locs
+        choice = random.choice(pool)
+        self.last_vpn = choice
+        self.log(f"VPN (UrbanVPN): location -> {choice}")
+        p = self.open_vpn_popup()
+        try:
+            if self.urban_connected(p):
+                self.urban_power(p)
+                if not self.urban_wait_status(p, ("not",), 20):
+                    raise RuntimeError("UrbanVPN disconnect hoyni")
+            self.urban_pick(p, choice)
+            p.wait_for_timeout(1500)
+            st = self.urban_wait_status(p, ("connected", "connecting"), 6)   # location select korle auto connect hote pare
+            if st is None:
+                for dy in (182, 170, 195):
+                    self.urban_power(p, dy)
+                    st = self.urban_wait_status(p, ("connected", "connecting"), 6)
+                    if st:
+                        break
+            if st != "connected":
+                st = self.urban_wait_status(p, ("connected",), 40)
+            if st != "connected":
+                self.urban_dismiss(p)
+                self.ask("VPN connect hoyni. Extension popup thakle nijer haate bondho kore OK chapen.")
+                if not self.urban_connected(p):
+                    raise RuntimeError("VPN connect hoyni")
+            self.log("  VPN connected")
+        except Exception:
+            self.debug(p, "vpn")
+            raise
+        finally:
+            self.close_page(p)
+
+    def vpn_disconnect_urban(self):
+        p = None
+        try:
+            p = self.open_vpn_popup()
+            if self.urban_connected(p):
+                self.urban_power(p)
+                self.urban_wait_status(p, ("not",), 20)
+                self.log("  VPN disconnect hoyeche")
+        except Exception as e:
+            self.log(f"  VPN disconnect kora gelo na: {e}")
+        finally:
+            if p:
+                self.close_page(p)
+
     def vpn_disconnect(self):
+        if self.is_urban():
+            return self.vpn_disconnect_urban()
         p = None
         try:
             p = self.open_vpn_popup()
@@ -8600,6 +8937,8 @@ class VoiceRunner:
         raise RuntimeError("USA dropdown khola jayni")
 
     def vpn_connect(self):
+        if self.is_urban():
+            return self.vpn_connect_urban()
         locs = voice_vpn_choices(self.cfg.get("vpn_locations", "")) or voice_vpn_choices(VOICE_DEFAULTS["vpn_locations"])
         pool = [x for x in locs if x != self.last_vpn] or locs
         choice = random.choice(pool)
@@ -10346,6 +10685,10 @@ def voice_profile_setup(log, prof=None, label=""):
             args=["--start-maximized"])
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.goto("https://chromewebstore.google.com/search/veepn")
+        try:
+            ctx.new_page().goto(URBAN_STORE_URL, timeout=30000)     # 2nd tab: UrbanVPN
+        except Exception:
+            pass
         log(tag + "Chrome khulechhe. VeePN install kore toolbar e pin korun, tarpor VeePN icon e click kore "
                   "'Loading' shesh howa porjonto (2 min porjonto) wait korun jeno VeePN pura khole. "
                   "Tarpor window bondho korun. (Gemini login ei window te hobe na — 'Gemini Login Setup' use korun.)")
@@ -10401,8 +10744,9 @@ def voice_thread_profiles_setup(n, redo, log):
     log("Thread profiles setup shesh. Ebar Multiple threads e START chapte paren.")
 
 
-def _voice_ext_id_from_profile(prof):
-    """Profile folder e install kora VeePN er extension ID (disk scan)."""
+def _voice_ext_id_from_profile(prof, key="veepn"):
+    """Profile folder e install kora VeePN / UrbanVPN er extension ID (disk scan)."""
+    keys = ("urban vpn", "urbanvpn") if key == "urban" else ("veepn",)
     root = os.path.join(prof, "Default", "Extensions")
     try:
         for eid in os.listdir(root):
@@ -10419,7 +10763,7 @@ def _voice_ext_id_from_profile(prof):
                             blob += open(fp, encoding="utf-8", errors="ignore").read().lower()
                         except Exception:
                             pass
-                if "veepn" in blob:
+                if any(k in blob for k in keys):
                     return eid
     except Exception:
         pass
@@ -10428,9 +10772,11 @@ def _voice_ext_id_from_profile(prof):
 
 VEEPN_STORE_URL = "https://chromewebstore.google.com/detail/free-vpn-for-chrome-vpn-p/majdfhpaihoncoakbjgbdhglocklcgno?hl=en"
 VEEPN_EXT_ID = "majdfhpaihoncoakbjgbdhglocklcgno"
+URBAN_EXT_ID = "eppiocemhmnlbhjplcgkofciiegomcon"
+URBAN_STORE_URL = "https://chromewebstore.google.com/detail/urban-vpn-proxy/eppiocemhmnlbhjplcgkofciiegomcon"
 
 
-def voice_chrome_setup_all(n, cfg_ext_id, log):
+def voice_chrome_setup_all(n, cfg_ext_id, log, urban_ext_id=""):
     """Ek button: main profile (1) + t2..t{n} — ek ek kore Chrome khole. Clone na, shob main profile.
     Prottek Chrome e: tab1 = VeePN page (install na thakle Web Store), tab2 = Gemini. Window bondho korle porerta."""
     _voice_ensure_dirs()
@@ -10444,8 +10790,10 @@ def voice_chrome_setup_all(n, cfg_ext_id, log):
             return
         eid = cfg_ext_id or _voice_ext_id_from_profile(prof) or VEEPN_EXT_ID
         installed = bool(_voice_ext_id_from_profile(prof))
-        log(f"Profile {i}/{n}: Chrome khulchhe — VPN te connect/setup korun, Gemini te login korun, "
-            f"tarpor Chrome bondho korun.")
+        u_found = _voice_ext_id_from_profile(prof, "urban")
+        u_eid = urban_ext_id or u_found or URBAN_EXT_ID
+        log(f"Profile {i}/{n}: Chrome khulchhe — VeePN ar UrbanVPN duto-i install/setup korun "
+            f"(UrbanVPN e 'Accept' chapun), Gemini te login korun, tarpor Chrome bondho korun.")
         try:
             with sync_playwright() as pw:
                 ctx = pw.chromium.launch_persistent_context(
@@ -10468,6 +10816,24 @@ def voice_chrome_setup_all(n, cfg_ext_id, log):
                     page.goto(vpn_url or VEEPN_STORE_URL, timeout=30000)
                     if not vpn_url:
                         log(f"Profile {i}: VeePN install nei — Web Store page khulechhe, 'Add to Chrome' e click kore pin korun.")
+                except Exception:
+                    pass
+                try:
+                    up = ctx.new_page()
+                    u_url = None
+                    if u_found or urban_ext_id:
+                        u_popup = "popup.html"
+                        try:
+                            up.goto(f"chrome-extension://{u_eid}/manifest.json", timeout=15000)
+                            ud = json.loads(up.inner_text("body"))
+                            u_popup = ((ud.get("action") or ud.get("browser_action") or {})
+                                       .get("default_popup") or u_popup)
+                        except Exception:
+                            pass
+                        u_url = f"chrome-extension://{u_eid}/{u_popup}"
+                    up.goto(u_url or URBAN_STORE_URL, timeout=30000)
+                    if not u_url:
+                        log(f"Profile {i}: UrbanVPN install nei — Web Store page khulechhe, 'Add to Chrome' e click kore pin korun.")
                 except Exception:
                     pass
                 try:
