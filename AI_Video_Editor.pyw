@@ -13,7 +13,7 @@ import os, sys, re, json, zlib, base64, shutil, hashlib, threading, subprocess, 
 import zipfile, urllib.request, time, ssl, stat, hmac
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog, colorchooser
-import math, random
+import math, random, datetime
 
 _ENGINE_B64 = """
 eNrtvf1zI8l1IPg7/4pUdVisGgIgwP5YCTNoBbubraHVTXJJdo/GaBhTAApEDQEUugrgx1DYsLxezTl0G76wdqw4W3dah0c9s+uxrFBs2HLEhfSvdNhxF3ex6//h3kdmVmZVASTnQ9OrmLHVRFXl58
@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.9.1"
+APP_VERSION = "2.9.2"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6416,6 +6416,9 @@ class App(_Base):
         self._voice_tag_cur = {}            # chrome thread tag -> ekhon kon script e kaj korche
         self._voice_live_w = {}             # script name -> live row er widget gulo
         self._voice_live_i = 0
+        self._voice_sort = tk.StringVar(value=str(self._voice_cfg.get("results_sort", "date")))
+        if self._voice_sort.get() not in ("date", "name", "modified"):
+            self._voice_sort.set("date")
 
         self.header(f, "Voice + SRT",
                     "Script \u2192 Speechify (MP3) \u2192 VeePN \u2192 Zamzar (SRT). Prottek script er MP3+SRT alada folder e.")
@@ -6480,6 +6483,12 @@ class App(_Base):
         runpane.add(gc, minsize=260, stretch="always", width=520)
         mkbtn(gh, "Refresh", self.voice_refresh_results, "ghost", pady=2, padx=10).pack(side="right")
         mkbtn(gh, "Output folder", lambda: open_path(VOICE_OUTPUT), "flat", pady=2, padx=10).pack(side="right", padx=4)
+        sortbar = tk.Frame(gc, bg=PANEL)
+        sortbar.pack(fill="x", padx=12, pady=(0, 6))
+        mklabel(sortbar, "Sort by", 9, MUTED, bg=PANEL).pack(side="left", padx=(0, 8))
+        Segmented(sortbar, self._voice_sort, [("date", "Date"), ("name", "Name"), ("modified", "Modified")],
+                  bg=PANEL, padx=10, pady=3, size=9).pack(side="left")
+        self._voice_sort.trace_add("write", lambda *a: self._voice_sort_changed())
         self.voice_results = ScrollFrame(gc, bg=PANEL)
         self.voice_results.pack(fill="both", expand=True, padx=8, pady=(0, 10))
         lc, lh = card(runpane, "Live log", "majher line tene size bodlano jay", pack=False)
@@ -6766,7 +6775,7 @@ class App(_Base):
                     d["done"].add(s_)
             d["detail"] = "Shesh"
             return True
-        elif low.startswith("fail:"):
+        elif low.startswith("fail:") or low.startswith("error"):
             d["state"] = "fail"
             d["tend"] = now
             if before:
@@ -6788,7 +6797,12 @@ class App(_Base):
                 continue
             if only is None and n in self._voice_regens:
                 continue
-            d["state"] = "done" if self._voice_cur_stage(d) is None else "stopped"
+            if d["bad"]:
+                d["state"] = "fail"
+                if not d.get("detail") or d["detail"] in ("Shuru hochhe\u2026", "Shesh"):
+                    d["detail"] = "Kichu dhap fail hoyeche (upore \u2717 dekho)"
+            else:
+                d["state"] = "done" if self._voice_cur_stage(d) is None else "stopped"
             d["tend"] = time.time()
             changed = True
         if changed:
@@ -6809,11 +6823,18 @@ class App(_Base):
             chips[s_] = lb
         tl = mklabel(r1, "", 9, MUTED, bg=PANEL)
         tl.pack(side="right")
+        if d["state"] in ("fail", "stopped"):
+            mkbtn(r1, "\u2715", lambda n=name: self._voice_live_dismiss(n), "flat",
+                  pady=0, padx=6).pack(side="right", padx=(0, 8))
         dl = mklabel(fr, "", 9, FG, bg=PANEL, justify="left", anchor="w", wraplength=420)
         dl.pack(fill="x", padx=8, pady=(2, 7))
         fr.bind("<Configure>", lambda e, l=dl: l.configure(wraplength=max(140, e.width - 24)))
         self._voice_live_w[name] = {"frame": fr, "chips": chips, "time": tl, "detail": dl, "cache": {}}
         self._voice_live_update(self._voice_live_w[name], d)
+
+    def _voice_live_dismiss(self, name):
+        self._voice_live.pop(name, None)
+        self.voice_refresh_results()
 
     def _voice_live_tick(self):
         if not self._voice_live_w:
@@ -7158,9 +7179,22 @@ class App(_Base):
             w.destroy()
         out = VOICE_OUTPUT
         folders = []
+        sort_mode = self._voice_sort.get()
+        stamps = {}                                    # folder -> (created, modified)
         if os.path.isdir(out):
-            folders = sorted((d for d in os.listdir(out) if os.path.isdir(os.path.join(out, d))),
-                             key=lambda d: os.path.getmtime(os.path.join(out, d)), reverse=True)
+            for d in os.listdir(out):
+                fp_ = os.path.join(out, d)
+                if os.path.isdir(fp_):
+                    try:
+                        stamps[d] = (os.path.getctime(fp_), os.path.getmtime(fp_))
+                    except OSError:
+                        stamps[d] = (0, 0)
+            if sort_mode == "name":
+                folders = sorted(stamps, key=lambda d: natural_key(d))
+            elif sort_mode == "modified":
+                folders = sorted(stamps, key=lambda d: stamps[d][1], reverse=True)
+            else:
+                folders = sorted(stamps, key=lambda d: stamps[d][0], reverse=True)
         # queue te ache kintu ekhono shuru hoyni
         pending = set()
         if self._voice_main_running:
@@ -7174,9 +7208,32 @@ class App(_Base):
             mklabel(self.voice_results.inner, "Ekhono kono output nei \u2014 START chapun.", 10, MUTED,
                     bg=PANEL).pack(anchor="w", padx=8, pady=8)
             return
-        # je gulo ekhon cholche shegulo ageh
-        folders = sorted(folders, key=lambda n: 0 if self._voice_live.get(n, {}).get("state") == "run" else 1)
         pend_shown = [False]
+        last_day = [None]
+        today_d = datetime.date.today()
+
+        def _day_title(ts):
+            d_ = datetime.date.fromtimestamp(ts)
+            if d_ == today_d:
+                pre = "Today"
+            elif d_ == today_d - datetime.timedelta(days=1):
+                pre = "Yesterday"
+            else:
+                pre = d_.strftime("%A")
+            return f"{pre}  \u00b7  {d_.day} {d_.strftime('%b %Y')}"
+
+        def _day_header(name):
+            if sort_mode == "name":
+                return
+            ts = stamps.get(name, (0, 0))[0 if sort_mode == "date" else 1]
+            day = datetime.date.fromtimestamp(ts)
+            if day == last_day[0]:
+                return
+            last_day[0] = day
+            hr = tk.Frame(self.voice_results.inner, bg=PANEL)
+            hr.pack(fill="x", padx=8, pady=(10, 2))
+            mklabel(hr, "\U0001f4c5  " + _day_title(ts), 10, ACCENT, True, bg=PANEL).pack(side="left")
+            tk.Frame(hr, bg=PANEL2, height=1).pack(side="left", fill="x", expand=True, padx=(10, 0), pady=(2, 0))
 
         def _pend_cards():
             if pend_shown[0]:
@@ -7190,9 +7247,9 @@ class App(_Base):
                 mklabel(pr_, f"\U0001f4c4  {pn}", 11, FG, True, bg=PANEL2).pack(side="left")
                 mklabel(pr_, "  \u23f3 queue e opekkha korche\u2026", 9, MUTED, bg=PANEL2).pack(side="left", padx=(8, 0))
 
+        _pend_cards()
         for name in folders:
-            if self._voice_live.get(name, {}).get("state") != "run":
-                _pend_cards()
+            _day_header(name)
             folder = os.path.join(out, name)
             card = tk.Frame(self.voice_results.inner, bg=PANEL2)
             card.pack(fill="x", padx=6, pady=4)
@@ -7284,6 +7341,14 @@ class App(_Base):
                     mkbtn(row, "\u25a0", self._voice_play_stop, "flat", pady=2, padx=8).pack(side="right", padx=4)
 
         _pend_cards()
+
+    def _voice_sort_changed(self):
+        try:
+            self._voice_cfg["results_sort"] = self._voice_sort.get()
+            _voice_save_cfg(self._voice_cfg)
+        except Exception:
+            pass
+        self.voice_refresh_results()
 
     def voice_delete_folder(self, name):
         """Voice+SRT: ekta generated folder (MP3 + SRT) computer theke delete kore."""
@@ -7539,6 +7604,7 @@ class App(_Base):
 
         def work():
             r = None
+            fail_msg = None
             try:
                 r = VoiceRunner(cfg, self.voice_log_line, self.voice_ask, self._voice_stop,
                                 chrome_hidden=hidden, profile=prof, shared=self._voice_shared, tag=tag)
@@ -7548,19 +7614,38 @@ class App(_Base):
             except VoiceStopped:
                 self.voice_log_line("--- STOP kora hoyeche ---")
             except Exception as e:
-                self.voice_log_line(f"ERROR: {str(e).splitlines()[0][:220]}")
+                fail_msg = (str(e).splitlines() or [type(e).__name__])[0][:220] or type(e).__name__
+                self.voice_log_line(f"ERROR: Regenerate ({what}) fail \u2014 {name}: {fail_msg}")
             finally:
                 if r in self._voice_runners:
                     self._voice_runners.remove(r)
                 self._voice_slots.release(idx)
-                self.after(0, lambda: self._voice_regen_done(name))
+                self.after(0, lambda: self._voice_regen_done(name, what, fail_msg))
 
         threading.Thread(target=work, daemon=True).start()
         self._voice_ui_update()
         self.voice_refresh_results()
 
-    def _voice_regen_done(self, name):
+    def _voice_regen_done(self, name, what=None, fail_msg=None):
         self._voice_regens.pop(name, None)
+        if fail_msg:
+            d = self._voice_live.get(name)
+            if not d:
+                st = {"mp3": ["mp3", "srt"], "srt": ["srt"]}.get(what, ["gemini"])
+                now = time.time()
+                d = self._voice_live[name] = {"tag": "", "stages": st, "done": set(), "skipped": set(),
+                                              "bad": set(), "state": "run", "t0": now, "st0": now,
+                                              "detail": ""}
+            cur = self._voice_cur_stage(d)
+            if cur:
+                d["bad"].add(cur)
+            d["state"] = "fail"
+            d["tend"] = time.time()
+            d["detail"] = "Regenerate fail: " + fail_msg
+            try:
+                self.note("\u2717 Regenerate fail \u2014 " + name + ": " + fail_msg[:90], BAD, 10)
+            except Exception:
+                pass
         self.after(600, lambda n=name: self._voice_live_finalize(n))
         self._voice_ui_update()
         self.refresh_voice()
