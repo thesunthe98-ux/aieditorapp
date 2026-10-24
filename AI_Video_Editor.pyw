@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.9.5"
+APP_VERSION = "2.9.6"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6527,6 +6527,7 @@ class App(_Base):
         self.voice_vcombo.bind("<Return>", lambda e: self._voice_voice_commit())
         self.voice_vcombo.bind("<FocusOut>", lambda e: self._voice_voice_commit())
         self.voice_vcombo.bind("<Button-3>", self._voice_voice_forget)
+        mkbtn(name_row, "\U0001f5d1 Delete voice", self._voice_voice_forget, "flat", pady=3, padx=10).pack(side="left")
         boxes = tk.Frame(ec, bg=PANEL)
         boxes.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         boxes.columnconfigure(0, weight=1, uniform="vbox")
@@ -7135,13 +7136,20 @@ class App(_Base):
     def _voice_voice_forget(self, e=None):
         v = self.voice_svoice.get().strip()
         d = _voice_voices_load()
-        if v and v in d["names"] and messagebox.askyesno("Voice name", f"'{v}' dropdown list theke muchben?"):
+        if not v:
+            messagebox.showinfo("Voice name", "Age dropdown theke (ba type kore) je voice name muchte chao seta select koro.")
+            return
+        if v not in d["names"]:
+            messagebox.showinfo("Voice name", f"'{v}' mone rakha list e nei.")
+            return
+        if messagebox.askyesno("Voice name", f"'{v}' dropdown list theke muchben?"):
             d["names"].remove(v)
             try:
                 _voice_voices_save(d)
             except Exception:
                 pass
             self.voice_vcombo.configure(values=d["names"])
+            self.voice_svoice.set("")
 
     def voice_new_script(self):
         self._voice_cur_script = None
