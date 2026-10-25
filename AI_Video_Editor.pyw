@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.9.6"
+APP_VERSION = "2.9.7"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6437,6 +6437,12 @@ class App(_Base):
         self.voice_hide_btn.pack(side="left", padx=8)
         self.voice_clear_btn = mkbtn(row, "\U0001f5d1 Clear All", self.voice_clear_all, "ghost")
         self.voice_clear_btn.pack(side="left", padx=8)
+        self._voice_after_var = tk.StringVar(
+            value=VOICE_AFTER_LABELS.get(str(self._voice_cfg.get("after_action", "none")), "Kichu na"))
+        _ab = ttk.Combobox(row, textvariable=self._voice_after_var, values=list(VOICE_AFTER_LABELS.values()),
+                           state="readonly", width=12)
+        _ab.pack(side="left", padx=(16, 0))
+        mklabel(row, "\u2190 sob kaj shesh hole", 9, MUTED, bg=PANEL).pack(side="left", padx=6)
         self.voice_status = mklabel(row, "Ready", 10, MUTED, bg=PANEL)
         self.voice_status.pack(side="right", padx=8)
         self.voice_active_lbl = mklabel(row, "", 10, ACCENT, True, bg=PANEL)
@@ -6634,6 +6640,12 @@ class App(_Base):
         fspan(b, 0, mktoggle(b, "MP3 + SRT er por Gemini diye corrected SRT banao", gv, bg=PANEL))
         field(b, 1, "Gemini timeout", "gemini_timeout_min", 8, "minutes — submit theke download porjonto ei somoy e na holei abar notun kore submit")
         field(b, 2, "Max Gemini tries", "gemini_tries", 8, "koybar submit korbe (2 = 1ta timeout/fail hole 1bar abar)")
+        b = mkcard(sc, "Sob kaj shesh hole", "script queue normal bhabe shesh hole (STOP korle hobe na)")
+        self.voice_vars["after_action"] = self._voice_after_var
+        frow(b, 0, "Ki korbe", ttk.Combobox(b, textvariable=self._voice_after_var,
+                                            values=list(VOICE_AFTER_LABELS.values()), state="readonly", width=26))
+        field(b, 1, "Timer (minute)", "after_delay_min", 8,
+              "shesh hoyar koto minute por PC bondho hobe • countdown window e Cancel chapte parben (minimum 15 second)")
         b = mkcard(sc, "Chrome")
         fspan(b, 0, mkbtn(b, "Chrome Profile Setup", self.voice_setup_profile, "ghost"))
         fnote(b, 1, "Click korle 5 ta main profile ek ek kore khulbe (clone na). Prottek Chrome e VPN (VeePN) page "
@@ -7233,6 +7245,18 @@ class App(_Base):
             if k == "thread_mode":
                 self._voice_cfg[k] = "multiple" if val.lower().startswith("multiple") else "single"
                 continue
+            if k == "after_action":
+                self._voice_cfg[k] = next((a for a, l in VOICE_AFTER_LABELS.items() if l == val), "none")
+                continue
+            if k == "after_delay_min":
+                try:
+                    val = max(0.0, float(val))
+                    if val == int(val):
+                        val = int(val)
+                except ValueError:
+                    val = VOICE_DEFAULTS[k]
+                self._voice_cfg[k] = val
+                continue
             if k == "gemini_timeout_min":
                 try:
                     val = max(0.5, float(val))
@@ -7809,17 +7833,21 @@ class App(_Base):
         self._voice_kind = "run"
 
         def work():
+            done_ok = False
             try:
                 voice_run_all(cfg, files, self.voice_log_line, self.voice_ask, self._voice_stop,
                               lambda: self._voice_chrome_hidden, self._voice_runners,
                               self._voice_shared, self._voice_slots)
                 self.voice_log_line("--- shesh ---")
+                done_ok = True
             except VoiceStopped:
                 self.voice_log_line("--- STOP kora hoyeche ---")
             except Exception as e:
                 self.voice_log_line(f"ERROR: {e}")
             finally:
                 self.after(0, self._voice_finish)
+                if done_ok:
+                    self.after(0, self._voice_after_finish)
 
         self._voice_thread = threading.Thread(target=work, daemon=True)
         self._voice_thread.start()
@@ -7834,6 +7862,87 @@ class App(_Base):
         if cur and not os.path.exists(os.path.join(VOICE_SCRIPTS, cur)):
             self.voice_new_script()          # script ta done e chole geche
         self.refresh_voice()
+
+    def _voice_after_finish(self):
+        """Sob kaj normal bhabe shesh hole (STOP na) PC shutdown/sleep — age countdown + Cancel."""
+        act = str(self._voice_cfg.get("after_action", "none"))
+        if act not in ("shutdown", "sleep"):
+            return
+        if self._voice_alive():                     # regenerate ityadi cholle shesh howar jonno opekkha
+            self.after(3000, self._voice_after_finish)
+            return
+        try:
+            secs = max(15, int(float(self._voice_cfg.get("after_delay_min", 1) or 0) * 60))
+        except (TypeError, ValueError):
+            secs = 60
+        name = VOICE_AFTER_LABELS[act]
+        self.voice_log_line(f"Sob kaj shesh — {secs}s por {name} hobe (Cancel korte countdown window e chapun)")
+        win = tk.Toplevel(self)
+        win.title(name)
+        win.configure(bg=PANEL)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        lbl = mklabel(win, "", 12, FG, True, bg=PANEL)
+        lbl.pack(padx=30, pady=(22, 8))
+        mklabel(win, "Cancel chaple PC bondho hobe na.", 9, MUTED, bg=PANEL).pack(padx=30)
+        brow = tk.Frame(win, bg=PANEL)
+        brow.pack(pady=18)
+        state = {"left": secs, "job": None, "dead": False}
+
+        def close():
+            state["dead"] = True
+            if state["job"]:
+                try:
+                    win.after_cancel(state["job"])
+                except Exception:
+                    pass
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        def cancel():
+            close()
+            self.voice_log_line(f"{name} cancel kora hoyeche")
+
+        def go():
+            close()
+            self.voice_log_line(f"{name} hochhe…")
+            self.after(500, lambda: self._voice_power(act))
+
+        def tick():
+            if state["dead"]:
+                return
+            m, sec = divmod(state["left"], 60)
+            lbl.configure(text=f"{name} hobe  {m:02d}:{sec:02d}  por")
+            if state["left"] <= 0:
+                go()
+                return
+            state["left"] -= 1
+            state["job"] = win.after(1000, tick)
+
+        mkbtn(brow, "Cancel", cancel, "danger", padx=18).pack(side="left", padx=6)
+        mkbtn(brow, "Ekhoni koro", go, "ghost", padx=14).pack(side="left", padx=6)
+        win.protocol("WM_DELETE_WINDOW", cancel)
+        tick()
+
+    def _voice_power(self, act):
+        try:
+            if sys.platform.startswith("win"):
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if act == "shutdown":
+                    subprocess.Popen(["shutdown", "/s", "/t", "5", "/c", "AI Video Editor: kaj shesh"],
+                                     creationflags=flags)
+                else:
+                    subprocess.Popen(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+                                     creationflags=flags)
+            elif sys.platform == "darwin":
+                cmd = "tell application \"System Events\" to " + ("shut down" if act == "shutdown" else "sleep")
+                subprocess.Popen(["osascript", "-e", cmd])
+            else:
+                subprocess.Popen(["systemctl", "poweroff" if act == "shutdown" else "suspend"])
+        except Exception as e:
+            self.voice_log_line(f"PC {act} kora gelo na: {e}")
 
     def _voice_wipe_dir(self, path):
         n = 0
@@ -8038,8 +8147,11 @@ VOICE_DEFAULTS = {
     "gemini_timeout_min": 2,
     "gemini_tries": 2,
     "gemini_login_check_sec": 20,
+    "after_action": "none",
+    "after_delay_min": 1,
     "defaults_ver": 2,
 }
+VOICE_AFTER_LABELS = {"none": "Kichu na", "shutdown": "PC Shutdown", "sleep": "PC Sleep"}
 
 # Notun default gulo purono saved config e-o ekbar boshiye dey (ekbar-i; tarpor user change korle thakbe)
 VOICE_DEFAULTS_V2 = {"vpn_locations": "France, Russia, United Kingdom, Oregon, Virginia"}
@@ -8572,7 +8684,43 @@ class VoiceRunner:
             "ekbar 'Chrome Profile Setup' chalie VeePN install korun (ekbar-i, porer bar auto). "
             "Ba Settings e Extension ID boshan.")
 
+    def ext_ids_for(self, which):
+        """'urban' ba 'veepn' er sob known extension ID (disk scan + Settings e deya ID)."""
+        ids = set(self._ext_from_disk(which))
+        if which == "urban":
+            v = str(self.cfg.get("urban_ext_id", "") or "").strip()
+            ids.add(v) if v else None
+            if getattr(self, "_urban_cached", None):
+                ids.add(self._urban_cached)
+        else:
+            v = str(self.cfg.get("ext_id", "") or "").strip()
+            ids.add(v) if v else None
+            if getattr(self, "_ext_cached", None):
+                ids.add(self._ext_cached)
+        return {i for i in ids if re.fullmatch(r"[a-p]{32}", i or "")}
+
+    def ext_prepare_provider(self):
+        """Selected provider er extension ENABLE, onnota DISABLE (UrbanVPN on thakle VeePN kaj kore na).
+        Age onnota disable kore, tarpor selected ta enable kori — jate 'Service interruption' na ashe."""
+        want = "urban" if self.is_urban() else "veepn"
+        if getattr(self, "_prov_ready", None) == want:
+            return
+        other = "veepn" if want == "urban" else "urban"
+        ok = True
+        off_ids = self.ext_ids_for(other) - self.ext_ids_for(want)
+        for i in sorted(off_ids):
+            self.log(f"  {'VeePN' if other == 'veepn' else 'UrbanVPN'} disable korchi (selected: {'UrbanVPN' if want == 'urban' else 'VeePN'})")
+            ok = self.ext_set_enabled(i, False) and ok
+        for i in sorted(self.ext_ids_for(want)):
+            ok = self.ext_set_enabled(i, True) and ok
+        if ok:
+            self._prov_ready = want
+
     def open_vpn_popup(self):
+        try:
+            self.ext_prepare_provider()
+        except Exception as e:
+            self.log(f"  provider extension switch kora gelo na: {str(e).splitlines()[0][:120]}")
         eid = self.ext_id()
         p = self.new_page()
         popup = "popup.html"
