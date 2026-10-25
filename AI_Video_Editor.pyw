@@ -267,7 +267,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "2.9.7"
+APP_VERSION = "2.9.8"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -9000,9 +9000,20 @@ class VoiceRunner:
     def urban_pick(self, p, name):
         inp = p.locator("input[placeholder*='Search' i], input[type='search'], input[type='text']").first
 
-        def opened():
+        heads = p.get_by_text(re.compile(r"^\s*(Top locations|All locations)\s*$", re.I))
+
+        def has_input():
             try:
                 return inp.is_visible()
+            except Exception:
+                return False
+
+        def opened():
+            # UrbanVPN er notun UI te search input na-o thakte pare — list er heading dekhlei khola dhore nibo
+            if has_input():
+                return True
+            try:
+                return heads.first.is_visible()
             except Exception:
                 return False
         if not opened():
@@ -9027,34 +9038,46 @@ class VoiceRunner:
             if not opened():
                 raise RuntimeError("UrbanVPN location list khola jayni")
         q = re.sub(r"\s*\(.*?\)\s*", " ", name).strip() or name
+        if has_input():
+            try:
+                inp.click(timeout=2000)
+                inp.fill("")
+                inp.type(q, delay=40)
+            except Exception:
+                pass
+        p.wait_for_timeout(1000)
+        # list er item gulo ei Y er niche — upore current selected location (header) ache, seta click korle list bondho hoye jay
+        min_y = 0
         try:
-            inp.click(timeout=2000)
-            inp.fill("")
-            inp.type(q, delay=40)
+            if has_input():
+                ib = inp.bounding_box()
+                if ib:
+                    min_y = ib["y"] + ib["height"]
+            else:
+                hb = heads.first.bounding_box()
+                if hb:
+                    min_y = hb["y"] + hb["height"]
         except Exception:
             pass
-        p.wait_for_timeout(1000)
-        try:
-            ib = inp.bounding_box()
-            min_y = (ib["y"] + ib["height"]) if ib else 0
-        except Exception:
-            min_y = 0
         item = None
         for rx in (rf"^\s*{re.escape(name)}\s*$", rf"^\s*{re.escape(name)}", rf"^\s*{re.escape(q)}\b",
                    re.escape(q)):
             loc = p.get_by_text(re.compile(rx, re.I))
+            cands = []
             try:
-                for i in range(min(loc.count(), 6)):
+                for i in range(min(loc.count(), 8)):
                     cand = loc.nth(i)
                     if not cand.is_visible():
                         continue
                     cb = cand.bounding_box()
                     if cb and cb["y"] > min_y - 2:
-                        item = cand
-                        break
+                        cands.append((cb["y"], cand))
             except Exception:
                 pass
-            if item is not None:
+            if cands:
+                cands.sort(key=lambda t: t[0])
+                # heading/input paoa na gele prothom match = header e selected location, tai porerta nao
+                item = cands[1][1] if (min_y == 0 and len(cands) > 1) else cands[0][1]
                 break
         if item is None:
             raise RuntimeError(f"UrbanVPN e '{name}' paoa jayni")
