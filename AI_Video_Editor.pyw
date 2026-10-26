@@ -522,7 +522,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -7975,25 +7975,34 @@ class App(_Base):
             mkbtn(top, "Use in project", lambda n=name: self._voice_use_folder(n), "primary",
                   pady=2, padx=10).pack(side="right", padx=4)
             mkbtn(top, "Open folder", lambda p=folder: open_path(p), "flat", pady=2, padx=8).pack(side="right", padx=4)
-            if _voice_find_lb(name) and has_srt:
-                mkbtn(top, "Gemini fix", lambda n=name: self.voice_fix_srt(n), "ghost",
-                      pady=2, padx=8).pack(side="right", padx=4)
+            src = next((os.path.join(b, f"{name}.txt") for b in (VOICE_DONE, VOICE_SCRIPTS)
+                        if os.path.exists(os.path.join(b, f"{name}.txt"))), None)
+            _can_fix = bool(_voice_find_lb(name) and has_srt)
             d_ = self._voice_live.get(name)
             if d_ and d_["state"] in ("run", "fail", "stopped"):
                 self._voice_live_row(card, name, d_)
             elif name in pending:
                 mklabel(card, "  \u23f3 queue e ache \u2014 ager script shesh hole shuru hobe", 9, MUTED,
                         bg=PANEL2).pack(anchor="w", padx=12, pady=(0, 4))
-            src = next((os.path.join(b, f"{name}.txt") for b in (VOICE_DONE, VOICE_SCRIPTS)
-                        if os.path.exists(os.path.join(b, f"{name}.txt"))), None)
-            if has_mp3:
-                mkbtn(top, "Regenerate SRT", lambda n=name: self.voice_regen(n, "srt"), "ghost",
-                      pady=2, padx=8).pack(side="right", padx=4)
+            body = tk.Frame(card, bg=PANEL2)
+            body.pack(fill="x")
+            left = tk.Frame(body, bg=PANEL2)
+            left.pack(side="left", fill="x", expand=True)   # age pack: sankuchito hole button gulo bhitore dhuke jabe
+            if _can_fix or has_mp3 or src:
+                # buttons: Delete / Use in project / Open folder er niche, file list er pashe (ডান দিকে)
+                right = tk.Frame(body, bg=PANEL2)
+                right.pack(side="right", anchor="n", padx=(0, 10), pady=(2, 4))
+                if _can_fix:
+                    mkbtn(right, "Gemini fix", lambda n=name: self.voice_fix_srt(n), "ghost",
+                          pady=2, padx=8).pack(side="right", padx=4)
+                if has_mp3:
+                    mkbtn(right, "Regenerate SRT", lambda n=name: self.voice_regen(n, "srt"), "ghost",
+                          pady=2, padx=8).pack(side="right", padx=4)
+                if src:
+                    mkbtn(right, "Regenerate MP3", lambda n=name: self.voice_regen(n, "mp3"), "ghost",
+                          pady=2, padx=8).pack(side="right", padx=4)
             if src:
-                mkbtn(top, "Regenerate MP3", lambda n=name: self.voice_regen(n, "mp3"), "ghost",
-                      pady=2, padx=8).pack(side="right", padx=4)
-            if src:
-                srow = tk.Frame(card, bg=PANEL2)
+                srow = tk.Frame(left, bg=PANEL2)
                 srow.pack(fill="x", padx=10, pady=(2, 4))
                 sc_ = mklabel(srow, f"  TXT  {name}.txt  ", 10, ACCENT, bg=PANEL, padx=8, pady=4, cursor="hand2")
                 sc_.pack(side="left")
@@ -8002,7 +8011,7 @@ class App(_Base):
                 mklabel(srow, "raw script", 9, MUTED, bg=PANEL2).pack(side="left", padx=8)
             lbsrc = _voice_find_lb(name)
             if lbsrc:
-                lrow = tk.Frame(card, bg=PANEL2)
+                lrow = tk.Frame(left, bg=PANEL2)
                 lrow.pack(fill="x", padx=10, pady=(2, 4))
                 lc_ = mklabel(lrow, f"  TXT  {name}.txt  ", 10, ACCENT, bg=PANEL, padx=8, pady=4, cursor="hand2")
                 lc_.pack(side="left")
@@ -8017,7 +8026,7 @@ class App(_Base):
                 if ext not in AUDIO_EXTS and ext != ".srt":
                     continue
                 is_audio = ext in AUDIO_EXTS
-                row = tk.Frame(card, bg=PANEL2)
+                row = tk.Frame(left, bg=PANEL2)
                 row.pack(fill="x", padx=10, pady=(2, 4))
                 kind_ = "MP3" if is_audio else ("CORR" if fn.startswith(VOICE_CORR_PREFIX) else "SRT")
                 chip = mklabel(row, f"  {kind_}  {fn}  ", 10, ACCENT, bg=PANEL,
