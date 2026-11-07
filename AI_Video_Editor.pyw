@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.0.3"
+APP_VERSION = "3.0.4"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -2750,7 +2750,8 @@ class Tab2Editor(tk.Frame):
                                 ("◀", lambda: self.move_sel(-1), "ghost"),
                                 ("▶", lambda: self.move_sel(1), "ghost"),
                                 ("＋ Empty slot", self.add_empty, "ghost"),
-                                ("⏱ Duration", self.set_duration, "ghost")):
+                                ("⏱ Duration", self.set_duration, "ghost"),
+                                ("🧹 Clear all", self.clear_all, "ghost")):
             ab.add(mkbtn(ab, text, cmd, kind, pady=3, padx=10), (0, 6))
         # ── voice / mute controls
         ab.add(mktoggle(ab, "Mute all clips", self.mute_var, bg=PANEL), (10, 10))
@@ -3935,10 +3936,14 @@ class Tab2Editor(tk.Frame):
         self._changed()
 
     def clear_all(self):
-        if self.slots and messagebox.askyesno("Clear", "Timeline er sob slot muche felbe?\n(Tomar original file gulo thikই thakbe.)",
-                                              parent=self.app):
+        if not self.slots and not self.voice_path:
+            return
+        if messagebox.askyesno("Clear", "Timeline er sob slot ar voice track muche felbe?\n(Tomar original file gulo thikই thakbe.)",
+                               parent=self.app):
             self._edit_begin()
             self.slots, self.sel, self.cur_t = [], None, 0.0
+            if self.voice_path:
+                self.set_voice(None)
             self._changed()
 
     def go_start(self):
