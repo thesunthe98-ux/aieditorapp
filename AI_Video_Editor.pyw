@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.0.4"
+APP_VERSION = "3.0.5"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -2572,6 +2572,84 @@ class _QuietSub:
         return attr
 
 
+class ToolIconBtn(tk.Frame):
+    """CapCut-style tool button: icon on top, tiny caption underneath. Optional on/off (variable) mode."""
+
+    def __init__(self, parent, icon, text, command, bg=None, variable=None, on="1"):
+        bg = bg or parent["bg"]
+        super().__init__(parent, bg=bg, cursor="hand2")
+        self._cmd, self._var, self._on, self._base, self._hov = command, variable, str(on), bg, False
+        self._en = True
+        self._ic = tk.Label(self, text=icon, font=(FONT, 11), fg=FG, bg=bg, cursor="hand2")
+        self._tx = tk.Label(self, text=text, font=(FONT, 7), fg=MUTED, bg=bg, cursor="hand2")
+        self._ic.pack(padx=4, pady=(2, 0))
+        self._tx.pack(padx=4, pady=(0, 2))
+        for w in (self, self._ic, self._tx):
+            w.bind("<Button-1>", self._click)
+            w.bind("<Enter>", lambda e: self._set_hover(True), add="+")
+            w.bind("<Leave>", lambda e: self._set_hover(False), add="+")
+        if variable is not None:
+            self._trace = variable.trace_add("write", lambda *a: self._paint())
+            self.bind("<Destroy>", self._destroyed, add="+")
+        self._paint()
+
+    def _destroyed(self, e):
+        if e.widget is self:
+            try:
+                self._var.trace_remove("write", self._trace)
+            except Exception:
+                pass
+
+    def _active(self):
+        try:
+            return self._var is not None and str(self._var.get()) == self._on
+        except Exception:
+            return False
+
+    def _click(self, _e=None):
+        if self._cmd and self._en:
+            self._cmd()
+
+    def set_enabled(self, on):
+        self._en = bool(on)
+        self._paint()
+
+    def _set_hover(self, h):
+        self._hov = h and self._en
+        self._paint()
+
+    def _paint(self):
+        try:
+            act = self._active()
+            bg = PANEL2 if self._hov else self._base
+            self.tk.call(str(self), "configure", "-bg", bg)
+            if not self._en:
+                self._ic.configure(bg=bg, fg=MUTED)
+                self._tx.configure(bg=bg, fg=MUTED)
+                return
+            self._ic.configure(bg=bg, fg=ACCENT if act else FG)
+            self._tx.configure(bg=bg, fg=ACCENT if act else (FG if self._hov else MUTED))
+        except tk.TclError:
+            pass
+
+    def _retheme(self):
+        try:
+            self._base = self.master.cget("bg")
+        except tk.TclError:
+            pass
+        self._paint()
+
+    def configure(self, cnf=None, **kw):
+        if "text" in kw:
+            self._tx.configure(text=kw.pop("text"))
+        if "icon" in kw:
+            self._ic.configure(text=kw.pop("icon"))
+        if cnf or kw:
+            return super().configure(cnf, **kw)
+
+    config = configure
+
+
 class FlowBar(tk.Frame):
     """Toolbar that WRAPS onto extra rows when the window is narrow, so no button is ever hidden."""
 
@@ -2604,23 +2682,31 @@ class FlowBar(tk.Frame):
             W = self._fw or self.winfo_width()
             if W <= 1:
                 W = 100000
-            row = col = x = 0
-            plan = []
+            rows, cur, x = [], [], 0
             for w, px in self._items:
                 l, r = (px, px) if isinstance(px, int) else px
                 need = w.winfo_reqwidth() + l + r
-                if col and x + need > W:
-                    row += 1
-                    col = x = 0
-                plan.append((w, row, col, l, r))
+                if cur and x + need > W:
+                    rows.append(cur)
+                    cur, x = [], 0
+                cur.append((w, x + l, w.winfo_reqwidth(), w.winfo_reqheight()))
                 x += need
-                col += 1
-            sig = tuple((id(w), r_, c_, l, r) for w, r_, c_, l, r in plan)
+            if cur:
+                rows.append(cur)
+            plan, y = [], 0
+            for row in rows:                      # place() = har row nijer moto, column share hoy na (clip hoy na)
+                rh = max(h for _w, _x, _ww, h in row)
+                for w, px_, _ww, h in row:
+                    plan.append((w, px_, y + (rh - h) // 2))
+                y += rh + self._vgap
+            total = max(1, y - self._vgap)
+            sig = (tuple((id(w), x_, y_) for w, x_, y_ in plan), total)
             if sig == self._sig:
                 return
             self._sig = sig
-            for w, r_, c_, l, r in plan:
-                w.grid(row=r_, column=c_, padx=(l, r), pady=(0, self._vgap), sticky="w")
+            for w, x_, y_ in plan:
+                w.place(x=x_, y=y_, anchor="nw")
+            self.configure(height=total)
         except tk.TclError:
             pass
 
@@ -2662,6 +2748,8 @@ class Tab2Editor(tk.Frame):
         self._thumb_req = set()
         self._q = queue.Queue()
         self._probe_q, self._thumb_q = queue.Queue(), queue.Queue()
+        self._wave, self._wave_req, self._wave_q, self._wave_cols = {}, set(), queue.Queue(), {}
+        self._wrms = {}
         self._lock = threading.Lock()
         self._dq = collections.deque()
         self._gen = 0
@@ -2690,6 +2778,11 @@ class Tab2Editor(tk.Frame):
         self._exp_btn = None
         self._exp_btns = []
         self.mute_var = tk.StringVar(value="0")      # "1" = all clip sounds muted
+        self.cut_on = tk.StringVar(value="0")        # "Cut clips": "1" = silence before/after the sound is trimmed
+        self.cut_val = tk.StringVar(value="1")
+        self.cut_unit = tk.StringVar(value="seconds")
+        self.norm_on = tk.StringVar(value="0")       # "Auto volume": every clip's voice brought to the same level
+        self._srange, self._cut_job = {}, None
         self.voice_path, self.voice_dur = None, 0.0  # separate voice track (imported / Fix Voice result)
         self.aspect_var = tk.StringVar(value="16:9")
         # ── Tab 2's OWN settings / subtitle style (completely separate from Tab 1) ──
@@ -2714,17 +2807,27 @@ class Tab2Editor(tk.Frame):
             _h = int((getattr(app, "rec", None) or {}).get("tl_h", 176))
         except (TypeError, ValueError):
             _h = 176
-        self.TL_H = max(116, min(266, _h))
+        self.TL_H = max(80, min(266, _h))
         self.BLOCK_H = self.TL_H - 76
         self._cmp_level, self._cmp_orig = -1, {}
+        self._undo, self._redo, self._undoing = [], [], False
+        _r0 = getattr(app, "rec", None)
+        _hc = "1" if (isinstance(_r0, dict) and _r0.get("t2_hide_chrome")) else "0"
+        self._hide_flag, self._t2_runner = (_hc == "1"), None
+        self.hide_chrome = tk.StringVar(value=_hc)          # "1" = Fix voice er Chrome screen e dekhabe na
+        self.hide_chrome.trace_add("write", lambda *a: self._hide_chrome_changed())
         self._build()
         for _ in range(1):
             threading.Thread(target=self._probe_worker, daemon=True).start()
         for _ in range(2):
             threading.Thread(target=self._thumb_worker, daemon=True).start()
+        threading.Thread(target=self._wave_worker, daemon=True).start()
         app.bind_all("<space>", self._on_space, add="+")
         app.bind_all("<Delete>", self._on_delete, add="+")
         app.bind_all("<Shift-Delete>", self._on_shift_delete, add="+")
+        app.bind_all("<Control-z>", self._on_undo_key, add="+")
+        app.bind_all("<Control-y>", self._on_redo_key, add="+")
+        app.bind_all("<Control-Shift-Z>", self._on_redo_key, add="+")
         self.after(80, self._tick)
 
     # ───────── UI ─────────
@@ -2742,30 +2845,56 @@ class Tab2Editor(tk.Frame):
         tb.add(mkbtn(tb, "⤢ Fit", self._zoom_fit, "ghost", pady=1, padx=9), (0, 4))
         tb.add(mkbtn(tb, "－", lambda: self._zoom(0.8), "ghost", pady=1, padx=9), (0, 4))
         tb.add(mkbtn(tb, "＋", lambda: self._zoom(1.25), "ghost", pady=1, padx=9), (0, 4))
-        ab = FlowBar(tl, PANEL)
+        ab = FlowBar(tl, PANEL, vgap=0)
         ab.pack(fill="x", padx=12, pady=(0, 2))
-        for text, cmd, kind in (("⟲ Replace", self.replace_sel, "ghost"),
-                                ("✕ Remove clip", self.remove_sel, "ghost"),
-                                ("🗑 Delete slot", self.delete_sel, "ghost"),
-                                ("◀", lambda: self.move_sel(-1), "ghost"),
-                                ("▶", lambda: self.move_sel(1), "ghost"),
-                                ("＋ Empty slot", self.add_empty, "ghost"),
-                                ("⏱ Duration", self.set_duration, "ghost"),
-                                ("🧹 Clear all", self.clear_all, "ghost")):
-            ab.add(mkbtn(ab, text, cmd, kind, pady=3, padx=10), (0, 6))
-        # ── voice / mute controls
-        ab.add(mktoggle(ab, "Mute all clips", self.mute_var, bg=PANEL), (10, 10))
-        ab.add(mkbtn(ab, "🎙 Import voice…", self.import_voice, "ghost", pady=3, padx=10), (0, 6))
-        ab.add(mkbtn(ab, "✕ Voice", self.remove_voice, "ghost", pady=3, padx=8), (0, 10))
-        ab.add(mklabel(ab, "Voice name", 9, MUTED, bg=PANEL), (0, 4))
-        self.voice_cb = ttk.Combobox(ab, textvariable=self.voice_name_var, values=self._voice_names(), width=16)
+
+        def _flip(v):
+            return lambda: v.set("0" if str(v.get()) == "1" else "1")
+
+        def _sep():
+            ab.add(tk.Frame(ab, bg=PANEL2, width=1, height=34), (4, 4))
+
+        def _tool(icon, text, cmd, var=None):
+            ab.add(ToolIconBtn(ab, icon, text, cmd, bg=PANEL, variable=var), (0, 2))
+        self._undo_btn = ToolIconBtn(ab, "↶", "Undo", self.undo, bg=PANEL)
+        ab.add(self._undo_btn, (0, 2))
+        self._redo_btn = ToolIconBtn(ab, "↷", "Redo", self.redo, bg=PANEL)
+        ab.add(self._redo_btn, (0, 2))
+        _sep()
+        _tool("⟲", "Replace", self.replace_sel)
+        _tool("✕", "Remove", self.remove_sel)
+        _tool("🗑", "Delete", self.delete_sel)
+        _sep()
+        _tool("◀", "Left", lambda: self.move_sel(-1))
+        _tool("▶", "Right", lambda: self.move_sel(1))
+        _tool("＋", "Empty", self.add_empty)
+        _tool("⏱", "Duration", self.set_duration)
+        _tool("🧹", "Clear", self.clear_all)
+        _sep()
+        # ── Cut clips: keep only [first sound - N, last sound + N] of every clip
+        _tool("✂", "Cut clips", _flip(self.cut_on), self.cut_on)
+        self.cut_ent = mkentry(ab, self.cut_val, width=5)
+        ab.add(self.cut_ent, (2, 4))
+        self.cut_cb = ttk.Combobox(ab, textvariable=self.cut_unit, values=("seconds", "milliseconds"),
+                                   width=11, state="readonly")
+        ab.add(self.cut_cb, (0, 4))
+        _tool("🔊", "Auto vol", _flip(self.norm_on), self.norm_on)
+        _tool("🔇", "Mute all", _flip(self.mute_var), self.mute_var)
+        _sep()
+        # ── voice controls
+        _tool("🎙", "Voice", self.import_voice)
+        _tool("🚫", "No voice", self.remove_voice)
+        self.voice_cb = ttk.Combobox(ab, textvariable=self.voice_name_var, values=self._voice_names(), width=14)
         self.voice_cb.bind("<Return>", lambda e: self._voice_remember())
         self.voice_cb.bind("<FocusOut>", lambda e: self._voice_remember())
         self.voice_cb.bind("<<ComboboxSelected>>", lambda e: self._voice_remember())
         self.voice_cb.bind("<Button-3>", self._voice_menu)
-        ab.add(self.voice_cb, (0, 6))
-        self._fix_btn = mkbtn(ab, "🔧 Fix voice", self.fix_voice, "primary", pady=3, padx=10)
-        ab.add(self._fix_btn, (0, 6))
+        ab.add(self.voice_cb, (4, 0))
+        ab.add(ToolIconBtn(ab, "⌫", "Del name", self._voice_delete, bg=PANEL), (0, 4))
+        _tool("👁", "Hide Chrome", _flip(self.hide_chrome), self.hide_chrome)
+        self._fix_btn = ToolIconBtn(ab, "🔧", "Fix voice", self.fix_voice, bg=PANEL)
+        ab.add(self._fix_btn, (0, 2))
+        self._undo_refresh()
         cvw = tk.Frame(tl, bg=PANEL)
         cvw.pack(fill="x", padx=12, pady=(0, 4))
         self.tl_cv = tk.Canvas(cvw, bg=BG, highlightthickness=0, height=self.TL_H,
@@ -2778,6 +2907,7 @@ class Tab2Editor(tk.Frame):
                           "Right-click = menu   •   clip drop korle block er upor = replace", 8, MUTED, bg=PANEL,
                       anchor="w", justify="left")
         _hl.pack(fill="x", padx=14, pady=(0, 8))
+        self._hl = _hl
         _hl.bind("<Configure>", lambda e, l=_hl: l.config(wraplength=max(200, e.width - 4)))
         c = self.tl_cv
         c.bind("<Button-1>", self._tl_press)
@@ -2889,6 +3019,10 @@ class Tab2Editor(tk.Frame):
         self.tspd.trace_add("write", lambda *a: (self._tr_update_lbl(), self._cfg_touch(), self._seek_refresh()))
         self.vol_pct.trace_add("write", lambda *a: self._cfg_touch())
         self.mute_var.trace_add("write", lambda *a: (self._cfg_touch(), self._pause() if self._playing else None))
+        for _v in (self.cut_on, self.cut_val, self.cut_unit):
+            _v.trace_add("write", lambda *a: self._cut_changed())
+        self.norm_on.trace_add("write", lambda *a: self._norm_changed())
+        self._cut_widgets()
         for v in (self.res_var, self.enc_var, self.preset_var, self.q_var, self.voice_name_var,
                   self.exp_dir_var, self.exp_name_var):
             v.trace_add("write", lambda *a: self._cfg_touch())
@@ -3641,8 +3775,9 @@ class Tab2Editor(tk.Frame):
         D = min(self._tr_dur(cur[1]), self._dur(s) * 0.9)
         if D < 0.1 or off >= D - 0.001:
             return None
+        ptin, pdur = self._trim(p)
         return {"x": cur[0], "D": D, "prev": p["path"], "prev_img": self._is_img(p["path"]),
-                "prev_dur": self._dur(p)}
+                "prev_dur": ptin + pdur, "tin": self._trim(s)[0]}
 
     def _last_frame(self, path, is_img, dur):
         """Last frame of the outgoing clip as a picture file (images are used as they are)."""
@@ -3652,7 +3787,7 @@ class Tab2Editor(tk.Frame):
             st = os.stat(path)
         except OSError:
             return None
-        key = (path, st.st_mtime, st.st_size)
+        key = (path, st.st_mtime, st.st_size, round(dur, 2))
         with self._lf_lock:
             p = self._lastf.get(key)
             if p and os.path.exists(p):
@@ -3673,10 +3808,11 @@ class Tab2Editor(tk.Frame):
                 self._rm(out)
         return None
 
-    def _tr_cmd(self, lp, path, img, x, D, W, H, post=""):
+    def _tr_cmd(self, lp, path, img, x, D, W, H, post="", tin=0.0):
         vf, F = self._vf(W, H), self.FPS
         a_in = ["-loop", "1", "-framerate", str(F), "-t", f"{D:.3f}", "-i", lp]
-        b_in = (["-loop", "1", "-framerate", str(F)] if img else []) + ["-t", f"{D:.3f}", "-i", path]
+        b_in = (["-loop", "1", "-framerate", str(F)] if img else (["-ss", f"{tin:.3f}"] if tin > 0 else [])) \
+            + ["-t", f"{D:.3f}", "-i", path]
         fc = (f"[0:v]fps={F},{vf},format=yuv420p[a];[1:v]fps={F},{vf},format=yuv420p[b];"
               f"[a][b]xfade=transition={x}:duration={D:.3f}:offset=0{post},format=rgb24[o]")
         return ["ffmpeg", "-v", "error"] + a_in + b_in + ["-filter_complex", fc, "-map", "[o]"]
@@ -3687,7 +3823,7 @@ class Tab2Editor(tk.Frame):
             return None
         k = max(0, int(round(off * self.FPS)))
         for x in ([tr["x"], "fade"] if tr["x"] != "fade" else ["fade"]):
-            cmd = self._tr_cmd(lp, path, img, x, tr["D"], W, H, post=f",select='eq(n,{k})'")
+            cmd = self._tr_cmd(lp, path, img, x, tr["D"], W, H, post=f",select='eq(n,{k})'", tin=tr.get("tin", 0.0))
             cmd += ["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
             try:
                 r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NOWIN,
@@ -3711,7 +3847,7 @@ class Tab2Editor(tk.Frame):
         hdr, size = b"P6 %d %d 255\n" % (W, H), W * H * 3
         skip = int(round(e["off"] * F))
         for x in ([tr["x"], "fade"] if tr["x"] != "fade" else ["fade"]):
-            cmd = self._tr_cmd(lp, e["path"], e["img"], x, D, W, H) + ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+            cmd = self._tr_cmd(lp, e["path"], e["img"], x, D, W, H, tin=e.get("tin", 0.0)) + ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
             proc = None
             n = 0
             try:
@@ -3745,9 +3881,90 @@ class Tab2Editor(tk.Frame):
         self._draw()
 
     # ───────── model helpers ─────────
-    def _dur(self, s):
+    def _raw_dur(self, s):
         d = s.get("dur")
         return float(d) if d else (self.IMG_SEC if s.get("path") else self.GAP_SEC)
+
+    def _dur(self, s):
+        """Length of the slot on the timeline (after 'Cut clips' trimming, if on)."""
+        return self._trim(s)[1]
+
+    # ───────── Cut clips: trim silence before the first / after the last sound ─────────
+    SIL_TH = 0.02            # peak level (0..1) that counts as "sound"
+
+    def _cut_margin(self):
+        """Margin in seconds to keep around the sound, or None when Cut clips is off / the box is not a number."""
+        try:
+            if self.cut_on.get() != "1":
+                return None
+            v = float(self.cut_val.get().strip().replace(",", "."))
+        except (tk.TclError, ValueError):
+            return None
+        if v < 0:
+            return None
+        return v / 1000.0 if self.cut_unit.get().startswith("milli") else v
+
+    def _sound_range(self, path):
+        """(first, last) second of audible sound in the clip, or None (no audio / all silent / not analysed yet)."""
+        pk = self._wave.get(path)
+        if pk is None:
+            self._wave_want(path)
+            return None
+        if path in self._srange:
+            return self._srange[path]
+        n, res, th = len(pk), None, self.SIL_TH
+        if n:
+            first = next((i for i in range(n) if pk[i] >= th and (i + 1 >= n or pk[i + 1] >= th)), None)
+            if first is not None:
+                last = next((i for i in range(n - 1, -1, -1) if pk[i] >= th and (i == 0 or pk[i - 1] >= th)), first)
+                res = (first / float(self.WAVE_PPS), (last + 1) / float(self.WAVE_PPS))
+        self._srange[path] = res
+        return res
+
+    def _trim(self, s):
+        """(start offset inside the source clip, length used on the timeline)."""
+        raw = self._raw_dur(s)
+        m = self._cut_margin()
+        p = s.get("path")
+        if m is None or not p or not s.get("dur") or self._is_img(p):
+            return 0.0, raw
+        r = self._sound_range(p)
+        if r is None:
+            return 0.0, raw
+        tin = max(0.0, r[0] - m)
+        tout = min(raw, r[1] + m)
+        if tout - tin < 0.1:
+            tout = min(raw, tin + 0.1)
+            tin = max(0.0, min(tin, tout - 0.1))
+        return tin, tout - tin
+
+    def _cut_widgets(self):
+        on = self.cut_on.get() == "1"
+        try:
+            self.cut_ent.configure(state="normal" if on else "disabled")
+            self.cut_cb.configure(state="readonly" if on else "disabled")
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _cut_changed(self):
+        self._cut_widgets()
+        self._cfg_touch()
+        if self._loading:
+            return
+        self._cut_refresh_soon(350)
+
+    def _cut_refresh_soon(self, ms=200):
+        if self._cut_job is not None:
+            try:
+                self.after_cancel(self._cut_job)
+            except Exception:
+                pass
+        self._cut_job = self.after(ms, self._cut_apply)
+
+    def _cut_apply(self):
+        self._cut_job = None
+        self._edit_begin()
+        self._changed()
 
     @staticmethod
     def _is_img(p):
@@ -3770,6 +3987,7 @@ class Tab2Editor(tk.Frame):
             self._probe_q.put((s["id"], p))
         self._thumb_req.add(p)
         self._thumb_q.put((s["id"], p))
+        self._wave_want(p)
 
     def _slot_by_id(self, uid):
         for s in self.slots:
@@ -3779,6 +3997,125 @@ class Tab2Editor(tk.Frame):
 
     def _edit_begin(self):
         self._pause()
+        self._undo_push()
+
+    # ───────── undo / redo ─────────
+    def _snap(self):
+        return {"slots": [dict(x) for x in self.slots], "sel": self.sel,
+                "voice": (self.voice_path, self.voice_dur)}
+
+    def _undo_push(self):
+        if self._undoing:
+            return
+        self._undo.append(self._snap())
+        del self._undo[:-100]
+        self._redo.clear()
+        self._undo_refresh()
+
+    def _undo_refresh(self):
+        try:
+            self._undo_btn.set_enabled(bool(self._undo))
+            self._redo_btn.set_enabled(bool(self._redo))
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _restore(self, snap):
+        live = {x["id"]: x for x in self.slots}
+        new = []
+        for x in snap["slots"]:
+            x = dict(x)
+            lv = live.get(x["id"])
+            if lv is not None and lv.get("path") == x.get("path"):      # background probe/thumb results ke harano jabe na
+                for k, v in lv.items():
+                    if k not in x or (x.get(k) is None and v is not None):
+                        x[k] = v
+            new.append(x)
+        self.slots = new
+        for x in self.slots:
+            pth = x.get("path")
+            if not pth:
+                continue
+            if self._is_img(pth):
+                if x.get("dur") is None:
+                    x["dur"] = self.IMG_SEC
+                if not x.get("thumbs"):
+                    self._thumb_req.add(pth)
+                    self._thumb_q.put((x["id"], pth))
+            else:
+                if x.get("dur") is None:
+                    self._probe_q.put((x["id"], pth))
+                if not x.get("thumbs"):
+                    self._thumb_req.add(pth)
+                    self._thumb_q.put((x["id"], pth))
+                    self._wave_want(pth)
+        self.sel = snap["sel"] if (snap["sel"] is not None and snap["sel"] < len(self.slots)) else \
+            (len(self.slots) - 1 if self.slots else None)
+        vp, vd = snap["voice"]
+        if vp != self.voice_path:
+            self.voice_path, self.voice_dur = vp, vd
+            self._cfg_touch()
+        self._changed()
+
+    def undo(self):
+        if not self._undo:
+            self.app.note("Undo korar moto kichu nei.", WARN)
+            return
+        self._pause()
+        self._redo.append(self._snap())
+        self._undoing = True
+        try:
+            self._restore(self._undo.pop())
+        finally:
+            self._undoing = False
+        self._undo_refresh()
+        self.app.note("↶ Undo hoyeche")
+
+    def redo(self):
+        if not self._redo:
+            self.app.note("Redo korar moto kichu nei.", WARN)
+            return
+        self._pause()
+        self._undo.append(self._snap())
+        self._undoing = True
+        try:
+            self._restore(self._redo.pop())
+        finally:
+            self._undoing = False
+        self._undo_refresh()
+        self.app.note("↷ Redo hoyeche")
+
+    def _on_undo_key(self, _e):
+        if self._kbd_ok():
+            self.undo()
+            return "break"
+
+    def _on_redo_key(self, _e):
+        if self._kbd_ok():
+            self.redo()
+            return "break"
+
+    # ───────── Hide Chrome (Fix voice er Chrome window) ─────────
+    def _hide_chrome_changed(self):
+        self._hide_flag = (self.hide_chrome.get() == "1")
+        r = getattr(self, "_t2_runner", None)
+        if r is not None:
+            try:
+                r.request_hidden(self._hide_flag)          # runner nijer thread e apply korbe
+            except Exception:
+                pass
+        try:
+            rec = self._rec()
+            if rec is None:
+                rec = load_recent()
+            rec["t2_hide_chrome"] = bool(self._hide_flag)
+            save_recent(rec)
+        except Exception:
+            pass
+        try:
+            self.app.note("Chrome hide ON — Fix voice er somoy Chrome screen e dekhabe na" if self._hide_flag
+                          else "Chrome hide OFF — Fix voice er Chrome dekha jabe")
+        except Exception:
+            pass
 
     def _changed(self, reseek=True):
         self._cues_ok = False
@@ -3943,7 +4280,7 @@ class Tab2Editor(tk.Frame):
             self._edit_begin()
             self.slots, self.sel, self.cur_t = [], None, 0.0
             if self.voice_path:
-                self.set_voice(None)
+                self.set_voice(None, undo=False)
             self._changed()
 
     def go_start(self):
@@ -4082,10 +4419,12 @@ class Tab2Editor(tk.Frame):
             if s["path"]:
                 c.create_rectangle(x0, y0, x1, y1, fill=PANEL2, outline=ACCENT if sel else GHOST_HOV,
                                    width=2 if sel else 1)
+                vid = not self._is_img(s["path"])
                 if wide:
                     bh = self.BLOCK_H
                     txt = bh >= 84
-                    reg_h = (bh - 36) if txt else bh
+                    wf_h = 0 if not vid else (18 if txt else 14)
+                    reg_h = (bh - 36) if txt else (bh - wf_h)
                     img = self._thumb_img(s, int(bw - 12), int(reg_h - 10))
                     if img:
                         c.create_image(x0 + 6, y0 + (reg_h - img.height()) / 2.0, image=img, anchor="nw")
@@ -4093,20 +4432,36 @@ class Tab2Editor(tk.Frame):
                         c.create_rectangle(x0 + 6, y0 + 6, x0 + 102, y0 + max(12, reg_h - 6), fill=BG, outline="")
                         c.create_text(x0 + 54, y0 + reg_h / 2.0, text="…", fill=MUTED, font=(FONT, 12))
                     if txt:
-                        c.create_text(x0 + 8, y1 - 36, text=self._fit_text(s["label"], bw - 14), fill=FG,
-                                      font=(FONT, 10, "bold"), anchor="nw")
-                        c.create_text(x0 + 8, y1 - 18, text=f"{d:.1f}s", fill=MUTED, font=(FONT, 9), anchor="nw")
+                        right = ("✂ " if (self._cut_margin() is not None and abs(d - self._raw_dur(s)) > 0.001) else "") \
+                            + f"#{i + 1}  {d:.1f}s"
+                        _g = self._norm_gain(s["path"]) if vid else 1.0
+                        if abs(_g - 1.0) > 0.03:
+                            right += f"  {20 * math.log10(_g):+.0f}dB"
+                        c.create_text(x1 - 6, y1 - 36, text=right, fill=MUTED, font=(FONT, 9), anchor="ne")
+                        c.create_text(x0 + 8, y1 - 36, text=self._fit_text(s["label"], bw - 24 - len(right) * 7),
+                                      fill=FG, font=(FONT, 10, "bold"), anchor="nw")
+                        if vid:
+                            self._draw_wave(c, s["path"], x0 + 4, y1 - 20, x1 - 4, y1 - 4, s)
+                        else:
+                            c.create_text(x0 + 8, y1 - 18, text="(image — audio nai)", fill=MUTED,
+                                          font=(FONT, 8), anchor="nw")
+                    elif vid:
+                        self._draw_wave(c, s["path"], x0 + 4, y1 - wf_h - 2, x1 - 4, y1 - 3, s)
                 elif bw >= 22:
-                    nimg = self._thumb_img(s, int(bw - 6), int(self.BLOCK_H - 8))
+                    wf_h = 12 if vid else 0
+                    nimg = self._thumb_img(s, int(bw - 6), int(self.BLOCK_H - 8 - wf_h))
+                    cy_ = (y0 + y1 - wf_h) / 2.0
                     if nimg:
-                        c.create_image((x0 + x1) / 2.0, (y0 + y1) / 2.0, image=nimg, anchor="center")
-                        c.create_rectangle(x0 + 3, y1 - 17, x0 + 3 + 6 * len(str(i + 1)) + 8, y1 - 3,
+                        c.create_image((x0 + x1) / 2.0, cy_, image=nimg, anchor="center")
+                        c.create_rectangle(x0 + 3, y0 + 3, x0 + 3 + 6 * len(str(i + 1)) + 8, y0 + 17,
                                            fill=BG, outline="")
-                        c.create_text(x0 + 7, y1 - 10, text=str(i + 1), fill=FG, font=(FONT, 8, "bold"), anchor="w")
+                        c.create_text(x0 + 7, y0 + 10, text=str(i + 1), fill=FG, font=(FONT, 8, "bold"), anchor="w")
                     else:
-                        c.create_rectangle(x0 + 2, y0 + 2, x1 - 2, y1 - 2, fill=BG, outline="")
-                        c.create_text((x0 + x1) / 2.0, (y0 + y1) / 2.0, text=str(i + 1), fill=FG,
+                        c.create_rectangle(x0 + 2, y0 + 2, x1 - 2, y1 - 2 - wf_h, fill=BG, outline="")
+                        c.create_text((x0 + x1) / 2.0, cy_, text=str(i + 1), fill=FG,
                                       font=(FONT, 8, "bold"))
+                    if vid:
+                        self._draw_wave(c, s["path"], x0 + 2, y1 - wf_h - 1, x1 - 2, y1 - 2, s)
             else:
                 c.create_rectangle(x0, y0, x1, y1, fill=BG, outline=ACCENT if sel else MUTED,
                                    dash=(5, 4) if wide else None, width=2 if sel else 1)
@@ -4117,7 +4472,7 @@ class Tab2Editor(tk.Frame):
                         c.create_text(cx, y0 + 54, text=self._fit_text("(" + s["label"] + ")", bw - 10),
                                       fill=MUTED, font=(FONT, 9))
                     c.create_text(cx, y0 + 74, text=f"{d:.1f}s", fill=MUTED, font=(FONT, 9))
-            if wide:
+            if wide and not (s["path"] and self.BLOCK_H >= 84):
                 c.create_text(x1 - 6, y1 - 5, text=f"#{i + 1}", fill=MUTED, font=(FONT, 8), anchor="se")
             if bw >= 30 and i > 0 and self.trans_key and s["path"] and self.slots[i - 1]["path"]:      # transition marker
                 jx, jy = x0 - self.GAPW / 2.0, y0 + self.BLOCK_H / 2.0
@@ -4136,6 +4491,170 @@ class Tab2Editor(tk.Frame):
         self._ph_line = c.create_line(0, 0, 0, H, fill=self.PLAYHEAD, width=2)
         self._ph_head = c.create_polygon(0, 0, 0, 0, 0, 0, fill=self.PLAYHEAD, outline="")
         self._update_playhead()
+
+    # ───────── audio waveform under each clip ─────────
+    WAVE_RATE, WAVE_PPS = 4000, 40           # decode rate (Hz), peak buckets per second
+
+    def _wave_want(self, path):
+        if path and path not in self._wave and path not in self._wave_req and os.path.isfile(path):
+            self._wave_req.add(path)
+            self._wave_q.put(path)
+
+    def _wave_analyze(self, path):
+        """-> (peaks, rms). peaks = 40/sec level envelope (0..1); rms = loudness of the *sound* parts (0 = no sound).
+        Cached on disk (TOOLS/_t2wave). Raises when ffmpeg is missing."""
+        import array
+        add_ffmpeg_path()
+        st = os.stat(path)
+        d = os.path.join(TOOLS, "_t2wave")
+        os.makedirs(d, exist_ok=True)
+        key = hashlib.md5(f"{path}{st.st_mtime}{st.st_size}v3".encode()).hexdigest()[:16]
+        cache = os.path.join(d, key + ".json")
+        try:
+            with open(cache, "r", encoding="utf-8") as fh:
+                c = json.load(fh)
+            if isinstance(c, dict) and isinstance(c.get("p"), list):
+                return c["p"], float(c.get("rms") or 0.0)
+        except Exception:
+            pass
+        r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-ac", "1",
+                            "-ar", str(self.WAVE_RATE), "-f", "s16le", "-"],
+                           creationflags=NOWIN, timeout=600, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL)
+        a = array.array("h")
+        a.frombytes(r.stdout[:len(r.stdout) // 2 * 2])
+        if sys.byteorder == "big":
+            a.byteswap()
+        n = max(1, self.WAVE_RATE // self.WAVE_PPS)
+        peaks, raw_pk = [], []
+        for k in range(0, len(a), n):
+            seg = a[k:k + n]
+            pk = max(max(seg), -min(seg)) / 32768.0
+            raw_pk.append(pk)
+            peaks.append(round(pk, 3))
+        # loudness of the *speech* parts only: buckets clearly above this clip's own noise / pauses
+        thr = max(0.002, 0.15 * (max(raw_pk) if raw_pk else 0.0))
+        ssq, cnt = 0.0, 0
+        for bi, pk in enumerate(raw_pk):
+            if pk >= thr:
+                seg = a[bi * n:(bi + 1) * n]
+                ssq += sum(x * x for x in seg)
+                cnt += len(seg)
+        rms = math.sqrt(ssq / cnt) / 32768.0 if cnt else 0.0
+        if peaks or r.returncode == 0:
+            try:
+                with open(cache, "w", encoding="utf-8") as fh:
+                    json.dump({"p": peaks, "rms": round(rms, 5)}, fh)
+            except OSError:
+                pass
+        return peaks, rms
+
+    def _wave_worker(self):
+        while True:
+            path = self._wave_q.get()
+            try:
+                peaks, rms = self._wave_analyze(path)
+                self._wrms[path] = rms
+                self._wave[path] = peaks
+                self._wave_cols = {}
+                self._q.put(("wave", path))
+            except FileNotFoundError:
+                pass                                        # ffmpeg nai — pore abar chesta hobe
+            except Exception:
+                self._wave[path], self._wrms[path] = [], 0.0   # poRa jay na: "no audio" dhore nao
+                self._q.put(("wave", path))
+            finally:
+                self._wave_req.discard(path)
+
+    # ───────── Auto volume: every clip's voice at the same loudness ─────────
+    NORM_TARGET = 0.12                  # RMS target (about -18 dBFS)
+
+    def _norm_gain(self, path):
+        """Gain (linear) that brings this clip's voice to the common level; 1.0 when Auto volume is off."""
+        if self.norm_on.get() != "1" or not path or self._is_img(path):
+            return 1.0
+        r = self._wrms.get(path)
+        if r is None:
+            self._wave_want(path)
+            return 1.0
+        if r < 0.002:
+            return 1.0
+        return max(0.2, min(5.0, self.NORM_TARGET / r))
+
+    def _norm_changed(self):
+        self._cfg_touch()
+        if self._loading:
+            return
+        if self._playing:
+            self._pause()
+        for sl in self.slots:                            # make sure every clip gets analysed
+            if sl.get("path"):
+                self._norm_gain(sl["path"])
+        self._draw_soon()
+
+    def _analysis_pending(self):
+        """True (+ queues the work) when Cut clips / Auto volume need audio analysis that is not finished yet."""
+        if self.norm_on.get() != "1" and self._cut_margin() is None:
+            return False
+        pend = False
+        for sl in self.slots:
+            p = sl.get("path")
+            if p and not self._is_img(p) and os.path.isfile(p) and (p not in self._wave or p not in self._wrms):
+                self._wave_want(p)
+                pend = True
+        return pend
+
+    def _wave_cols_for(self, path, n, i0=0, i1=None):
+        key = (path, n, i0, i1)
+        got = self._wave_cols.get(key)
+        if got is None:
+            pk = (self._wave.get(path) or [])[i0:i1]
+            m = len(pk)
+            got = []
+            if m:
+                for k in range(n):
+                    a = int(k * m / n)
+                    b = max(a + 1, int((k + 1) * m / n))
+                    got.append(max(pk[a:b]))
+                ref = max(max(got), 0.12)
+                got = [min(1.0, (v / ref) ** 0.75) for v in got]
+            if len(self._wave_cols) > 400:
+                self._wave_cols = {}
+            self._wave_cols[key] = got
+        return got
+
+    def _draw_wave(self, c, path, x0, y0, x1, y1, s=None):
+        """Little waveform strip: shows where the clip has sound (and where it is silent)."""
+        if x1 - x0 < 8 or y1 - y0 < 5:
+            return
+        c.create_rectangle(x0, y0, x1, y1, fill=BG, outline="")
+        cy = (y0 + y1) / 2.0
+        pk = self._wave.get(path)
+        if pk is None:
+            self._wave_want(path)
+            c.create_line(x0, cy, x1, cy, fill=GHOST_HOV, dash=(2, 3))
+            return
+        if not pk:
+            c.create_line(x0, cy, x1, cy, fill=GHOST_HOV)
+            if x1 - x0 >= 80 and y1 - y0 >= 10:
+                c.create_text(x0 + 4, cy, text="no audio", fill=MUTED, font=(FONT, 7), anchor="w")
+            return
+        n = max(4, min(int((x1 - x0) / 2), 500))
+        i0, i1 = 0, None
+        if s is not None:
+            tin, dd = self._trim(s)
+            i0, i1 = int(tin * self.WAVE_PPS), int((tin + dd) * self.WAVE_PPS) + 1
+        cols = self._wave_cols_for(path, n, i0, i1)
+        half = (y1 - y0) / 2.0 - 1
+        step = (x1 - x0) / float(n)
+        up, dn = [], []
+        for k, v in enumerate(cols):
+            x = x0 + (k + 0.5) * step
+            a = max(0.6, v * half)
+            up += [x, cy - a]
+            dn = [x, cy + a] + dn
+        c.create_polygon(up + dn, fill="#38bdf8", outline="")
+        c.create_line(x0, cy, x1, cy, fill="#7dd3fc")
 
     def _update_playhead(self):
         c = self.tl_cv
@@ -4362,7 +4881,7 @@ class Tab2Editor(tk.Frame):
             return
         s = self.slots[i]
         self._seek_id += 1
-        req = (self._seek_id, s["path"], self._is_img(s["path"]), off, W, H, self._tr_for(i, off))
+        req = (self._seek_id, s["path"], self._is_img(s["path"]), off, W, H, self._tr_for(i, off), self._trim(s)[0])
         with self._slock:
             self._seek_req = req
             if self._seek_busy:
@@ -4378,7 +4897,7 @@ class Tab2Editor(tk.Frame):
                 if req is None:
                     self._seek_busy = False
                     return
-            rid, path, img, off, W, H, tr = req
+            rid, path, img, off, W, H, tr, tin = req
             data = None
             if not path:
                 data = self._black(W, H)
@@ -4386,7 +4905,7 @@ class Tab2Editor(tk.Frame):
                 if tr:
                     data = self._trans_still(tr, path, img, off, W, H)
                 if data is None:
-                    pre = ["ffmpeg", "-v", "error"] + ([] if img else ["-ss", f"{off:.3f}"]) + ["-i", path]
+                    pre = ["ffmpeg", "-v", "error"] + ([] if img else ["-ss", f"{off + tin:.3f}"]) + ["-i", path]
                     cmd = pre + ["-an", "-frames:v", "1", "-vf", self._vf(W, H), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
                     try:
                         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -4425,7 +4944,8 @@ class Tab2Editor(tk.Frame):
             if ln < 0.03:
                 continue
             plan.append({"i": i, "path": s["path"], "img": self._is_img(s["path"]),
-                         "t0": start, "off": start - t0, "len": ln, "tr": self._tr_for(i, start - t0)})
+                         "t0": start, "off": start - t0, "len": ln, "tr": self._tr_for(i, start - t0),
+                         "tin": self._trim(s)[0], "gain": self._norm_gain(s["path"])})
         return plan
 
     def _play(self):
@@ -4489,9 +5009,10 @@ class Tab2Editor(tk.Frame):
             return None
         wav = self._wav_path(gen, k)
         try:
-            r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{e['off']:.3f}",
+            r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{e['off'] + e.get('tin', 0.0):.3f}",
                                 "-t", f"{e['len']:.3f}", "-i", e["path"], "-vn", "-ac", "1", "-ar", "32000",
-                                "-af", f"volume={self._vol:.2f}", "-c:a", "pcm_s16le", wav],
+                                "-af", (f"volume={e['gain']:.3f},alimiter=limit=0.97," if abs(e.get("gain", 1.0) - 1.0) > 0.005 else "")
+                                + f"volume={self._vol:.2f}", "-c:a", "pcm_s16le", wav],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NOWIN, timeout=120)
             if r.returncode == 0 and os.path.exists(wav) and os.path.getsize(wav) > 200:
                 return wav
@@ -4549,7 +5070,7 @@ class Tab2Editor(tk.Frame):
                     cmd = ["ffmpeg", "-v", "error", "-loop", "1", "-framerate", str(self.FPS), "-i", e["path"],
                            "-t", f"{ln:.3f}", "-an", "-vf", vf]
                 else:
-                    cmd = ["ffmpeg", "-v", "error", "-ss", f"{off:.3f}", "-i", e["path"],
+                    cmd = ["ffmpeg", "-v", "error", "-ss", f"{off + e.get('tin', 0.0):.3f}", "-i", e["path"],
                            "-t", f"{ln:.3f}", "-an", "-vf", f"fps={self.FPS},{vf}"]
                 cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=NOWIN)
@@ -4598,9 +5119,11 @@ class Tab2Editor(tk.Frame):
     def _voice_active(self):
         return bool(self.voice_path and os.path.isfile(self.voice_path))
 
-    def set_voice(self, path):
+    def set_voice(self, path, undo=True):
         """Attach an audio file as the voice track (clips become muted automatically)."""
         self._pause()
+        if undo:
+            self._undo_push()
         self.voice_path = path
         self.voice_dur = (media_duration(path) or 0.0) if path else 0.0
         self._cfg_touch()
@@ -4626,12 +5149,19 @@ class Tab2Editor(tk.Frame):
             room = self.winfo_height() - 330
         except tk.TclError:
             room = 266
-        h = int(max(116, min(266, h, max(116, room))))
+        h = int(max(80, min(266, h, max(80, room))))
         if h == self.TL_H:
             return
         self.TL_H = h
         self.BLOCK_H = h - 76
         self.tl_cv.configure(height=h)
+        try:                                   # timeline choto hole help-text lukiye aro jaga dao
+            if h < 130:
+                self._hl.pack_forget()
+            elif not self._hl.winfo_ismapped():
+                self._hl.pack(fill="x", padx=14, pady=(0, 8))
+        except (AttributeError, tk.TclError):
+            pass
         self._draw_soon()
 
     def _grip_press(self, e):
@@ -4726,6 +5256,20 @@ class Tab2Editor(tk.Frame):
         names.insert(0, name)
         self._voice_save(names[:60])
 
+    def _voice_delete(self):
+        """Box e ja lekha/select kora ache sei voice name saved list theke muche dao."""
+        name = self.voice_name_var.get().strip()
+        if not name:
+            self.app.note("Age dropdown theke ekta voice name select koro, tarpor ⌫ (Del name) chap", WARN)
+            return
+        names = self._voice_names()
+        if not any(n.lower() == name.lower() for n in names):
+            self.app.note("'%s' saved list e nai" % name, WARN)
+            return
+        self._voice_save([n for n in names if n.lower() != name.lower()])
+        self.voice_name_var.set("")
+        self.app.note("'%s' list theke delete hoyeche" % name, OK)
+
     def _voice_menu(self, e):
         name = self.voice_name_var.get().strip()
         m = tk.Menu(self, tearoff=0)
@@ -4760,10 +5304,14 @@ class Tab2Editor(tk.Frame):
             messagebox.showwarning("Fix voice", "Age project select koro.")
             return
         self._pause()
+        if self._analysis_pending():
+            self.app.note("Audio analyse hochhe — ektu por abar 'Fix voice' chap.", WARN)
+            return
         plan = []
         for sl in self.slots:
             p = sl.get("path")
-            plan.append({"path": p, "dur": float(sl.get("dur") or self.GAP_SEC),
+            plan.append({"path": p, "dur": float(self._dur(sl)), "tin": self._trim(sl)[0],
+                         "gain": self._norm_gain(p) if p else 1.0,
                          "img": bool(p and self._is_img(p))})
         self._fix_stop.clear()
         self._fix_ui(True)
@@ -4773,7 +5321,7 @@ class Tab2Editor(tk.Frame):
         self._fix_busy = busy
         if self._fix_btn is not None:
             try:
-                self._fix_btn.config(text="■ Stop fix" if busy else "🔧 Fix voice")
+                self._fix_btn.config(text="Stop fix" if busy else "Fix voice", icon="■" if busy else "🔧")
             except Exception:
                 pass
 
@@ -4882,17 +5430,22 @@ class Tab2Editor(tk.Frame):
         cfg = dict(getattr(app, "_voice_cfg", None) or _voice_load_cfg())
         shared = getattr(app, "_voice_shared", None)
         slots = getattr(app, "_voice_slots", None) or VoiceSlots()
-        hidden = bool(getattr(app, "_voice_chrome_hidden", False))
+        hidden = bool(self._hide_flag)
         idx, prof = self._t2_pick_profile(slots, cfg)
         self._t2_log(f"Chrome profile slot {idx} niyechhi")
         runner = Tab2SpeechifyRunner(
             cfg, self._t2_log, self._fix_stop, shared, prof, hidden=hidden,
             account_hint=self._tab2_account, on_account=self._t2_set_account,
             on_accounts_changed=lambda: self.after(0, self._t2_refresh_accounts))
+        self._t2_runner = runner
+        self.after(0, self._t2_refresh_accounts)
         try:
             swapped = runner.run(chunks, name, work)
         finally:
+            self._t2_runner = None
             slots.release(idx)
+            self.after(0, self._t2_refresh_accounts)
+            self.after(50, lambda: self.app._voice_ui_update())
         if self._fix_stop.is_set():
             raise VoiceStopped()
         if len(swapped) != len(chunks):
@@ -4929,6 +5482,11 @@ class Tab2Editor(tk.Frame):
             raise RuntimeError("Join fail: " + (r.stderr or "")[-300:])
         return final
 
+    @staticmethod
+    def _gain_f(it):
+        g = float(it.get("gain") or 1.0)
+        return f"volume={g:.3f},alimiter=limit=0.97," if abs(g - 1.0) > 0.005 else ""
+
     def _t2_build_merged_audio(self, plan, out_path):
         """Serially join every slot's ORIGINAL audio (vol 1.0, ignores mute); image/empty = silence.
         Returns (ok, err)."""
@@ -4939,9 +5497,9 @@ class Tab2Editor(tk.Frame):
         for it in plan:
             d = max(0.04, float(it["dur"]))
             if it["path"] and not it["img"] and os.path.isfile(it["path"]):
-                cmd += ["-i", it["path"]]
+                cmd += (["-ss", f"{it['tin']:.3f}"] if it.get("tin", 0) > 0 else []) + ["-i", it["path"]]
                 filt.append(f"[{n}:a:0]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                            f"apad,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{len(labels)}]")
+                            + self._gain_f(it) + f"apad,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{len(labels)}]")
                 n += 1
             else:
                 filt.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{len(labels)}]")
@@ -4967,9 +5525,9 @@ class Tab2Editor(tk.Frame):
                 d = max(0.04, float(it["dur"]))
                 k = len(labels)
                 if it["path"] and not it["img"] and os.path.isfile(it["path"]) and has_a.get(it["path"], True):
-                    cmd += ["-i", it["path"]]
+                    cmd += (["-ss", f"{it['tin']:.3f}"] if it.get("tin", 0) > 0 else []) + ["-i", it["path"]]
                     filt.append(f"[{n}:a:0]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                                f"apad,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{k}]")
+                                + self._gain_f(it) + f"apad,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{k}]")
                     n += 1
                 else:
                     filt.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{k}]")
@@ -5162,6 +5720,9 @@ class Tab2Editor(tk.Frame):
         if not shutil.which("ffmpeg"):
             messagebox.showerror("Export", "ffmpeg pawa jayni \u2014 Export tab e 'Install FFmpeg' chap.", parent=self.app)
             return
+        if self._analysis_pending():
+            self.app.note("Audio analyse hochhe (Cut clips / Auto volume) — ektu por abar Export chap.", WARN)
+            return
         proj = self.app.proj or self._proj
         if not proj:
             messagebox.showwarning("Export", "Age project select koro.", parent=self.app)
@@ -5189,6 +5750,8 @@ class Tab2Editor(tk.Frame):
             p = s.get("path")
             ok = bool(p and os.path.isfile(p))
             items.append({"path": p if ok else None, "img": bool(ok and self._is_img(p)), "dur": d, "t0": cum,
+                          "tin": self._trim(s)[0] if ok else 0.0,
+                          "gain": self._norm_gain(p) if ok else 1.0,
                           "tr": self._tr_for(i, 0.0) if ok else None})
             cum += d
         try:
@@ -5281,6 +5844,8 @@ class Tab2Editor(tk.Frame):
         tail = ["-an", "-r", str(F)] + venc + ["-pix_fmt", "yuv420p", "-frames:v", str(nf), seg]
         vf = self._vf(W, H)
         p, img, dur, tr = it["path"], it["img"], it["dur"], it.get("tr")
+        tin = float(it.get("tin") or 0.0)
+        ss = ["-ss", f"{tin:.3f}"] if (tin > 0 and not img) else []
         pad = f"tpad=stop_mode=clone:stop_duration={dur + 2:.3f}"
         cmds = []
         if p and tr:
@@ -5288,7 +5853,7 @@ class Tab2Editor(tk.Frame):
             if lp:
                 D = tr["D"]
                 for x in ([tr["x"], "fade"] if tr["x"] != "fade" else ["fade"]):
-                    b_in = (["-loop", "1", "-framerate", str(F)] if img else []) + ["-i", p]
+                    b_in = (["-loop", "1", "-framerate", str(F)] if img else ss) + ["-i", p]
                     bchain = f"[1:v]fps={F},{vf}" + ("" if img else "," + pad) + ",format=yuv420p[b]"
                     fc = (f"[0:v]fps={F},{vf},format=yuv420p[a];{bchain};"
                           f"[a][b]xfade=transition={x}:duration={D:.3f}:offset=0[o]")
@@ -5299,7 +5864,7 @@ class Tab2Editor(tk.Frame):
         elif img:
             cmds.append(hd + ["-loop", "1", "-framerate", str(F), "-i", p, "-vf", vf] + tail)
         else:
-            cmds.append(hd + ["-i", p, "-vf", f"fps={F},{vf},{pad}"] + tail)
+            cmds.append(hd + ss + ["-i", p, "-vf", f"fps={F},{vf},{pad}"] + tail)
         err = ""
         for c in cmds:
             rc, err = self._run_ff(c)
@@ -5528,6 +6093,11 @@ class Tab2Editor(tk.Frame):
                     s["thumbs"] = png if isinstance(png, dict) else {96: png}
                     s["thumb"] = s["thumbs"].get(96) or next(iter(s["thumbs"].values()))
                     self._draw_soon()
+            elif k == "wave":
+                if self._cut_margin() is not None:
+                    self._cut_refresh_soon(250)
+                else:
+                    self._draw_soon()
             elif k == "tile":
                 self._tile_ready(m[1], m[2])
             elif k == "voiceplay":
@@ -5670,6 +6240,8 @@ class Tab2Editor(tk.Frame):
                             "preset": self.preset_var.get(), "q": self.q_var.get()},
                     "trans": self.trans_key, "rp": self.rp_tab.get(),
                     "mute": self.mute_var.get(), "voice": self.voice_path or "",
+                    "cut": {"on": self.cut_on.get(), "val": self.cut_val.get(), "unit": self.cut_unit.get()},
+                    "norm": self.norm_on.get(),
                     "voice_name": self.voice_name_var.get().strip(),
                     "exp_dir": self.exp_dir_var.get().strip(),
                     "exp_name": self.exp_name_var.get().strip(),
@@ -5693,6 +6265,9 @@ class Tab2Editor(tk.Frame):
             self.save()
         self._proj = self.app.proj
         self.slots, self.sel, self.cur_t = [], None, 0.0
+        self._undo.clear()
+        self._redo.clear()
+        self._undo_refresh()
         self._loading = True
         try:
             for k, v in self.subv2.items():                     # defaults first (project may have nothing saved)
@@ -5706,6 +6281,10 @@ class Tab2Editor(tk.Frame):
             self.q_var.set("")
             self.trans_key = ""
             self.mute_var.set("0")
+            self.cut_on.set("0")
+            self.cut_val.set("1")
+            self.cut_unit.set("seconds")
+            self.norm_on.set("0")
             self.voice_name_var.set("")
             self._tab2_account = ""
             self.voice_path, self.voice_dur = None, 0.0
@@ -5729,6 +6308,11 @@ class Tab2Editor(tk.Frame):
                     self.preset_var.set(st.get("preset", ""))
                     self.q_var.set(st.get("q", ""))
                     self.mute_var.set("1" if data.get("mute") == "1" else "0")
+                    ct = data.get("cut") or {}
+                    self.cut_on.set("1" if ct.get("on") == "1" else "0")
+                    self.cut_val.set(str(ct.get("val", "1")))
+                    self.cut_unit.set("milliseconds" if str(ct.get("unit", "")).startswith("milli") else "seconds")
+                    self.norm_on.set("1" if data.get("norm") == "1" else "0")
                     self.voice_name_var.set(data.get("voice_name", "") or "")
                     self.exp_dir_var.set(data.get("exp_dir", "") or "")
                     self.exp_name_var.set(data.get("exp_name", "") or "tab2_export")
@@ -5756,6 +6340,7 @@ class Tab2Editor(tk.Frame):
                 pass
         finally:
             self._loading = False
+        self._cut_widgets()
         try:
             self.res_cb2["values"] = self.RES_LIST.get(self.aspect_var.get(), [])
         except (AttributeError, tk.TclError):
@@ -10966,7 +11551,7 @@ class App(_Base):
             self.voice_start_btn.configure(state="disabled" if (self._voice_main_running or (busy and not run)) else "normal")
             self.voice_stop_btn.configure(state="normal" if run else "disabled")
             self.voice_clear_btn.configure(state="disabled" if busy else "normal")
-            self.voice_atext.configure(state="disabled" if busy else "normal")
+            self.voice_atext.configure(state="disabled" if (busy or self._t2_fix_running()) else "normal")
             if not busy:
                 self.voice_status.configure(text="Ready", fg=MUTED)
         except tk.TclError:
@@ -11058,7 +11643,7 @@ class App(_Base):
         if not self.voice_atext.edit_modified():
             return
         self.voice_atext.edit_modified(False)
-        if self._voice_alive():
+        if self._voice_alive() or self._t2_fix_running():
             return
         self._voice_sched("acct", lambda: self.voice_save_accounts(silent=True), 600)
 
@@ -11232,11 +11817,15 @@ class App(_Base):
         if os.path.exists(VOICE_ACCOUNTS):
             self.voice_atext.insert("1.0", open(VOICE_ACCOUNTS, encoding="utf-8").read())
         self.voice_atext.edit_modified(False)
-        if self._voice_alive():          # cholar somoy runner accounts.txt update kore — editor lock
+        if self._voice_alive() or self._t2_fix_running():   # cholar somoy runner accounts.txt update kore — editor lock
             self.voice_atext.configure(state="disabled")
 
+    def _t2_fix_running(self):
+        t2 = getattr(self, "tab2", None)
+        return bool(t2 is not None and getattr(t2, "_t2_runner", None) is not None)
+
     def voice_save_accounts(self, silent=False):
-        if self._voice_alive():
+        if self._voice_alive() or self._t2_fix_running():
             return
         _voice_ensure_dirs()
         atomic_write(VOICE_ACCOUNTS, self.voice_atext.get("1.0", "end").strip() + "\n")
@@ -12057,6 +12646,40 @@ VOICE_DONE = os.path.join(VOICE_SCRIPTS, "done")
 VOICE_PROFILE = os.path.join(VOICE_BASE, "chrome_profile")
 VOICE_ACCOUNTS = os.path.join(VOICE_BASE, "accounts.txt")
 VOICE_USED = os.path.join(VOICE_BASE, "accounts_used.txt")
+VOICE_BLOCKED = os.path.join(VOICE_BASE, "accounts_no_credit.txt")      # credit shesh account — kokhono abar login hobe na
+T2_SESSIONS = os.path.join(VOICE_BASE, "tab2_sessions.json")   # Chrome profile -> Tab 2 er login kora account line
+_T2_SESS_LOCK = threading.Lock()
+
+
+def _t2_sess_load():
+    try:
+        d = json.load(open(T2_SESSIONS, encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _t2_sess_set(profile, line):
+    """line = None -> ei profile er session mapping muche dao (onno kono account login hole / credit shesh hole)."""
+    try:
+        with _T2_SESS_LOCK:
+            d = _t2_sess_load()
+            key = os.path.normcase(os.path.abspath(str(profile)))
+            if line:
+                d[key] = line
+            elif key in d:
+                d.pop(key)
+            else:
+                return
+            atomic_write(T2_SESSIONS, json.dumps(d))
+    except Exception:
+        pass
+
+
+def _t2_sess_get(profile):
+    return _t2_sess_load().get(os.path.normcase(os.path.abspath(str(profile))))
+
+VOICE_LIMIT_RE = re.compile(r"ran out of credits|buy more to continue|out of credits|Continue with Free Plan", re.I)
 VOICE_CONFIG = os.path.join(VOICE_BASE, "config.json")
 VOICE_LOG = os.path.join(VOICE_BASE, "log.txt")
 VOICE_OUTPUT = os.path.join(VOICE_BASE, "Output")
@@ -12520,7 +13143,41 @@ class VoiceRunner:
                     used.add(l.split(":", 1)[0].strip().lower())
         except Exception:
             pass
-        return used
+        return used | self._blocked_emails()
+
+    def _blocked_emails(self):
+        out = set()
+        try:
+            for l in open(VOICE_BLOCKED, encoding="utf-8").read().splitlines():
+                l = l.strip()
+                if l:
+                    out.add(l.split(":", 1)[0].strip().lower())
+        except Exception:
+            pass
+        return out
+
+    def mark_blocked(self, line):
+        """Credit shesh ('You ran out of credits') account: accounts.txt theke soriye accounts_no_credit.txt e rakhe —
+        pore user abar accounts.txt e add korleo ei mail e kokhono login hobe na."""
+        try:
+            self.mark_used(line)
+        except Exception:
+            pass
+        with self.shared["lock"]:
+            email = line.split(":", 1)[0].strip().lower()
+            if email and email not in self._blocked_emails():
+                try:
+                    with open(VOICE_BLOCKED, "a", encoding="utf-8") as f:
+                        f.write(line + "\n")
+                except Exception:
+                    pass
+            self.shared["reserved"].discard(line)
+
+    def credit_popup(self, page):
+        try:
+            return page.get_by_text(VOICE_LIMIT_RE).first.is_visible()
+        except Exception:
+            return False
 
     def peek_account(self, skip):
         """Ekta mail neya + reserve kore rakha. Ager e login hoye jaoa (used) mail kokhono dewa hobe na."""
@@ -12548,6 +13205,7 @@ class VoiceRunner:
 
     def mark_used(self, line):
         """Mail ke accounts.txt theke soriye accounts_used.txt e rakhe (ekbar-i, duplicate hoy na)."""
+        _t2_sess_set(self.profile, None)        # ei profile e notun account login hoyeche -> Tab 2 er age-r mapping bhul
         with self.shared["lock"]:
             email = line.split(":", 1)[0].strip().lower()
             lines = [l.strip() for l in open(VOICE_ACCOUNTS, encoding="utf-8").read().splitlines() if l.strip()]
@@ -12604,7 +13262,9 @@ class VoiceRunner:
     def launch(self, pw):
         self.pw = pw
         os.makedirs(self.profile, exist_ok=True)
-        args = ["--disable-blink-features=AutomationControlled", "--start-maximized"]
+        args = ["--disable-blink-features=AutomationControlled"]
+        args += (["--window-position=-32000,-32000", "--window-size=1366,900"] if self.chrome_hidden
+                 else ["--start-maximized"])
         self.ctx = pw.chromium.launch_persistent_context(
             self.profile, channel="chrome", headless=False, accept_downloads=True,
             no_viewport=True, ignore_default_args=["--disable-extensions", "--enable-automation"],
@@ -13325,6 +13985,7 @@ class VoiceRunner:
         acct_line = getattr(self, "_cur_acct", None)
         if acct_line:                                   # login hoyei mail 'used' — voice generate hok ba na hok, ar use hobe na
             self.mark_used(acct_line)
+            self._last_acct = acct_line
             self._cur_acct = None
             self.log("  mail used list e geche (ar use hobe na)")
         page.get_by_text("Voiceover", exact=True).first.click()
@@ -13440,13 +14101,23 @@ class VoiceRunner:
                 continue
         return clicked
 
+    def _check_credit(self, page):
+        if self.credit_popup(page):
+            ln = getattr(self, "_last_acct", None)
+            if ln:
+                self.mark_blocked(ln)
+                self._last_acct = None
+            raise RuntimeError("Credit shesh (You ran out of credits) — account block korlam, porer account e jachhi")
+
     def wait_generation(self, page):
         export = page.get_by_role("button", name="Export", exact=True)
         timeout = self.cfg["gen_timeout_min"] * 60
         self.sleep(6000, page)
         for rnd in range(8):
             t0 = time.time()
+            self._check_credit(page)
             while not export.is_visible():
+                self._check_credit(page)
                 if time.time() - t0 > timeout:
                     raise RuntimeError("Generate timeout")
                 self.sleep(3000, page)
@@ -15184,16 +15855,26 @@ class Tab2SpeechifyRunner(VoiceRunner):
     VoiceRunner er Chrome launch / new_page / sweep / peek_account / mark_used / clear_speechify_cookies reuse kore
     (Tab 1 er code ekdom bodlay na). Credit shesh hole account Tab 1 Accounts theke REMOVE hoy ar porer account e login hoy."""
     SWAP_URL = VOICE_ORIGIN + "/voice-changer"
-    LIMIT_RE = re.compile(r"ran out of credits|buy more to continue|out of credits", re.I)
+    LIMIT_RE = VOICE_LIMIT_RE
 
     def __init__(self, cfg, log, stop_event, shared, profile, hidden=False, account_hint="",
                  on_account=None, on_accounts_changed=None):
         super().__init__(cfg, log, lambda m: None, stop_event, chrome_hidden=hidden, profile=profile,
                          shared=shared, tag="")
+        self._want_hidden = bool(hidden)
         self.account = None                         # active "email:password" line
         self.hint = (account_hint or "").strip()    # age-r Tab 2 account (tab2.json)
         self.on_account = on_account or (lambda line: None)
         self.on_accounts_changed = on_accounts_changed or (lambda: None)
+
+    def request_hidden(self, h):
+        """Tk thread theke call hoy — asol window move runner er nijer thread e hoy (Playwright thread-safe na)."""
+        self._want_hidden = bool(h)
+
+    def sleep(self, ms, page=None):
+        if self._want_hidden != self.chrome_hidden:
+            self.set_chrome_hidden(self._want_hidden)
+        super().sleep(ms, page)
 
     # ───────── small helpers ─────────
     @staticmethod
@@ -15232,24 +15913,30 @@ class Tab2SpeechifyRunner(VoiceRunner):
 
     # ───────── accounts ─────────
     def _hint_account(self, skip):
-        """Age-r Tab 2 account ekhono accounts.txt e (unused) thakle sheta-i abar nao."""
+        """Age-r Tab 2 account (tab2.json) — credit shesh na hole (blocked list e na thakle) sheta-i abar nao.
+        Login er somoy-i Accounts list theke soriye deya hoy, tai list e thaka lagbe na."""
         h, self.hint = self.hint, ""
         if not h:
             return None
         em = h.split(":", 1)[0].strip().lower()
         with self.shared["lock"]:
-            try:
-                lines = [l.strip() for l in open(VOICE_ACCOUNTS, encoding="utf-8").read().splitlines() if l.strip()]
-            except Exception:
+            if em in self._blocked_emails():
                 return None
-            if em in self._used_emails():
-                return None
-            for l in lines:
-                if l.split(":", 1)[0].strip().lower() == em and l not in skip and l not in self.shared["reserved"]:
-                    self.shared["reserved"].add(l)
-                    e, p = self._split(l)
-                    return e, p, l
-        return None
+        e, p = self._split(h)
+        return e, p, h
+
+    def _claim_account(self, line):
+        """Tab 1 er moto: login hoye gele account ke Accounts section (accounts.txt) theke SORIYE used e rakho.
+        Tab 2 ei account-i credit shesh na howa porjonto reuse korbe (self.account / tab2.json)."""
+        try:
+            self.mark_used(line)
+        except Exception as e:
+            self.log(f"  account remove e problem: {(str(e).splitlines() or [''])[0][:120]}")
+        _t2_sess_set(self.profile, line)       # ei Chrome profile e ekhon ei account login ache
+        try:
+            self.on_accounts_changed()
+        except Exception:
+            pass
 
     def _take_account(self, skip):
         a = self._hint_account(skip) or self.peek_account(skip)
@@ -15297,8 +15984,9 @@ class Tab2SpeechifyRunner(VoiceRunner):
                 self.release_account(line)
                 continue
             self.account = line
+            self._claim_account(line)           # Accounts section theke remove (Tab 1 er moto)
             self.on_account(line)
-            self.log("  login hoyeche")
+            self.log("  login hoyeche — account Accounts theke soriye nilam, credit shesh na howa porjonto Tab 2 e reuse hobe")
             return
         raise RuntimeError("Speechify login hochhe na: " + last)
 
@@ -15307,14 +15995,16 @@ class Tab2SpeechifyRunner(VoiceRunner):
         line, self.account = self.account, None
         if not line:
             return
+        self.hint = ""
+        _t2_sess_set(self.profile, None)
         try:
-            self.mark_used(line)
+            self.mark_blocked(line)                 # permanent block (abar login hobe na); list e ar nai tai notun account lagbe
         except Exception as e:
             self.log(f"  account remove e problem: {str(e).splitlines()[0][:120]}")
         self.release_account(line)
         self.on_account("")
         self.on_accounts_changed()
-        self.log(f"  {self._split(line)[0]} er credit shesh \u2014 Accounts section theke soriye dilam")
+        self.log(f"  {self._split(line)[0]} er credit shesh \u2014 BLOCK korlam (ar kokhono use hobe na), notun account e jachhi")
 
     def _switch_account(self, page):
         self._drop_account()
@@ -15349,7 +16039,38 @@ class Tab2SpeechifyRunner(VoiceRunner):
 
     def _ensure_login(self, page):
         if self._swap_state(page, 30) == "in":
-            return
+            if self.account:
+                return
+            h = (self.hint or "").strip()
+            if h and _t2_sess_get(self.profile) == h and \
+                    h.split(":", 1)[0].strip().lower() not in self._blocked_emails():
+                self.hint = ""                         # ei profile e age Tab 2 ei account diyei login korechilo -> abar login lagbe na
+                self.account = h
+                self.on_account(h)
+                self.log("Age-r account e-i login ache — abar login na kore sorasori upload")
+                return
+            a = self._hint_account(set())             # kon account e login ache ta jani na -> hint account e fresh login
+            if not a:
+                # account chena jachhe na -> credit shesh hole remove korte parbo na; tai list theke notun account e login
+                self.log("Kon account e login ache chena jachhe na — list er account diye abar login korchhi")
+                self._login_next(page)
+                self._open_swap(page)
+                return
+            try:
+                self.log(f"Speechify login (account chena jabe) -> {a[0]}")
+                self._login(page, a[0], a[1])
+                self._open_swap(page)
+                if self._swap_state(page, 30) == "in":
+                    self.account = a[2]
+                    self._claim_account(a[2])
+                    self.on_account(a[2])
+                    return
+            except VoiceStopped:
+                self.release_account(a[2])
+                raise
+            except Exception as ex:
+                self.log(f"  login fail: {(str(ex).splitlines() or [''])[0][:120]}")
+            self.release_account(a[2])
         if self.account:                                    # session expire -> same account e abar login
             e, p = self._split(self.account)
             try:
@@ -15440,6 +16161,89 @@ class Tab2SpeechifyRunner(VoiceRunner):
             self.sleep(2000, page)
         raise RuntimeError("Voice swap timeout (10 min)")
 
+    # ───────── 'Accent' toggle: download-er age OFF kore dewa ─────────
+    @staticmethod
+    def _switch_on(el):
+        """True = ON, False = OFF, None = bujhte parlam na."""
+        try:
+            v = (el.get_attribute("aria-checked") or "").lower()
+            if v in ("true", "false"):
+                return v == "true"
+            v = (el.get_attribute("data-state") or "").lower()
+            if v in ("checked", "unchecked", "on", "off"):
+                return v in ("checked", "on")
+            v = el.evaluate("e => (e.type === 'checkbox') ? e.checked : null")
+            if v is not None:
+                return bool(v)
+            rgb = el.evaluate("e => getComputedStyle(e).backgroundColor") or ""     # fallback: dark track = ON
+            m = re.findall(r"[\d.]+", rgb)
+            if len(m) >= 3 and (len(m) < 4 or float(m[3]) > 0.05):
+                r, g, b = (float(x) for x in m[:3])
+                return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0 < 0.5
+        except Exception:
+            pass
+        return None
+
+    def _accent_switch(self, page):
+        """'Accent' label er pashe thaka toggle element (na thakle None)."""
+        lbl = page.get_by_text(re.compile(r"^\s*Accent\s*$", re.I)).first
+        if not lbl.is_visible():
+            return None
+        cands = [
+            lbl.locator("xpath=ancestor::*[.//*[@role='switch' or @role='checkbox' or @type='checkbox']][1]")
+               .locator("[role='switch'], [role='checkbox'], input[type='checkbox']").first,
+            lbl.locator("xpath=preceding-sibling::*[1]"),
+            lbl.locator("xpath=../*[1]"),
+            lbl.locator("xpath=following-sibling::*[1]"),
+        ]
+        for c in cands:
+            try:
+                if c.count() and self._switch_on(c) is not None:
+                    return c
+            except Exception:
+                continue
+        return None
+
+    def _accent_off(self, page, dl):
+        """Generated Sample ready hole 'Accent' toggle ON thakle OFF kore; sample abar generate hole wait kore.
+        Fresh Download button return kore. Kono problem hole (toggle na pele ba fail) ager moto cholbe."""
+        dl_rx = re.compile(r"^\s*Download\s*$", re.I)
+        try:
+            sw = self._accent_switch(page)
+            if sw is None:
+                self.log("  Accent toggle pailam na — jemon ache temon-i download")
+                return dl
+            if self._switch_on(sw) is False:
+                self.log("  Accent already OFF")
+                return dl
+            self.log("  Accent ON chhilo — OFF korchhi")
+            try:
+                sw.click(timeout=4000)
+            except Exception:
+                sw.evaluate("e => e.click()")
+            page.wait_for_timeout(1200)
+            if self._switch_on(sw) is True:                         # click kaj kore ni? abar ekbar
+                try:
+                    sw.click(timeout=4000, force=True)
+                except Exception:
+                    sw.evaluate("e => e.click()")
+                page.wait_for_timeout(1200)
+            self.log("  Accent OFF ✓" if self._switch_on(sw) is False else "  Accent OFF confirm hoyni (state bujhlam na)")
+            self.sleep(1500, page)
+            try:
+                regen = page.get_by_text(re.compile(r"Adjusting Voice", re.I)).first.is_visible()
+            except Exception:
+                regen = False
+            if regen:                                               # toggle bodlale sample notun kore generate hoy
+                self.log("  Accent bodlalo — sample abar generate hochhe, wait…")
+                return self._wait_generated(page)
+            return self._btn(page, dl_rx).first
+        except (VoiceStopped, CreditLimit):
+            raise
+        except Exception as ex:
+            self.log(f"  Accent off fail ({(str(ex).splitlines() or [''])[0][:100]}) — jemon ache temon-i download")
+            return self._btn(page, dl_rx).first
+
     def swap_chunk(self, page, chunk, name, out_base):
         self._open_swap(page)
         self._ensure_login(page)
@@ -15468,6 +16272,7 @@ class Tab2SpeechifyRunner(VoiceRunner):
         gen.click()
         self.log("  'Adjusting Voice\u2026' \u2014 generate cholche")
         dl = self._wait_generated(page)
+        dl = self._accent_off(page, dl)
         with page.expect_download(timeout=120000) as di:
             dl.click()
         d = di.value
@@ -15518,6 +16323,17 @@ class Tab2SpeechifyRunner(VoiceRunner):
                         except Exception as e:
                             if "Accounts section e aro account" in str(e):
                                 raise
+                            try:
+                                _lim = (not page.is_closed()) and self._limit_shown(page)
+                            except Exception:
+                                _lim = False
+                            if _lim:
+                                switches += 1
+                                if switches > 25:
+                                    raise RuntimeError("Onek account e credit limit \u2014 bondho korlam")
+                                self.log("  Credit limit popup (error er por) \u2014 account badlachhi")
+                                self._switch_account(page)
+                                continue
                             fails += 1
                             msg = (str(e).splitlines() or [type(e).__name__])[0][:200]
                             self.log(f"  chunk {i} fail ({fails}/3): {msg}")
