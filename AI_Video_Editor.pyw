@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.0.5"
+APP_VERSION = "3.0.6"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -2904,7 +2904,7 @@ class Tab2Editor(tk.Frame):
         self.tl_cv.pack(fill="x")
         self.tl_sb.pack(fill="x")
         _hl = mklabel(tl, "Space = play/pause   •   Delete = clip remove (slot thakbe)   •   Shift+Delete = slot delete   •   "
-                          "Right-click = menu   •   clip drop korle block er upor = replace", 8, MUTED, bg=PANEL,
+                          "Right-click = menu (Import AGE/PORE)   •   block er upor mouse rakhle clip er naam   •   clip drop korle block er upor = replace", 8, MUTED, bg=PANEL,
                       anchor="w", justify="left")
         _hl.pack(fill="x", padx=14, pady=(0, 8))
         self._hl = _hl
@@ -2915,6 +2915,8 @@ class Tab2Editor(tk.Frame):
         c.bind("<ButtonRelease-1>", self._tl_release)
         c.bind("<Button-3>", self._tl_menu)
         c.bind("<Button-2>", self._tl_menu)
+        c.bind("<Motion>", self._tl_hover)
+        c.bind("<Leave>", lambda e: self._tl_tip_hide())
         c.bind("<MouseWheel>", self._tl_wheel)
         c.bind("<Control-MouseWheel>", self._tl_zoomwheel)
         c.bind("<Button-4>", lambda e: c.xview_scroll(-3, "units"))
@@ -4158,24 +4160,39 @@ class Tab2Editor(tk.Frame):
         ok = VIDEO_EXTS | IMG_EXTS_T2
         return [p for p in out if os.path.isfile(p) and os.path.splitext(p)[1].lower() in ok]
 
-    def import_paths(self, paths):
+    def import_paths(self, paths, at=None):
+        """at=None -> shesh e; at=N -> N number position e (0-based) dhukbe, porer clip gulo dane soray jabe."""
         paths = self._media_only(paths)
         if not paths:
             self.app.note("Kono video/image file pawa jayni.", WARN)
             return
         self._edit_begin()
         paths.sort(key=lambda p: natural_key(os.path.basename(p)))
+        pos = len(self.slots) if at is None else max(0, min(int(at), len(self.slots)))
+        first = pos
         for p in paths:
             s = self._new_slot(p, self._label_of(p))
-            self.slots.append(s)
+            self.slots.insert(pos, s)
+            pos += 1
             self._queue_media(s)
-        self.app.note(f"{len(paths)} ta clip import hoyeche — {len(paths)} ta section toiri hoyeche ✓")
+        if at is not None:
+            self.sel = first
+        where = "shesh e" if at is None else f"#{first + 1} position e"
+        self.app.note(f"{len(paths)} ta clip {where} import hoyeche ✓")
         self._changed()
 
-    def import_dialog(self):
+    def import_dialog(self, at=None):
         ps = filedialog.askopenfilenames(parent=self.app, title="Clips import koro", filetypes=T2_MEDIA_TYPES)
         if ps:
-            self.import_paths(list(ps))
+            self.import_paths(list(ps), at)
+
+    def import_before_sel(self):
+        if self._need_sel():
+            self.import_dialog(self.sel)
+
+    def import_after_sel(self):
+        if self._need_sel():
+            self.import_dialog(self.sel + 1)
 
     def import_folder(self):
         d = filedialog.askdirectory(parent=self.app, title="Clips er folder")
@@ -4356,6 +4373,13 @@ class Tab2Editor(tk.Frame):
                 return x0 + (max(t, t0) - t0) / max(0.001, d) * (x1 - x0)
         return self._geo[-1][1]
 
+    def _badge(self, c, x, y, n):
+        """Thumbnail er upor chhoto serial number badge."""
+        t = str(n)
+        w = 8 * len(t) + 10
+        c.create_rectangle(x, y, x + w, y + 16, fill=BG, outline=ACCENT)
+        c.create_text(x + w / 2.0, y + 8, text=t, fill=FG, font=(FONT, 9, "bold"))
+
     def _fit_text(self, text, px):
         n = max(3, int(px / 7.4))
         return text if len(text) <= n else text[:n - 1] + "…"
@@ -4431,14 +4455,16 @@ class Tab2Editor(tk.Frame):
                     else:
                         c.create_rectangle(x0 + 6, y0 + 6, x0 + 102, y0 + max(12, reg_h - 6), fill=BG, outline="")
                         c.create_text(x0 + 54, y0 + reg_h / 2.0, text="…", fill=MUTED, font=(FONT, 12))
+                    _by = (y0 + (reg_h - img.height()) / 2.0 + 3) if img else (y0 + 9)
+                    self._badge(c, x0 + 9, _by, i + 1)
                     if txt:
                         right = ("✂ " if (self._cut_margin() is not None and abs(d - self._raw_dur(s)) > 0.001) else "") \
-                            + f"#{i + 1}  {d:.1f}s"
+                            + f"{d:.1f}s"
                         _g = self._norm_gain(s["path"]) if vid else 1.0
                         if abs(_g - 1.0) > 0.03:
                             right += f"  {20 * math.log10(_g):+.0f}dB"
                         c.create_text(x1 - 6, y1 - 36, text=right, fill=MUTED, font=(FONT, 9), anchor="ne")
-                        c.create_text(x0 + 8, y1 - 36, text=self._fit_text(s["label"], bw - 24 - len(right) * 7),
+                        c.create_text(x0 + 8, y1 - 36, text=self._fit_text(os.path.basename(s["path"]), bw - 24 - len(right) * 7),
                                       fill=FG, font=(FONT, 10, "bold"), anchor="nw")
                         if vid:
                             self._draw_wave(c, s["path"], x0 + 4, y1 - 20, x1 - 4, y1 - 4, s)
@@ -4473,7 +4499,12 @@ class Tab2Editor(tk.Frame):
                                       fill=MUTED, font=(FONT, 9))
                     c.create_text(cx, y0 + 74, text=f"{d:.1f}s", fill=MUTED, font=(FONT, 9))
             if wide and not (s["path"] and self.BLOCK_H >= 84):
-                c.create_text(x1 - 6, y1 - 5, text=f"#{i + 1}", fill=MUTED, font=(FONT, 8), anchor="se")
+                if s["path"]:
+                    c.create_text(x0 + 8, y1 - 5, text=self._fit_text(os.path.basename(s["path"]), bw - 16),
+                                  fill=MUTED, font=(FONT, 8), anchor="sw")
+                else:
+                    _nm = f"#{i + 1}  {s['label']}" if s["label"] else f"#{i + 1}"
+                    c.create_text(x1 - 6, y1 - 5, text=self._fit_text(_nm, bw - 12), fill=MUTED, font=(FONT, 8), anchor="se")
             if bw >= 30 and i > 0 and self.trans_key and s["path"] and self.slots[i - 1]["path"]:      # transition marker
                 jx, jy = x0 - self.GAPW / 2.0, y0 + self.BLOCK_H / 2.0
                 c.create_polygon(jx, jy - 9, jx + 9, jy, jx, jy + 9, jx - 9, jy, fill=ACCENT, outline=BG, width=2)
@@ -4721,6 +4752,7 @@ class Tab2Editor(tk.Frame):
 
     # ───────── timeline mouse ─────────
     def _tl_press(self, e):
+        self._tl_tip_hide()
         c = self.tl_cv
         c.focus_set()
         x = c.canvasx(e.x)
@@ -4757,7 +4789,48 @@ class Tab2Editor(tk.Frame):
     def _tl_zoomwheel(self, e):
         self._zoom(1.15 if e.delta > 0 else 0.87, self._x2t(self.tl_cv.canvasx(e.x)))
 
+    def _tl_tip_hide(self):
+        t = getattr(self, "_tl_tip", None)
+        if t is not None:
+            try:
+                t.destroy()
+            except Exception:
+                pass
+        self._tl_tip = None
+        self._tl_tip_i = None
+
+    def _tl_hover(self, e):
+        """Mouse kono block er upor gele tar #serial + clip er asol naam + duration tooltip e dekhay."""
+        if getattr(self, "_scrub", False):
+            return
+        c = self.tl_cv
+        i = self._slot_at_x(c.canvasx(e.x)) if e.y >= self.RULER_H else None
+        if i is None or i >= len(self.slots):
+            self._tl_tip_hide()
+            return
+        if i == getattr(self, "_tl_tip_i", None) and getattr(self, "_tl_tip", None) is not None:
+            try:
+                self._tl_tip.geometry(f"+{e.x_root + 14}+{e.y_root + 16}")
+            except Exception:
+                pass
+            return
+        self._tl_tip_hide()
+        sl = self.slots[i]
+        name = os.path.basename(sl["path"]) if sl.get("path") else ((sl.get("label") or "") + "  (faka slot)")
+        txt = f"#{i + 1}   {name}   •   {self._dur(sl):.1f}s"
+        try:
+            t = tk.Toplevel(self.app)
+            t.wm_overrideredirect(True)
+            t.attributes("-topmost", True)
+            tk.Label(t, text=txt, bg=PANEL2, fg=FG, font=(FONT, 9), padx=8, pady=4,
+                     relief="solid", bd=1).pack()
+            t.geometry(f"+{e.x_root + 14}+{e.y_root + 16}")
+            self._tl_tip, self._tl_tip_i = t, i
+        except Exception:
+            self._tl_tip = None
+
     def _tl_menu(self, e):
+        self._tl_tip_hide()
         c = self.tl_cv
         i = self._slot_at_x(c.canvasx(e.x))
         m = tk.Menu(self.app, tearoff=0, bg=PANEL2, fg=FG, activebackground=ACCENT, activeforeground=ACCENT_FG)
@@ -4772,6 +4845,8 @@ class Tab2Editor(tk.Frame):
             m.add_separator()
             m.add_command(label="◀ Move left", command=lambda: self.move_sel(-1))
             m.add_command(label="▶ Move right", command=lambda: self.move_sel(1))
+            m.add_command(label="⤵ Import clip(s) ekhaner AGE…", command=lambda: self.import_dialog(i))
+            m.add_command(label="⤵ Import clip(s) ekhaner PORE…", command=lambda: self.import_dialog(i + 1))
             m.add_command(label="＋ Empty slot age", command=lambda: self.add_empty(i))
             m.add_command(label="＋ Empty slot pore", command=lambda: self.add_empty(i + 1))
             m.add_command(label="⏱ Duration…", command=self.set_duration)
