@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.0.6"
+APP_VERSION = "3.0.7"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -695,6 +695,23 @@ def merge_audio_files(files, out_path):
                        text=True, errors="replace")
     ok = r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0
     return ok, (r.stderr or "").strip()[-600:]
+
+
+def split_script_half(text):
+    """Script ke LINE (line break) hishebe 2 vage vag kore. Fnaka line gona hoy na.
+    Beshom hole age-r part e 1 ta beshi (99 line -> 50 + 49). Ekta-i line hole None."""
+    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    idx = [i for i, l in enumerate(lines) if l.strip()]
+    n = len(idx)
+    if n < 2:
+        return None
+    k = (n + 1) // 2
+    cut = idx[k - 1] + 1
+    first = "\n".join(lines[:cut]).strip()
+    rest = "\n".join(lines[cut:]).strip()
+    if not first or not rest:
+        return None
+    return first, rest
 
 
 def archive(path, proj):
@@ -11296,6 +11313,8 @@ class App(_Base):
         field(b, 0, "VeePN Extension ID", "ext_id", 40)
         field(b, 1, "UrbanVPN Extension ID", "urban_ext_id", 40, "faka rakhle auto detect")
         field(b, 2, "Max mail tries", "max_account_tries", 8)
+        field(b, 3, "Credit limit", "split_credit_limit", 8,
+              "Split & Generate e credit eta-r beshi dekhale script line hishebe adha hobe (0 = off)")
         b = mkcard(sc, "Timeouts", "minutes")
         field(b, 0, "Generate", "gen_timeout_min", 8)
         field(b, 1, "Export", "export_timeout_min", 8)
@@ -11937,7 +11956,7 @@ class App(_Base):
                     val = VOICE_DEFAULTS[k]
             elif k in ("max_account_tries", "max_vpn_tries", "vpn_load_wait_sec", "gen_timeout_min",
                      "export_timeout_min", "convert_timeout_min", "threads",
-                     "gemini_tries"):
+                     "gemini_tries", "split_credit_limit"):
                 try:
                     val = int(val)
                 except ValueError:
@@ -12851,6 +12870,7 @@ VOICE_DEFAULTS = {
     "vpn_disconnect_after": True,
     "voice_name": "Albert (M)",
     "split_mode": "Split by Paragraphs",
+    "split_credit_limit": 600,
     "thread_mode": "single",
     "threads": 1,
     "gen_timeout_min": 20,
@@ -14068,10 +14088,44 @@ class VoiceRunner:
         ta = self.find_editor(page)
         self.select_voice(page, voice)
         self.sleep(500, page)
+        limit = int(cfg.get("split_credit_limit", 600) or 0)
+        leftovers = []                                  # je part gulo porer account e generate hobe (order e)
+        cur = text
         self.log("  script paste")
-        # button kokhono "Split & Generate (206 credits)", kokhono shudhu "Split" -- duto-i dhorbe
-        # ("Split by Paragraphs" etc. option card gulo match korbe na)
-        split_btn = page.get_by_role("button", name=re.compile(r"^\s*Split\s*(&\s*Generate.*)?$", re.I)).first
+        self._paste_script(page, ta, cur)
+        credits = self._prep_split(page)
+        while limit and credits and credits > limit:
+            halves = split_script_half(cur)
+            if not halves:
+                self.log(f"  {credits} credits (limit {limit}) kintu ekta-i line — vag kora gelo na, ei vabei cholbe")
+                break
+            first, rest = halves
+            self.log(f"  {credits} credits > {limit} — script line hishebe adha korlam "
+                     f"(ei account e prothom ongsho, baki porer account e)")
+            leftovers.insert(0, rest)
+            cur = first
+            self._cancel_split_dialog(page)
+            ta = self.find_editor(page)
+            self._clear_editor(page, ta)
+            self._paste_script(page, ta, cur)
+            credits = self._prep_split(page)
+        split_btn = self._split_btn(page)
+        try:
+            lbl = (split_btn.inner_text(timeout=3000) or "").strip()
+        except Exception:
+            lbl = ""
+        split_btn.click()
+        self.log(f"  {lbl.splitlines()[0] if lbl else 'Split & Generate'}")
+        self.wait_generation(page)
+        self.export_and_download(page, out_mp3)
+        return leftovers
+
+    def _split_btn(self, page):
+        # button kokhono "Split & Generate (206 credits)", kokhono shudhu "Split"
+        return page.get_by_role("button", name=re.compile(r"^\s*Split\s*(&\s*Generate.*)?$", re.I)).first
+
+    def _paste_script(self, page, ta, text):
+        split_btn = self._split_btn(page)
         ta.click()
         try:
             page.evaluate("t => navigator.clipboard.writeText(t)", text)
@@ -14081,13 +14135,85 @@ class VoiceRunner:
             ta.click()
             ta.fill(text)
             split_btn.wait_for(timeout=15000)
-        mode = cfg.get("split_mode")
+
+    def _clear_editor(self, page, ta):
+        for _ in range(2):
+            try:
+                ta.click()
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.wait_for_timeout(500)
+                if len((ta.inner_text(timeout=2000) or "").strip()) < 20:
+                    return
+            except Exception:
+                pass
+
+    def _cancel_split_dialog(self, page):
+        try:
+            page.get_by_role("button", name="Cancel", exact=True).first.click(timeout=3000)
+        except Exception:
+            page.keyboard.press("Escape")
+        page.wait_for_timeout(800)
+
+    def _close_credit_popup(self, page):
+        """'You ran out of credits...' popup ashle cross (X) e click kore bondho kore. Buy/Continue button chapbe na."""
+        page.wait_for_timeout(1200)
+        if not self.credit_popup(page):
+            return False
+        self.log("  'ran out of credits' popup — cross e click kore bondho korchi")
+        head = page.get_by_text(re.compile(r"^\s*With .*Plan, you get", re.I)).first
+        strategies = (
+            lambda: head.locator("xpath=following::button[1]"),
+            lambda: head.locator("xpath=ancestor::div[.//button][1]").locator("button").first,
+            lambda: page.get_by_role("button", name=re.compile(r"close", re.I)).last,
+        )
+        for mk in strategies:
+            try:
+                btn = mk()
+                txt = ((btn.inner_text(timeout=1500) or "").strip()
+                       + " " + (btn.get_attribute("aria-label", timeout=1500) or "")).strip()
+                if txt and not re.fullmatch(r"(?i)(x|\u00d7|\u2715|\u2716|close)", txt.replace("Close", "close").strip()) \
+                        and not re.search(r"(?i)close", txt):
+                    continue                            # X na — onno button (Continue/Buy) hote pare, chapbo na
+                btn.click(timeout=3000)
+                page.wait_for_timeout(800)
+                if not self.credit_popup(page):
+                    self.log("  popup bondho holo")
+                    return True
+            except Exception:
+                continue
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(800)
+        if self.credit_popup(page):
+            self.log("  popup bondho korte parlam na (continue korchi)")
+            return False
+        return True
+
+    def _read_credits(self, page):
+        try:
+            m = re.search(r"\(\s*([\d,\.]+)\s*credits?\s*\)", self._split_btn(page).inner_text(timeout=2500) or "", re.I)
+            if m:
+                return int(re.sub(r"[^\d]", "", m.group(1).split(".")[0]))
+        except Exception:
+            pass
+        try:
+            body = page.inner_text("body", timeout=2500)
+            m = re.search(r"Expected credit usage:\s*([\d,]+)", body, re.I)
+            if m:
+                return int(m.group(1).replace(",", ""))
+        except Exception:
+            pass
+        return None
+
+    def _prep_split(self, page):
+        """Popup bondho -> split mode + 'Generate speech immediately' tick -> button er credit number pore return."""
+        self._close_credit_popup(page)
+        mode = self.cfg.get("split_mode")
         if mode:
             try:
                 page.get_by_text(mode, exact=True).first.click(timeout=3000)
             except Exception:
                 pass
-        # "Generate speech immediately after splitting" checkbox tick kora thakle button "Split & Generate" hoy
         try:
             cb = page.get_by_role("checkbox", name=re.compile(r"Generate speech immediately", re.I)).first
             if cb.count() and not cb.is_checked():
@@ -14099,14 +14225,14 @@ class VoiceRunner:
                 page.wait_for_timeout(400)
             except Exception:
                 pass
-        try:
-            lbl = (split_btn.inner_text(timeout=3000) or "").strip()
-        except Exception:
-            lbl = ""
-        split_btn.click()
-        self.log(f"  {lbl.splitlines()[0] if lbl else 'Split & Generate'}")
-        self.wait_generation(page)
-        self.export_and_download(page, out_mp3)
+        credits = None
+        for _ in range(6):
+            credits = self._read_credits(page)
+            if credits is not None:
+                break
+            page.wait_for_timeout(500)
+        self.log(f"  credit dekhacche: {credits if credits is not None else 'pai nai'}")
+        return credits
 
     def select_voice(self, page, voice=None):
         name = (voice or self.cfg.get("voice_name") or "Albert (M)").strip() or "Albert (M)"
@@ -14458,9 +14584,8 @@ class VoiceRunner:
             raise RuntimeError("SRT download thik hoyni")
         self.log(f"  SRT saved: {out_srt}")
 
-    def do_speechify(self, text, mp3, voice=None):
-        if self.cfg.get("vpn_disconnect_after", True):
-            self.vpn_disconnect()
+    def _speechify_chunk(self, text, out_mp3, voice=None):
+        """Ekta chunk ke ekta account e generate kore out_mp3 te rakhe. Return: je ongsho gulo baki (porer account e)."""
         skipped = set()
         for attempt in range(int(self.cfg["max_account_tries"])):
             self.check_stop()
@@ -14470,9 +14595,9 @@ class VoiceRunner:
             page = self.new_page()
             try:
                 self._cur_acct = acct[2]
-                self.speechify(page, acct[0], acct[1], text, mp3, voice)
+                left = self.speechify(page, acct[0], acct[1], text, out_mp3, voice)
                 self.mark_used(acct[2])
-                return
+                return left or []
             except VoiceStopped:
                 self.release_account(acct[2])
                 raise
@@ -14484,6 +14609,33 @@ class VoiceRunner:
             finally:
                 self.close_page(page)
         raise RuntimeError("Speechify e sob chesta fail")
+
+    def do_speechify(self, text, mp3, voice=None):
+        if self.cfg.get("vpn_disconnect_after", True):
+            self.vpn_disconnect()
+        base = os.path.splitext(os.path.basename(mp3))[0].lstrip(".")
+        parts_dir = os.path.join(os.path.dirname(mp3), ".parts_" + base)
+        rm_tree(parts_dir)
+        os.makedirs(parts_dir, exist_ok=True)
+        pending, files, n = [text], [], 0
+        while pending:
+            chunk = pending.pop(0)
+            n += 1
+            part = os.path.join(parts_dir, f"part{n}.mp3")
+            left = self._speechify_chunk(chunk, part, voice)
+            files.append(part)
+            if left:
+                self.log(f"  part {n} download hoyeche — baki {len(left)} ongsho notun account e hobe")
+                pending = left + pending                # ei part er por-i porer ongsho, order thik thakbe
+        if len(files) == 1:
+            os.replace(files[0], mp3)
+        else:
+            self.log(f"  {len(files)} ta part jora lagachhi (part 1 age)")
+            ok, err = merge_audio_files(files, mp3)
+            if not ok:
+                raise RuntimeError("Part jora lagano fail: " + err)
+            self.log("  complete MP3 toiri hoyeche")
+        rm_tree(parts_dir)
 
     def do_srt(self, mp3, srt):
         for attempt in range(int(self.cfg["max_vpn_tries"])):
