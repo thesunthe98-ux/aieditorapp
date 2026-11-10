@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.0.8"
+APP_VERSION = "3.1.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6483,6 +6483,10 @@ ANIM_LOG = os.path.join(ANIM_BASE, "log.txt")
 ANIM_URL = "https://claude.ai/new"
 ANIM_LIM = os.path.join(ANIM_BASE, "limits.json")              # prottek Chrome profile er 5-ghonta window / limit reset somoy
 ANIM_OUT_CFG = os.path.join(ANIM_BASE, "output_dir.json")      # user er select kora Output folder
+ANIM_FIX_PROMPT = os.path.join(ANIM_BASE, "fix_prompt.txt")    # animate thik na hole Claude ke ei prompt jabe
+ANIM_FIX_DEFAULT = "last er ta thik vbe animate hocche na"
+ANIM_MAX_FIX = 2            # ekta file er jonno maximum koybar fix prompt pathabe
+ANIM_CHECK_SECS = 9         # ekta file koto second dhore dekhbe (loop er majhe crash dhorar jonno)
 ANIM_OLD_DEFAULT = (
     "Create a 2D animation scene based on the script below.\n"
     "Style: clean flat 2D cartoon, bright colors, smooth motion, simple backgrounds.\n"
@@ -6597,6 +6601,56 @@ def anim_reset_ts(txt):
         return None
 
 
+def anim_bad_dir(outd):
+    return os.path.join(outd, "_bad")
+
+
+def anim_bad_stash(outd, num, src, why):
+    """Animate thik na file ta (ar karon) alada rakhe — Fix fails e oi file Claude e upload hoy, notun kore generate lage na."""
+    try:
+        d = anim_bad_dir(outd)
+        os.makedirs(d, exist_ok=True)
+        dst = os.path.join(d, f"{num}.html")
+        if os.path.abspath(src) != os.path.abspath(dst):
+            shutil.copyfile(src, dst)
+        atomic_write(os.path.join(d, f"{num}.why.txt"), why or "")
+    except Exception:
+        pass
+
+
+def anim_bad_find(outd, num):
+    """-> (file path, karon) ba None."""
+    f = os.path.join(anim_bad_dir(outd), f"{num}.html")
+    if not os.path.isfile(f):
+        return None
+    try:
+        with open(os.path.join(anim_bad_dir(outd), f"{num}.why.txt"), encoding="utf-8") as fh:
+            why = fh.read().strip()
+    except Exception:
+        why = ""
+    return f, why
+
+
+def anim_bad_clear(outd, num):
+    for fn in (f"{num}.html", f"{num}.why.txt"):
+        try:
+            os.remove(os.path.join(anim_bad_dir(outd), fn))
+        except Exception:
+            pass
+
+
+def anim_find_html(outd, num):
+    """Output folder e ei number er HTML file (thakle)."""
+    try:
+        for fn in os.listdir(outd):
+            m = _ANIM_DONE_RE.match(fn)
+            if m and int(m.group(1)) == num and fn.lower().endswith((".html", ".htm")):
+                return os.path.join(outd, fn)
+    except Exception:
+        pass
+    return None
+
+
 def anim_done_nums(outd):
     """Output folder e kon kon serial number er file (1.html, 2.html ...) already ache."""
     res = set()
@@ -6626,6 +6680,228 @@ class AnimClosed(Exception):
     pass
 
 
+class AnimBad(Exception):
+    """Fix prompt pathiye-o animation thik hoyni."""
+
+
+def anim_unwrap(text):
+    """Claude er '{"language":"html","code":"..."}' wrapper ba ```html fence thakle bhitorer asol HTML ber kore.
+    -> (text, bodle_gelo?)"""
+    t = (text or "").lstrip("\ufeff \t\r\n")
+    if t.startswith("{"):
+        try:
+            d = json.loads(t)
+        except Exception:
+            d = None
+        if isinstance(d, dict):
+            for k in ("code", "html", "content", "text"):
+                v = d.get(k)
+                if isinstance(v, str) and "<" in v and len(v.strip()) > 50:
+                    return v, True
+    m = re.match(r"^```[A-Za-z0-9_-]*[ \t]*\r?\n(.*?)\r?\n?```[ \t\r\n]*$", t, re.S)
+    if m and "<" in m.group(1):
+        return m.group(1), True
+    return text, False
+
+
+def anim_static_check(path):
+    """Browser chhara shohoj check. Wrapper thakle file ta nijei thik kore dey. -> (ok, reason, note)"""
+    try:
+        raw = read_text(path)
+    except Exception as e:
+        return False, f"file pora jayni ({e})", ""
+    note = ""
+    fixed, changed = anim_unwrap(raw)
+    if changed:
+        try:
+            atomic_write(path, fixed)
+            note = "JSON/``` wrapper chhariye file thik kora holo"
+        except Exception as e:
+            return False, f"wrapper chharano gelo na ({e})", ""
+        raw = fixed
+    low = raw.lower()
+    if len(raw.strip()) < 300:
+        return False, "file khub chhoto / khali", note
+    if not re.search(r"<!doctype html|<html|<body|<svg|<canvas|<script", low):
+        return False, "ei file HTML-i na", note
+    if low.count("<script") > low.count("</script"):
+        return False, "code majhpothe kete geche (</script> nei)", note
+    if "<html" in low and "</html>" not in low:
+        return False, "code majhpothe kete geche (</html> nei)", note
+    return True, "", note
+
+
+def _anim_err_text(e):
+    """Browser er pageerror theke 'TypeError: msg (line N)' toiri kore."""
+    try:
+        msg = (str(getattr(e, "message", "") or e).strip().splitlines() or ["error"])[0]
+        name = getattr(e, "name", "") or ""
+        if name and not msg.startswith(name):
+            msg = f"{name}: {msg}"
+        st = str(getattr(e, "stack", "") or "")
+        for ln in st.splitlines()[1:4]:
+            m = re.search(r":(\d+):\d+\)?\s*$", ln)
+            if m:
+                msg += f" (line {m.group(1)})"
+                break
+        return msg[:180]
+    except Exception:
+        return (str(e).strip().splitlines() or ["error"])[0][:150]
+
+
+def anim_claude_reason(why):
+    """Check er fail-er karon (ja app dhorte parse) Claude ke bojhanor jonno English e. Karon na jana thakle "" dey
+    — tokhon shudhu Prompt section er Fix prompt-i jabe."""
+    w = (why or "").strip()
+    if w.startswith("JS error: "):
+        msg, _, tail = w[len("JS error: "):].partition(" \u2014 ")
+        t = f"Detected problem: the page throws a JavaScript error: {msg}. "
+        if "majhpothe" in tail:
+            t += "Because of this error the animation freezes partway through. "
+        else:
+            t += "Because of this error the animation never runs (the screen stays blank or frozen). "
+        return t + "Find the cause of this error, fix it, and reply with the complete updated file."
+    if w.startswith("page load hoyni"):
+        return ("Detected problem: the page did not load properly in a browser. Make sure it is ONE complete, valid, "
+                "self-contained HTML file, then reply with the complete updated file.")
+    if "majhpothe kete geche" in w:
+        return ("Detected problem: the HTML file is cut off / incomplete (a closing tag is missing). "
+                "Reply with the complete file from <!DOCTYPE html> to </html>.")
+    if "HTML-i na" in w or "khub chhoto" in w:
+        return ("Detected problem: the output is not a complete HTML file. "
+                "Reply with the complete, self-contained HTML file.")
+    return ""
+
+
+def _anim_differ(a, b):
+    """Duto screenshot (PNG bytes) er majhe sotti poriborton ache kina."""
+    if a == b:
+        return False
+    try:
+        import io
+        from PIL import Image, ImageChops
+        ia = Image.open(io.BytesIO(a)).convert("L")
+        ib = Image.open(io.BytesIO(b)).convert("L")
+        hist = ImageChops.difference(ia, ib).histogram()
+        changed = sum(hist[16:])
+        return changed >= max(40, ia.size[0] * ia.size[1] * 0.0003)
+    except Exception:
+        return True
+
+
+class AnimChecker:
+    """Headless Chrome e HTML file khule dekhe: JS error ache kina + animation sotti nore kina.
+    Screenshot gulo shudhu RAM e thake — disk e kichui save hoy na, tulona hoye gelei fele dey."""
+
+    def __init__(self, pw):
+        self.pw = pw
+        self.br = None
+
+    def _browser(self):
+        if self.br is not None:
+            try:
+                if self.br.is_connected():
+                    return self.br
+            except Exception:
+                pass
+            self.br = None
+        args = ["--autoplay-policy=no-user-gesture-required", "--mute-audio",
+                "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows", "--hide-scrollbars", "--no-first-run",
+                "--window-position=-32000,-32000", "--window-size=1280,720"]   # check Chrome kokhono screen e ashbe na
+        last = None
+        for kw in ({"channel": "chrome"}, {}):
+            try:
+                self.br = self.pw.chromium.launch(headless=True, args=args, **kw)
+                return self.br
+            except Exception as e:
+                last = e
+        raise RuntimeError("headless Chrome khola jayni: " + (str(last).splitlines() or [""])[0][:100])
+
+    def close(self):
+        try:
+            if self.br is not None:
+                self.br.close()
+        except Exception:
+            pass
+        self.br = None
+
+    def check(self, path, stop=None):
+        """-> (ok, reason).  ok = True (thik) / False (thik na) / None (check-i kora gelo na)."""
+        ok, why, note = anim_static_check(path)
+        if not ok:
+            return False, why
+        try:
+            br = self._browser()
+        except Exception as e:
+            return None, str(e)[:120]
+        import pathlib
+        errs = []
+        ctx = None
+
+        def chk_stop():
+            if stop is not None and stop.is_set():
+                raise AnimStop()
+        try:
+            ctx = br.new_context(viewport={"width": 1280, "height": 720})
+            page = ctx.new_page()
+            page.on("pageerror", lambda e: errs.append(_anim_err_text(e)))
+
+            def snap():
+                chk_stop()
+                return page.screenshot(type="png")
+
+            def wait(ms):
+                chk_stop()
+                page.wait_for_timeout(ms)
+            t0 = time.time()
+            try:
+                page.goto(pathlib.Path(os.path.abspath(path)).as_uri(), wait_until="domcontentloaded", timeout=20000)
+            except Exception as e:
+                return False, "page load hoyni: " + (str(e).splitlines() or [""])[0][:100]
+            wait(300)
+            f1 = snap(); wait(600)
+            f2 = snap(); wait(700)
+            f3 = snap(); wait(900)
+            f4 = snap()
+            moving = (_anim_differ(f1, f2) or _anim_differ(f2, f3) or _anim_differ(f3, f4)
+                      or _anim_differ(f1, f4))
+            how = ""
+            if not moving:                   # kono animation click / key diye shuru hoy kina
+                try:
+                    page.mouse.move(640, 360)
+                    page.mouse.click(640, 360)
+                    page.keyboard.press("Space")
+                except Exception:
+                    pass
+                wait(900)
+                f5 = snap(); wait(700)
+                f6 = snap()
+                moving = _anim_differ(f4, f5) or _anim_differ(f5, f6)
+                if moving:
+                    how = "click/key dile animate hoy (auto-play na)"
+            if not moving:
+                if errs:
+                    return False, "JS error: " + errs[0] + " — tai animation chole na"
+                return False, "animation nore na (shob frame ek-i, frozen/blank)"
+            while time.time() - t0 < ANIM_CHECK_SECS:      # loop er sheshe/majhe crash hoy kina dekhi
+                wait(400)
+            warn = ""
+            if errs:
+                x = snap(); wait(800)
+                y = snap()
+                if not _anim_differ(x, y):
+                    return False, "JS error: " + errs[0] + " — animation majhpothe thambe geche"
+                warn = "JS warning: " + errs[0]
+            return True, "; ".join(z for z in (note, how, warn) if z)
+        finally:
+            if ctx is not None:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+
+
 class AnimHub:
     """Shob thread er shared state. Ekta 'task' = ekta prompt box (tar baki prompt gulo) = ekta chat."""
 
@@ -6645,6 +6921,7 @@ class AnimHub:
         self.profs = []            # shob Chrome profile (pool) — thread er cheye beshi thakte pare
         self.claimed = set()       # ekhon kon profile kono thread e use hocche
         self.bad = set()           # login nei / window bondho — ei run e baad
+        self.fix_prompt = ""       # animation thik na hole Claude ke ja pathabe (Prompt section er Fix prompt box)
 
     def pick_profile(self):
         """-> (profile | None, hopeless). Limit nei + kono thread e use hocche na + onno Chrome e khola nei emon profile."""
@@ -6679,6 +6956,9 @@ class AnimHub:
             return ("Shob free profile limit e / byasto — shobcheye age reset: "
                     + time.strftime("%I:%M %p", time.localtime(min(ups))) + " (tokhon oi profile nijei kaj dhorbe)")
         return "Free Chrome profile nei (onno Chrome e khola / byasto) — opekkha korchhi"
+
+    def fix_text(self):
+        return (self.fix_prompt or "").strip() or ANIM_FIX_DEFAULT
 
     def first_prompt(self):
         """Prompt section er prompt — prottek notun chat e age eta jay (box prompt pore)."""
@@ -6741,6 +7021,7 @@ class AnimWorker:
         self.tag = f"T{idx + 1}"
         self.pw = self.ctx = self.page = None
         self._nmsg = 0
+        self._chk = None           # animation checker (headless Chrome), lazily toiri hoy
 
     def log(self, m, lv="info"):
         self.hub.log(f"[{self.tag}] {m}", lv)
@@ -6773,6 +7054,7 @@ class AnimWorker:
                     self._session()
                 finally:
                     self._retire()
+                    self._chk_close()
         except AnimStop:
             self.log("Stop hoyeche", "warn")
         except Exception as e:
@@ -7080,19 +7362,24 @@ class AnimWorker:
             hub.set_status(job, "run")
             t0 = time.time()
             try:
-                if fresh:
-                    self._goto_new()
-                    if first:
-                        self.log("new chat — Prompt section er prompt pathano hocche")
-                        self._say(first)
-                        self._wait(random.randint(1500, 3000))
-                        self.log("Response shesh — ebar box er prompt pathano hocche")
-                    fresh = False
-                job["_cards0"] = self._card_count()          # ei prompt pathanor age chat e koyta artifact card chhilo
-                self._say(job["text"])
-                self.log("Claude file toiri shesh koreche — download hocche")
-                self._wait(1500)
-                self._grab(job)
+                if job.get("repair") and os.path.isfile(job["repair"]):
+                    dest = self._repair_job(job, label)       # bad file upload kore fix — notun kore generate na
+                    fresh = True                              # porer prompt notun chat + Prompt section diye shuru
+                else:
+                    if fresh:
+                        self._goto_new()
+                        if first:
+                            self.log("new chat — Prompt section er prompt pathano hocche")
+                            self._say(first)
+                            self._wait(random.randint(1500, 3000))
+                            self.log("Response shesh — ebar box er prompt pathano hocche")
+                        fresh = False
+                    job["_cards0"] = self._card_count()          # ei prompt pathanor age chat e koyta artifact card chhilo
+                    self._say(job["text"])
+                    self.log("Claude file toiri shesh koreche — download hocche")
+                    self._wait(1500)
+                    dest = self._grab(job)
+                self._check_fix(job, label, dest)
             except AnimLimit as ex:
                 if ex.args and ex.args[0] == "pre":
                     hub.give_back(task, job)
@@ -7100,17 +7387,29 @@ class AnimWorker:
                     raise
                 job["limit_hits"] = job.get("limit_hits", 0) + 1
                 if job["limit_hits"] >= 2:
+                    self._drop_bad(job)
                     hub.add_failed()
-                    hub.set_status(job, "fail")
-                    self.log(f"{label} FAIL — por por 2 ta Chrome e limit, ei prompt skip kora holo", "err")
+                    hub.set_status(job, "imp")
+                    self.log(f"{label} \U0001f6ab limit-e generate possible hoyni (new Chrome/account e-o limit shesh hoye gese) "
+                             f"\u2014 skip kora holo, manually korte hobe", "err")
                 else:
                     hub.give_back(task, job)
                     hub.set_status(job, "queued")
                 raise
             except (AnimStop, AnimLogin, AnimClosed):
+                self._drop_bad(job)
                 hub.give_back(task, job)
                 hub.set_status(job, "queued")
                 raise
+            except AnimBad as ex:
+                self._drop_bad(job, str(ex))
+                hub.add_failed()
+                hub.set_status(job, "fail")
+                self.log(f"{label} FAIL — {ANIM_MAX_FIX} bar fix prompt diye-o animation thik hoyni ({ex}). "
+                         f"File bad dewa holo, porer prompt e jachhi", "err")
+                fresh = True
+                self._wait(3000)
+                continue
             except Exception as e:
                 job["attempts"] += 1
                 fresh = True
@@ -7125,6 +7424,7 @@ class AnimWorker:
                 self._wait(3000)
                 continue
             hub.add_done()
+            anim_bad_clear(job["out"], job["num"])           # fix hoye gese — alada rakha bad file dorkar nei
             try:
                 self.__dict__.setdefault("_closed_hits", {}).pop(self.prof["dir"], None)
             except Exception:
@@ -7132,6 +7432,168 @@ class AnimWorker:
             hub.set_status(job, "done")
             self.log(f"{label} \u2713 download hoyeche ({int(time.time() - t0)}s)", "ok")
             self._wait(random.randint(3000, 6000))
+
+    # ───── animation check + fix prompt ─────
+    def _chk_close(self):
+        try:
+            if self._chk is not None:
+                self._chk.close()
+        except Exception:
+            pass
+        self._chk = None
+
+    def _verify(self, dest):
+        """Download howa file headless Chrome e khule check kore. -> (True/False/None, reason)"""
+        if os.path.splitext(dest or "")[1].lower() not in (".html", ".htm"):
+            return True, ""
+        try:
+            if self._chk is None:
+                self._chk = AnimChecker(self.pw)
+            return self._chk.check(dest, self.hub.stop)
+        except AnimStop:
+            raise
+        except Exception as e:
+            return None, (str(e).splitlines() or ["check error"])[0][:100]
+
+    def _drop_bad(self, job, why=None):
+        """Check e fail kora file muchhe dey — jate porer Start e 'done' dhore skip na kore.
+        why dile (file sotti-i bad) age alada kore rakhe — Fix fails e eta Claude e upload hobe."""
+        p = job.pop("_bad_dest", None)
+        if p:
+            if why and os.path.isfile(p):
+                anim_bad_stash(job["out"], job["num"], p, why)
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+    def _attach(self, path):
+        """Claude chat e file attach kore, upload shesh howa porjonto opekkha kore."""
+        page = self.page
+        name = os.path.basename(path)
+        done = False
+        try:
+            page.locator("input[type=file]").first.set_input_files(path, timeout=8000)
+            done = True
+        except Exception:
+            pass
+        if not done:
+            for mk in (lambda: page.locator('button[aria-label*="attach" i], button[aria-label*="upload" i], '
+                                            'button[aria-label*="add files" i]').first,
+                       lambda: page.locator('button[data-testid*="plus" i], button[aria-label*="Add" i]').first):
+                try:
+                    btn = mk()
+                    if not btn.is_visible():
+                        continue
+                    with page.expect_file_chooser(timeout=6000) as fc:
+                        btn.click(timeout=3000)
+                        try:      # menu ashle 'Upload a file' item e click
+                            page.get_by_text(re.compile(r"^\s*Upload (a )?files?", re.I)).first.click(timeout=2500)
+                        except Exception:
+                            pass
+                    fc.value.set_files(path)
+                    done = True
+                    break
+                except Exception:
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+        if not done:
+            raise RuntimeError("file upload korar button paoa jayni")
+        for _ in range(40):                      # file er naam chat box e dekha jawa porjonto
+            self._wait(1000)
+            try:
+                if page.get_by_text(name).first.is_visible():
+                    break
+            except Exception:
+                pass
+        self._wait(2500)                         # upload shesh howar jonno ektu beshi somoy
+        self.log(f"  file upload hoyeche: {name}", "ok")
+
+    def _repair_job(self, job, label):
+        """Notun chat e bad HTML file upload kore + Fix prompt + karon pathay. Claude thik kora file dey."""
+        hub = self.hub
+        path, why = job["repair"], job.get("why") or ""
+        self.log(f"{label} bad file Claude e upload kore fix korchi (notun kore generate na — credit/somoy bachbe)", "info")
+        self._goto_new()
+        self._attach(path)
+        msg = hub.fix_text() + f"\n\n(The HTML file with the problem is attached: {os.path.basename(path)})"
+        extra = anim_claude_reason(why)
+        msg += "\n\n" + (extra or
+                          "Read the attached code carefully and find the exact cause of the problem (timing, easing, a state "
+                          "that never updates, a missing draw call, an error, etc.). Fix only that problem and keep everything "
+                          "else (story, characters, design) exactly the same.")
+        msg += ("\n\nIMPORTANT: Do not explain and do not paste the code in the chat. Create the complete fixed animation "
+                "as ONE self-contained HTML artifact (a real file I can download), from <!DOCTYPE html> to </html>.")
+        self.log("  karon dhora porche — Fix prompt er sathe karon-o pathachhi" if extra
+                 else "  karon dhora jayni — shudhu tomar Fix prompt + file pathachhi", "info")
+        job["_cards0"] = c0 = self._card_count()
+        self._say(msg)
+        if self._card_count() <= c0:                      # Claude file na bonaye chat e code likhle
+            full = False
+            try:
+                full = any("</html>" in c.lower() for c in self._codes())
+            except Exception:
+                pass
+            if not full:
+                self.log("  Claude file toiri kore ni (chat e likhche) — file banate bolchi", "warn")
+                job["_cards0"] = self._card_count()
+                self._say("Please do not write the code in the chat. Create the complete fixed HTML as an artifact "
+                          "(a downloadable file), from <!DOCTYPE html> to </html>, with no explanation.")
+        self.log("Claude file thik kore dilo — download hocche")
+        self._wait(1500)
+        return self._grab(job)
+
+    def _check_fix(self, job, label, dest):
+        """File check kore. Thik na hole Prompt section er Fix prompt Claude ke pathay (max ANIM_MAX_FIX bar),
+        notun file nie abar check kore. Tarpor-o thik na hole AnimBad uthe (file bad)."""
+        hub = self.hub
+        if not dest:
+            return dest
+        ok, why = self._verify(dest)
+        if ok is None:
+            self.log(f"  animation check kora gelo na ({why}) — file ta rekhe dilam", "warn")
+        elif ok:
+            self.log("  animation check \u2713" + (f" ({why})" if why else ""), "ok")
+        for fx in range(1, ANIM_MAX_FIX + 1):
+            if ok is not False:
+                break
+            job["_bad_dest"] = dest
+            self.log(f"  {label} animate thik na: {why} \u2014 fix prompt pathachhi ({fx}/{ANIM_MAX_FIX})", "warn")
+            job["_cards0"] = self._card_count()
+            job["_fix"] = True
+            fix_msg = hub.fix_text()
+            extra = anim_claude_reason(why)
+            if extra:                                   # karon dhora gele prompt er niche jure dey
+                fix_msg = fix_msg + "\n\n" + extra
+                self.log("  karon dhora porche \u2014 Fix prompt er sathe karon-o pathachhi", "info")
+            else:
+                self.log("  karon dhora jayni \u2014 shudhu tomar Fix prompt pathachhi", "info")
+            d2 = None
+            try:
+                self._say(fix_msg)
+                self._wait(1500)
+                d2 = self._grab(job)
+            except (AnimStop, AnimLimit, AnimLogin, AnimClosed):
+                raise
+            except Exception as e:
+                self.log(f"  fix er por file download hoyni ({e})", "warn")
+            finally:
+                job.pop("_fix", None)
+            if d2:
+                dest = d2
+                job["_bad_dest"] = dest
+                ok, why = self._verify(dest)
+                if ok:
+                    self.log("  fix er por animation check \u2713" + (f" ({why})" if why else ""), "ok")
+            else:
+                why = "fix er por notun file paoa jayni"
+        if ok is False:
+            raise AnimBad(why)
+        job.pop("_bad_dest", None)
+        return dest
 
     def _say(self, text):
         self._dismiss_popups()
@@ -7729,14 +8191,14 @@ class AnimWorker:
         os.makedirs(job["out"], exist_ok=True)
         cards0 = job.get("_cards0")
         # 1) ei prompt er notun artifact card ashar opekkha (chat e purono file thakle seta jeno download na hoy)
-        for _ in range(20):
+        for _ in range(10 if job.get("_fix") else 20):
             if cards0 is not None and self._card_count() > cards0:
                 break
             if cards0 is None and (self._export_btn() or self._art_card() or self._file_dl_btn()):
                 break
             self._wait(1500)
         now = self._card_count()
-        stale = cards0 is not None and now > 0 and now <= cards0
+        stale = cards0 is not None and now > 0 and now <= cards0 and not job.get("_fix")   # fix hole purono artifact-i update hoy
         dest = None
         try:
             if stale:
@@ -7804,6 +8266,10 @@ class Tab3Anim(tk.Frame):
         self._hub = None
         self._logq = queue.Queue()
         self._statq = queue.Queue()
+        self._chkq = queue.Queue()       # "Check animations" er result
+        self._chk_busy = False
+        self._chk_box = None
+        self._chk_done = self._chk_total = 0
         self._spin = 0
         self._bidn = 0
         os.makedirs(ANIM_BASE, exist_ok=True)
@@ -7881,6 +8347,7 @@ class Tab3Anim(tk.Frame):
         try:
             self._save_prompts()
             atomic_write(ANIM_PROMPT, self.prompt_txt.get("1.0", "end-1c"))
+            atomic_write(ANIM_FIX_PROMPT, self.fix_txt.get("1.0", "end-1c"))
         except Exception:
             pass
 
@@ -7905,6 +8372,10 @@ class Tab3Anim(tk.Frame):
         self._out_sync()
         mklabel(f, "\u2630 handle dhore upor-niche tano (upor er box er kaj age) \u00b7 .txt box e drop korle oi box e boshbe, "
                    "baire drop korle notun box hobe", 9, MUTED, anchor="w").pack(fill="x", padx=24, pady=(0, 6))
+        mklabel(f, "\u26aa baki  \u00b7  \U0001f552 queue  \u00b7  \u23f3 cholche  \u00b7  \u2705 done  \u00b7  "
+                   "\u274c fail / animate thik na (Fix fails e abar hobe)  \u00b7  "
+                   "\U0001f6ab limit-e generate hoy ni (manually koro, Fix fails skip korbe)",
+                9, MUTED, anchor="w").pack(fill="x", padx=24, pady=(0, 6))
         self.sf = ScrollFrame(f)
         self.sf.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 14))
         self.empty_lbl = mklabel(self.sf.inner, "Ekhono kono prompt nei.\n'\uff0b Add prompts' chepe prothom box banao.",
@@ -7921,10 +8392,11 @@ class Tab3Anim(tk.Frame):
             if isinstance(d, dict):
                 c = d.get("color")
                 self._add_box(str(d.get("name", "")), str(d.get("text", "")), save=False, focus=False,
-                              color=c if isinstance(c, int) else None)
+                              color=c if isinstance(c, int) else None, marks=d)
 
     def _save_prompts(self):
-        data = [{"name": b["name"].get(), "text": b["txt"].get("1.0", "end-1c"), "color": b["color"]}
+        data = [{"name": b["name"].get(), "text": b["txt"].get("1.0", "end-1c"), "color": b["color"],
+                 "fail": sorted(b["fail"]), "imp": sorted(b["imp"]), "bad": sorted(b["bad"])}
                 for b in self.boxes]
         os.makedirs(ANIM_BASE, exist_ok=True)
         atomic_write(ANIM_PROMPTS, json.dumps(data, ensure_ascii=False, indent=1))
@@ -7963,13 +8435,20 @@ class Tab3Anim(tk.Frame):
             b["frame"].pack(fill="x", pady=(0, 10), padx=(0, 48))   # right e faka — okhane mouse rekhe page scroll hoy
             b["badge"].configure(text=str(i + 1))
 
-    def _add_box(self, name="", text="", save=True, focus=True, color=None):
+    def _add_box(self, name="", text="", save=True, focus=True, color=None, marks=None):
         ci = (color % len(self.BOX_COLORS)) if isinstance(color, int) else self._free_color()
         col = self.BOX_COLORS[ci]
         fr = tk.Frame(self.sf.inner, bg=PANEL, highlightthickness=2, highlightbackground=col, highlightcolor=col)
         self._bidn += 1
         box = {"frame": fr, "name": tk.StringVar(value=name or self._free_name()), "color": ci,
-               "id": self._bidn, "live": {}, "disk": set(), "nums": [], "sig": None}
+               "id": self._bidn, "live": {}, "disk": set(), "bad": set(), "fail": set(), "imp": set(),
+               "nums": [], "sig": None}
+        mk = marks if isinstance(marks, dict) else {}
+        for k_ in ("fail", "imp", "bad"):       # ager run er ❌ / 🚫 mark file theke ferot ashe
+            try:
+                box[k_] = {int(x) for x in (mk.get(k_) or [])}
+            except Exception:
+                box[k_] = set()
         fr._pbox = box
         hd = tk.Frame(fr, bg=PANEL)
         hd.pack(fill="x", padx=12, pady=(10, 6))
@@ -8012,6 +8491,14 @@ class Tab3Anim(tk.Frame):
             stt.bind(ev, lambda e: (self.sf._wheel(e), "break")[1])
         stt.bind("<Configure>", lambda e, b=box: self.after_idle(lambda: self._fit_status(b)))
         box["stt"] = stt
+        act = tk.Frame(sw, bg=PANEL)
+        act.pack(fill="x", pady=(8, 0))
+        box["chk_btn"] = mkbtn(act, "\u2714 Check animations", lambda b=box: self._check_box(b), "ghost", pady=3, padx=12)
+        box["chk_btn"].pack(side="left")
+        box["fix_btn"] = mkbtn(act, "\U0001f527 Fix fails", lambda b=box: self._fix_fails(b), "ghost", pady=3, padx=12)
+        box["fix_btn"].pack(side="left", padx=6)
+        box["chk_lbl"] = mklabel(act, "", 9, MUTED, bg=PANEL)
+        box["chk_lbl"].pack(side="left", padx=8)
         sb.bind("<Button-1>", lambda e, s_=sb, t=txt: self._sb_click(e, s_, t))
         txt.insert("1.0", text)
         txt.edit_reset()
@@ -8147,9 +8634,13 @@ class Tab3Anim(tk.Frame):
         lv = box["live"].get(n)
         if lv == "run":
             return "run"
-        if n in box["disk"] or lv == "done":
+        if n in box["disk"]:
+            return "fail" if (n in box["bad"] and lv != "done") else "done"
+        if lv == "done":
             return "done"
-        if lv == "fail":
+        if n in box["imp"] or lv == "imp":
+            return "imp"                      # limit shesh — new account e-o generate hoyni
+        if lv == "fail" or n in box["fail"]:
             return "fail"
         return "queued" if lv == "queued" else "idle"
 
@@ -8158,6 +8649,10 @@ class Tab3Anim(tk.Frame):
         box["nums"] = [n for n, _ in anim_parse_prompts(txt)] if txt.strip() else []
         outs = outs or self._out_dirs()
         box["disk"] = anim_done_nums(outs.get(box["id"], ""))
+        nset = set(box["nums"])
+        box["bad"] = box["bad"] & box["disk"]
+        box["fail"] = (box["fail"] & nset) - box["disk"]
+        box["imp"] = (box["imp"] & nset) - box["disk"]
         self._render_status(box)
 
     def _status_all(self):
@@ -8193,9 +8688,10 @@ class Tab3Anim(tk.Frame):
                 chips[n] = lb
         cs = box.setdefault("cs", {})
         sym = {"idle": "\u26aa", "queued": "\U0001f552", "run": ("\u23f3", "\u231b"),
-               "done": "\u2705", "fail": "\u274c"}
+               "done": "\u2705", "fail": "\u274c", "imp": "\U0001f6ab"}
         col = {"idle": (PANEL2, MUTED), "queued": (PANEL2, FG), "run": (_mix(PANEL, WARN, 0.3), WARN),
-               "done": (_mix(PANEL, OK, 0.28), OK), "fail": (_mix(PANEL, BAD, 0.3), BAD)}
+               "done": (_mix(PANEL, OK, 0.28), OK), "fail": (_mix(PANEL, BAD, 0.3), BAD),
+               "imp": (_mix(PANEL, "#ff8a3d", 0.3), "#ff8a3d")}
         for n, s_ in zip(nums, st):
             key = (s_, frame if s_ == "run" else 0)
             if cs.get(n) == key:
@@ -8210,6 +8706,9 @@ class Tab3Anim(tk.Frame):
             parts.append(f"\u23f3 {r} processing")
         if f_:
             parts.append(f"\u274c {f_} failed")
+        ni = st.count("imp")
+        if ni:
+            parts.append(f"\U0001f6ab {ni} limit-e hoy ni")
         box["sum"].configure(text="  \u00b7  ".join(parts) if nums else "Prompt nei",
                              fg=OK if (nums and d == len(nums)) else MUTED)
         self._fit_status(box)
@@ -8237,6 +8736,7 @@ class Tab3Anim(tk.Frame):
 
     def _drain_stat(self):
         dirty = set()
+        save = False
         try:
             while True:
                 bid, num, st = self._statq.get_nowait()
@@ -8246,9 +8746,25 @@ class Tab3Anim(tk.Frame):
                 b["live"][num] = st
                 if st == "done":
                     b["disk"].add(num)
+                    b["fail"].discard(num)
+                    b["imp"].discard(num)
+                    b["bad"].discard(num)
+                elif st == "fail":
+                    b["fail"].add(num)
+                    b["imp"].discard(num)
+                elif st == "imp":
+                    b["imp"].add(num)
+                    b["fail"].discard(num)
+                elif st in ("queued", "run"):
+                    b["fail"].discard(num)
+                    b["imp"].discard(num)
+                if st in ("done", "fail", "imp", "queued"):
+                    save = True               # mark file e save — app bondho kore khulleo thakbe
                 dirty.add(bid)
         except queue.Empty:
             pass
+        if save:
+            self._sched("prompts", self._save_prompts)
         self._spin = (self._spin + 1) % 8
         for b in self.boxes:
             if b["id"] in dirty or (self._spin % 2 == 0 and "run" in b["live"].values()):
@@ -8295,15 +8811,50 @@ class Tab3Anim(tk.Frame):
             self._changed()
         self.sf.after(50, lambda: self.sf.cv.yview_moveto(0.0))
 
+    def _box_files_dir(self, box):
+        """Box er Output folder (shudhu jodi Output base er vitore thake ar ache), nahole None."""
+        try:
+            d = self._out_dirs().get(box["id"])
+            if not d or not os.path.isdir(d):
+                return None
+            base = os.path.normcase(os.path.abspath(self._out_base()))
+            dd = os.path.normcase(os.path.abspath(d))
+            if dd == base or not dd.startswith(base + os.sep):
+                return None
+            return d
+        except Exception:
+            return None
+
     def _delete_box(self, box):
-        if box["txt"].get("1.0", "end-1c").strip():
-            if not messagebox.askyesno("Delete", f"'{box['name'].get()}' delete korbo?", parent=self.app):
+        if self._hub is not None:
+            messagebox.showinfo("Delete", "Start cholche — age STOP koro, tarpor box delete koro.", parent=self.app)
+            return
+        fdir = self._box_files_dir(box)
+        try:
+            nfiles = len(os.listdir(fdir)) if fdir else 0
+        except Exception:
+            nfiles = 0
+        if box["txt"].get("1.0", "end-1c").strip() or nfiles:
+            msg = f"'{box['name'].get()}' delete korbo?"
+            if nfiles:
+                msg += f"\n\nOutput folder er {nfiles} ta file-o muchhe jabe:\n{fdir}"
+            if not messagebox.askyesno("Delete", msg, parent=self.app):
                 return
         self.boxes.remove(box)
         box["frame"].destroy()
         self._repack()
         self._refresh_empty()
         self._save_prompts()
+        if fdir and os.path.isdir(fdir):
+            try:
+                rm_tree(fdir)
+            except Exception:
+                pass
+            if os.path.isdir(fdir):
+                self.app.note("Box delete hoyeche kintu folder muchhte parini (file khola ache?)", WARN)
+            else:
+                self.app.note(f"'{box['name'].get()}' + tar Output folder delete hoyeche", OK)
+        self._status_all()
 
     # ───── .txt load / drop ─────
     def _fill_box(self, box, path):
@@ -8617,6 +9168,8 @@ class Tab3Anim(tk.Frame):
             if n > len(profs):
                 msg += f"\nThreads {n} kintu profile {len(profs)} ta — {len(profs)} ta thread cholbe (Chrome section e aro profile add koro)."
                 col = WARN
+            elif npr and n > npr:
+                msg += f"\nThreads {n} kintu prompt {npr} ta — shudhu {npr} ta Chrome khulbe."
             self.info_lbl.configure(text=msg, fg=col)
         except Exception:
             pass
@@ -8661,6 +9214,7 @@ class Tab3Anim(tk.Frame):
         try:
             self._drain_log()
             self._drain_stat()
+            self._drain_chk()
             self._lim_tick = getattr(self, "_lim_tick", 0) + 1
             if self._lim_tick % 25 == 0:
                 self._refresh_limits()
@@ -8704,50 +9258,76 @@ class Tab3Anim(tk.Frame):
             pass
 
     # ───── start / stop ─────
-    def _collect(self):
+    def _collect(self, only=None, regen=False):
         profs = [p for p in self.chrome_profiles if os.path.isdir(p["dir"])]
         if not profs:
             messagebox.showwarning("Start", "Kono Chrome profile nei.\n\nChrome section e '\uff0b Add new chrome' chepe profile "
                                             "baniye claude.ai e login koro.", parent=self.app)
             return None
-        tasks, total, skipped = [], 0, 0
+        tasks, total, skipped, nimp = [], 0, 0, 0
         outs = self._out_dirs()
         for b in self.boxes:
+            if only is not None and b is not only:
+                continue
             outd = outs[b["id"]]
             have = anim_done_nums(outd)
+            if regen:
+                have = have - b["bad"]            # animate thik na file gulo-o abar hobe
             items = []
             for num, t in anim_parse_prompts(b["txt"].get("1.0", "end-1c")):
                 total += 1
                 if num in have:
                     skipped += 1
                     continue
-                items.append({"box": b["name"].get().strip() or anim_safe(b["name"].get()), "num": num, "text": t,
-                              "out": outd, "attempts": 0, "bid": b["id"]})
+                if regen and num in b["imp"]:
+                    nimp += 1                      # limit-impossible — Fix fails e skip
+                    continue
+                it = {"box": b["name"].get().strip() or anim_safe(b["name"].get()), "num": num, "text": t,
+                      "out": outd, "attempts": 0, "bid": b["id"]}
+                if regen:                          # age-r bad file thakle seta Claude e upload kore fix hobe
+                    rp = anim_bad_find(outd, num)
+                    if rp:
+                        it["repair"], it["why"] = rp
+                    elif num in b["bad"]:
+                        f0 = anim_find_html(outd, num)
+                        if f0:
+                            it["repair"], it["why"] = f0, ""
+                items.append(it)
             if items:
                 tasks.append({"bid": b["id"], "box": b["name"].get().strip(), "out": outd, "items": items})
         if total == 0:
-            messagebox.showwarning("Start", "'2D Animation' section e kono prompt nei.", parent=self.app)
+            messagebox.showwarning("Start", "Ei box e kono prompt nei." if only is not None
+                                   else "'2D Animation' section e kono prompt nei.", parent=self.app)
             return None
         if not tasks:
-            messagebox.showinfo("Start", "Shob prompt-ei age thekei Output e ache (done).\n\nAbar notun kore korte chaile "
-                                         "Output folder er oi file gulo muchhe dao.", parent=self.app)
+            if regen:
+                messagebox.showinfo("Fix fails", "Regenerate korar moto kichu nei." + (
+                    f"\n\n\U0001f6ab {nimp} ta prompt limit-e generate hoy ni \u2014 oigulo manually koro." if nimp else ""),
+                    parent=self.app)
+            else:
+                messagebox.showinfo("Start", "Shob prompt-ei age thekei Output e ache (done).\n\nAbar notun kore korte chaile "
+                                             "Output folder er oi file gulo muchhe dao.", parent=self.app)
             return None
-        return profs, tasks, skipped
+        return profs, tasks, skipped, nimp
 
-    def _start(self):
+    def _start(self, only=None, regen=False):
         if self._hub is not None:
             return
+        if self._chk_busy:
+            self.app.note("Check cholche \u2014 shesh hole Start koro", WARN)
+            return
         self._flush()
-        got = self._collect()
+        got = self._collect(only, regen)
         if got is None:
             return
-        profs, tasks, skipped = got
+        profs, tasks, skipped, nimp = got
         n = int(self.thr_var.get())
         hidden = bool(getattr(self.app, "_voice_chrome_hidden", False))
         hub = AnimHub(tasks, self.full_template(), hidden, self._logq)
         hub.skipped = skipped
         hub.statq = self._statq
         hub.profs = list(profs)
+        hub.fix_prompt = self.fix_text()
         for b in self.boxes:
             b["live"] = {}
         for t in tasks:
@@ -8757,9 +9337,59 @@ class Tab3Anim(tk.Frame):
         self.pbar["value"] = 0
         self._set_running(True)
         self.run_lbl.configure(text="Starting\u2026", fg=ACCENT)
-        self._log(f"Start: {hub.total} ta prompt, {len(tasks)} ta box" +
-                  (f" ({skipped} ta age-i done, skip)" if skipped else "") + f", threads {n}", "ok")
+        self._log((f"Fix fails [{only['name'].get()}]: " if regen else "Start: ") +
+                  f"{hub.total} ta prompt, {len(tasks)} ta box" +
+                  (f" ({skipped} ta age-i done, skip)" if skipped else "") +
+                  (f" ({nimp} ta \U0001f6ab limit-impossible skip)" if nimp else "") + f", threads {n}", "ok")
         threading.Thread(target=self._launch_all, args=(hub, profs, n), daemon=True).start()
+
+    def _fix_plan(self, box):
+        """Fix fails e kon kon prompt abar hobe. -> (todo nums, bad file koyta, limit-impossible koyta)"""
+        outd = self._out_dirs().get(box["id"], "")
+        have = anim_done_nums(outd) - box["bad"]
+        txt = box["txt"].get("1.0", "end-1c")
+        todo, nbad, nimp = [], 0, 0
+        for num, _t in (anim_parse_prompts(txt) if txt.strip() else []):
+            if num in have:
+                continue
+            if num in box["imp"]:
+                nimp += 1
+                continue
+            todo.append(num)
+            if num in box["bad"]:
+                nbad += 1
+        return todo, nbad, nimp
+
+    def _fix_fails(self, box):
+        """Ei box er j prompt generate hoyni / fail / animate thik na — shegulo abar generate kore.
+        \U0001f6ab (limit-e hoy ni) gulo skip kore, oigulo manually korte hobe."""
+        if self._hub is not None:
+            self.app.note("Start cholche \u2014 shesh hole Fix fails chapo", WARN)
+            return
+        if self._chk_busy:
+            return
+        self._flush()
+        self._status_refresh(box)
+        todo, nbad, nimp = self._fix_plan(box)
+        if not todo:
+            messagebox.showinfo("Fix fails", "Regenerate korar moto kichu nei." + (
+                f"\n\n\U0001f6ab {nimp} ta prompt limit-e generate hoy ni \u2014 oigulo manually koro." if nimp else ""),
+                parent=self.app)
+            return
+        shown = ", ".join(str(x) for x in todo[:15]) + (" \u2026" if len(todo) > 15 else "")
+        msg = f"'{box['name'].get()}' er {len(todo)} ta prompt abar generate hobe:\n{shown}"
+        outd_ = self._out_dirs().get(box["id"], "")
+        nrep = sum(1 for n_ in todo if anim_bad_find(outd_, n_) or (n_ in box["bad"] and anim_find_html(outd_, n_)))
+        if nrep:
+            msg += (f"\n\n{nrep} ta animate-thik-na file Claude e upload kore fix hobe "
+                    f"(notun kore generate hobe na, credit bachbe)")
+        if nbad:
+            msg += f"\n\n({nbad} ta animate-thik-na file replace hobe)"
+        if nimp:
+            msg += f"\n\U0001f6ab {nimp} ta limit-impossible prompt skip hobe (manually korte hobe)"
+        if not messagebox.askyesno("Fix fails", msg + "\n\nShuru korbo?", parent=self.app):
+            return
+        self._start(only=box, regen=True)
 
     def full_template(self):
         return self.prompt_txt.get("1.0", "end-1c")
@@ -8783,10 +9413,12 @@ class Tab3Anim(tk.Frame):
             if not _voice_chrome_exe():
                 hub.log("Google Chrome paoa jayni — Chrome install koro", "err")
                 return
-            want = min(n, len(profs))
+            want = min(n, len(profs), max(1, hub.total))     # prompt er cheye beshi Chrome khola hobe na
             if n > len(profs):
-                hub.log(f"Threads {n} chaoa hoyechhe kintu profile mot {len(profs)} ta — {want} ta Chrome cholbe "
-                        f"(beshi profile add koro).", "warn")
+                hub.log(f"Threads {n} chaoa hoyechhe kintu profile mot {len(profs)} ta — beshi profile add koro.", "warn")
+            if want < min(n, len(profs)):
+                hub.log(f"Prompt mot {hub.total} ta, tai {n} thread er jaygay shudhu {want} ta Chrome khulbo "
+                        f"(beshi Chrome khulle kaj thakbe na).", "info")
             now = time.time()
             for pr in profs:
                 u = anim_lim_until(pr["dir"])
@@ -8811,14 +9443,222 @@ class Tab3Anim(tk.Frame):
         finally:
             hub.launched = True
 
+    # ───── Check animations (prottek box er button — shudhu oi box er file) ─────
+    def _set_chk_buttons(self, enabled):
+        for b in self.boxes:
+            for k in ("chk_btn", "fix_btn"):
+                try:
+                    b[k].configure(state="normal" if enabled else "disabled")
+                except Exception:
+                    pass
+
+    def _check_box(self, box):
+        """Ei box er Output folder er shob HTML file headless Chrome e khule dekhe — Claude lage na, shudhu ei PC te."""
+        if self._chk_busy:
+            return
+        if self._hub is not None:
+            self.app.note("Start cholche \u2014 shesh hole Check koro", WARN)
+            return
+        self._flush()
+        outd = self._out_dirs().get(box["id"], "")
+        try:
+            names = os.listdir(outd)
+        except Exception:
+            names = []
+        files = []
+        for fn in names:
+            m = _ANIM_DONE_RE.match(fn)
+            if m and fn.lower().endswith((".html", ".htm")):
+                files.append((box, int(m.group(1)), os.path.join(outd, fn)))
+        files.sort(key=lambda x: x[1])
+        if not files:
+            messagebox.showinfo("Check", f"'{box['name'].get()}' er Output e kono HTML file nei.", parent=self.app)
+            return
+        self._chk_busy = True
+        self._chk_box = box
+        self._chk_done, self._chk_total = 0, len(files)
+        self._set_chk_buttons(False)
+        box["chk_lbl"].configure(text=f"Checking 0/{len(files)}\u2026", fg=ACCENT)
+        self._log(f"[Check] {box['name'].get()}: {len(files)} ta file check shuru (prottek file e ~{ANIM_CHECK_SECS}s lagbe)", "ok")
+        threading.Thread(target=self._check_run, args=(files,), daemon=True).start()
+
+    def _check_run(self, files):
+        res = [None] * len(files)
+        try:
+            ok, err = _ensure_playwright()
+            if not ok:
+                self._chkq.put(("log", f"[Check] Playwright install hoyni: {err}"))
+                return
+            todo = queue.Queue()
+            for i in range(len(files)):
+                todo.put(i)
+
+            def work():
+                try:
+                    from playwright.sync_api import sync_playwright
+                    with sync_playwright() as pw:
+                        ck = AnimChecker(pw)
+                        try:
+                            while True:
+                                try:
+                                    i = todo.get_nowait()
+                                except queue.Empty:
+                                    return
+                                try:
+                                    r = ck.check(files[i][2])
+                                except Exception as e:
+                                    r = (None, "check error: " + (str(e).splitlines() or [""])[0][:100])
+                                res[i] = r
+                                self._chkq.put(("one", i))
+                        finally:
+                            ck.close()
+                except Exception as e:
+                    self._chkq.put(("log", f"[Check] worker error: {e}"))
+            ths = [threading.Thread(target=work, daemon=True) for _ in range(min(3, len(files)))]
+            for t in ths:
+                t.start()
+            for t in ths:
+                t.join()
+        finally:
+            self._chkq.put(("done", files, res))
+
+    def _drain_chk(self):
+        try:
+            while True:
+                it = self._chkq.get_nowait()
+                if it[0] == "one":
+                    self._chk_done += 1
+                    try:
+                        self._chk_box["chk_lbl"].configure(text=f"Checking {self._chk_done}/{self._chk_total}\u2026", fg=ACCENT)
+                    except Exception:
+                        pass
+                elif it[0] == "log":
+                    self._log(it[1], "err")
+                elif it[0] == "done":
+                    self._finish_check(it[1], it[2])
+        except queue.Empty:
+            pass
+
+    def _finish_check(self, files, res):
+        box = self._chk_box
+        self._chk_busy = False
+        self._set_chk_buttons(True)
+        rows = list(zip(files, res))
+        bad = [(b, n, p, r[1]) for (b, n, p), r in rows if r and r[0] is False]
+        good = [(b, n, p, r[1]) for (b, n, p), r in rows if r and r[0] is True]
+        unk = [(b, n, p, (r[1] if r else "check hoyni")) for (b, n, p), r in rows if not r or r[0] is None]
+        if box in self.boxes:
+            definite = {n for _b, n, _p, _w in bad + good}
+            box["bad"] = (box["bad"] - definite) | {n for _b, n, _p, _w in bad}
+            self._save_prompts()
+        for b, n, p, why in bad:
+            try:
+                anim_bad_stash(os.path.dirname(p), n, p, why)
+            except Exception:
+                pass
+            self._log(f"[Check] \u274c {b['name'].get()} #{n} \u2014 {why}", "err")
+        for b, n, p, why in good:
+            anim_bad_clear(os.path.dirname(p), n)
+            if why:
+                self._log(f"[Check] \u2705 {b['name'].get()} #{n} \u2014 {why}", "ok")
+        for b, n, p, why in unk:
+            self._log(f"[Check] \u26a0 {b['name'].get()} #{n} \u2014 check kora jayni: {why}", "warn")
+        self._log(f"[Check] shesh \u2014 \u2705 {len(good)} ok, \u274c {len(bad)} thik na, \u26a0 {len(unk)} check hoyni",
+                  "warn" if (bad or unk) else "ok")
+        try:
+            box["chk_lbl"].configure(text=f"\u2705 {len(good)}  \u274c {len(bad)}" + (f"  \u26a0 {len(unk)}" if unk else ""),
+                                     fg=BAD if bad else OK)
+        except Exception:
+            pass
+        self._status_all()
+        self._show_check_result(good, bad, unk)
+
+    def _show_check_result(self, good, bad, unk):
+        win = tk.Toplevel(self.app)
+        win.title("Animation check")
+        win.configure(bg=BG)
+        win.geometry("780x520")
+        try:
+            win.transient(self.app)
+        except Exception:
+            pass
+        mklabel(win, f"\u2705 {len(good)} ta ok   \u00b7   \u274c {len(bad)} ta thik na   \u00b7   \u26a0 {len(unk)} ta check hoyni",
+                11, BAD if bad else OK, True, bg=BG, anchor="w").pack(fill="x", padx=16, pady=(14, 6))
+        body = tk.Frame(win, bg=LOG_BG)
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        sb = ttk.Scrollbar(body, orient="vertical")
+        t = tk.Text(body, bg=LOG_BG, fg=LOG_FG, font=(MONO, 10), relief="flat", bd=0, wrap="word", padx=10, pady=8,
+                    highlightthickness=0, yscrollcommand=sb.set)
+        sb.configure(command=t.yview)
+        sb.pack(side="right", fill="y")
+        t.pack(side="left", fill="both", expand=True)
+        for tg, col in (("ok", OK), ("warn", WARN), ("err", BAD), ("dim", MUTED)):
+            t.tag_configure(tg, foreground=col)
+        for b, n, p, why in bad:
+            t.insert("end", f"\u274c {b['name'].get()}  #{n}.html\n", "err")
+            t.insert("end", f"     {why}\n", "dim")
+        for b, n, p, why in unk:
+            t.insert("end", f"\u26a0 {b['name'].get()}  #{n}.html \u2014 check hoyni ({why})\n", "warn")
+        for b, n, p, why in good:
+            t.insert("end", f"\u2705 {b['name'].get()}  #{n}.html" + (f"  ({why})" if why else "") + "\n", "ok")
+        t.configure(state="disabled")
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", padx=16, pady=(0, 14))
+        if bad:
+            mkbtn(row, "\U0001f5d1 Bad file gulo delete koro", lambda: self._delete_bad(bad, win), "danger",
+                  pady=6, padx=14).pack(side="left")
+            mklabel(row, "(tarpor box er 'Fix fails' chaple abar notun kore hobe)", 9, MUTED, bg=BG).pack(side="left", padx=10)
+        mkbtn(row, "Close", win.destroy, "ghost", pady=6, padx=14).pack(side="right")
+
+    def _delete_bad(self, bad, win):
+        if self._hub is not None:
+            messagebox.showinfo("Delete", "Start cholche — shesh hole delete koro.", parent=win)
+            return
+        if not messagebox.askyesno("Delete", f"{len(bad)} ta bad file delete korbo?", parent=win):
+            return
+        n = 0
+        for b, num, p, why in bad:
+            try:
+                os.remove(p)
+                n += 1
+            except Exception:
+                pass
+            if b in self.boxes:
+                b["bad"].discard(num)
+        self._save_prompts()
+        self._status_all()
+        self.app.note(f"{n} ta bad file delete hoyeche", OK)
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
     # ───── Prompt ─────
     def _build_prompt(self, f):
         self.app.header(f, "Prompt", "Prottek notun chat e age ei prompt jabe, response shesh hole box er prompt jabe")
         bar = tk.Frame(f, bg=BG)
         bar.pack(fill="x", padx=22, pady=(0, 8))
         mkbtn(bar, "Reset to default", self._reset_prompt, "ghost", pady=3, padx=12).pack(side="right")
+        # Fix prompt box (niche) — age pack(bottom), jate uporer boro prompt box expand hoye baki jayga ney
+        fw = tk.Frame(f, bg=PANEL)
+        fw.pack(side="bottom", fill="x", padx=22, pady=(0, 18))
+        fh = tk.Frame(f, bg=BG)
+        fh.pack(side="bottom", fill="x", padx=22, pady=(6, 6))
+        mklabel(fh, "\U0001f527 Fix prompt \u2014 animation thik na hole Claude ke ei prompt jabe (max "
+                    f"{ANIM_MAX_FIX} bar)", 10, FG, True, bg=BG).pack(side="left")
+        mkbtn(fh, "Reset", self._reset_fix, "ghost", pady=2, padx=10).pack(side="right")
+        self.fix_txt = mktext(fw, height=3)
+        self.fix_txt.pack(fill="x")
+        curf = self._rd(ANIM_FIX_PROMPT)
+        if not curf.strip():
+            curf = ANIM_FIX_DEFAULT
+            atomic_write(ANIM_FIX_PROMPT, curf)
+        self.fix_txt.insert("1.0", curf)
+        self.fix_txt.edit_reset()
+        self.fix_txt.edit_modified(False)
+        self.fix_txt.bind("<<Modified>>", self._fix_mod)
         wrap = tk.Frame(f, bg=PANEL)
-        wrap.pack(fill="both", expand=True, padx=22, pady=(0, 18))
+        wrap.pack(fill="both", expand=True, padx=22, pady=(0, 10))
         self.prompt_txt = mktext(wrap)
         self.prompt_txt.pack(fill="both", expand=True)
         cur = self._rd(ANIM_PROMPT)
@@ -8835,6 +9675,19 @@ class Tab3Anim(tk.Frame):
             return
         self.prompt_txt.edit_modified(False)
         self._sched("prompt", lambda: atomic_write(ANIM_PROMPT, self.prompt_txt.get("1.0", "end-1c")))
+
+    def _fix_mod(self, e=None):
+        if not self.fix_txt.edit_modified():
+            return
+        self.fix_txt.edit_modified(False)
+        self._sched("fixprompt", lambda: atomic_write(ANIM_FIX_PROMPT, self.fix_txt.get("1.0", "end-1c")))
+
+    def _reset_fix(self):
+        self.fix_txt.delete("1.0", "end")
+        self.fix_txt.insert("1.0", ANIM_FIX_DEFAULT)
+
+    def fix_text(self):
+        return self.fix_txt.get("1.0", "end-1c").strip() or ANIM_FIX_DEFAULT
 
     def _reset_prompt(self):
         if not messagebox.askyesno("Prompt", "Prompt default e ferot nibo? (ekhon ja lekha ache muchhe jabe)"):
