@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.1.1"
+APP_VERSION = "3.1.2"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6553,6 +6553,8 @@ ANIM_LIMIT_RE = re.compile(
     r"you.?ve hit your|out of messages|too many messages)", re.I)
 ANIM_LIMIT_STRICT_RE = re.compile(
     r"(free usage returns|out of free messages|Upgrade to keep chatting|hit your \d+-hour (message )?limit)", re.I)
+# Prompt submit korar por limit popup ashle: Chrome bondho korar age popup er X e click kore eto second dekhbe HTML toiri hocche kina
+ANIM_LIMIT_RECHECK_SECS = 45
 _ANIM_RESET_RE = re.compile(r"(?:(?:resets|returns)\s+at|until)\s+(\d{1,2}):(\d{2})\s*([AaPp])\.?[Mm]")
 _ANIM_LIM_LOCK = threading.Lock()
 _ANIM_DONE_RE = re.compile(r"^0*(\d+)(?:_code\.txt|\.(?!txt$)[A-Za-z0-9]+)$", re.I)
@@ -6951,6 +6953,8 @@ class AnimHub:
         self.jobs = deque(tasks)
         self.template, self.hidden, self.logq = template, hidden, logq
         self.stop = threading.Event()
+        self.draining = threading.Event()     # soft stop: notun prompt nibe na, kintu cholte thaka prompt shesh korbe
+        self.chk_sem = threading.Semaphore(3)  # ekshathe koyta animation check (headless Chrome)
         self.lock = threading.Lock()
         self.total = sum(len(t["items"]) for t in tasks)
         self.done = self.failed = self.skipped = 0
@@ -7014,11 +7018,15 @@ class AnimHub:
         self.logq.put((time.strftime("%H:%M:%S"), msg, lv))
 
     def has_work(self):
+        if self.draining.is_set():
+            return False
         with self.lock:
             return any(t["items"] for t in self.jobs)
 
     def next_task(self):
         """Prothom box jar prompt ekhono baki ase. Ekta box e ekadhik Chrome (thread) ekshathe kaj korte pare."""
+        if self.draining.is_set():
+            return None
         with self.lock:
             for t in self.jobs:
                 if t["items"]:
@@ -7028,6 +7036,8 @@ class AnimHub:
 
     def claim_item(self, task):
         """Box er pore'r prompt ta ei Chrome er jonno nao (onno Chrome ta pabe na)."""
+        if self.draining.is_set():
+            return None
         with self.lock:
             return task["items"].pop(0) if task["items"] else None
 
@@ -7294,11 +7304,53 @@ class AnimWorker:
             self.log("Popup cross button e click kore bondho kora holo", "ok")
         return closed
 
+    def _has_limit_output(self):
+        """Limit popup er shathe-o Claude ei prompt er jonno HTML/artifact dilo kina."""
+        try:
+            if self._card_count() > getattr(self, "_say_cards0", 0):
+                return True
+        except Exception:
+            pass
+        try:
+            if self._resp_count() > getattr(self, "_say_prev", 0):
+                for c in self._codes():
+                    low = c.lower()
+                    if len(c) > 300 and any(k in low for k in ("<html", "<!doctype", "<svg", "<canvas", "<script")):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _limit_gate(self):
+        """Prompt submit korar por limit popup ('Upgrade to keep chatting') dekhle Chrome sathe sathe bondho kora hobe na.
+        1) age popup er cross (X) e click kore popup kete dewa  2) tarpor dekha: Claude HTML/artifact toiri korche kina
+        - korle True (kaj cholbe, file download hobe)   - na korle AnimLimit raise (Chrome bondho hobe)."""
+        if getattr(self, "_lim_ok", False):
+            return True
+        self.log("Limit popup eseche — age cross (X) e click kore bondho korchi, tarpor dekhbo HTML toiri hoyeche kina", "warn")
+        try:
+            self._lim_texts = self._limit_texts()          # reset somoy popup bondho howar age save
+        except Exception:
+            self._lim_texts = []
+        self._close_limit_popup()
+        end = time.time() + ANIM_LIMIT_RECHECK_SECS
+        while True:
+            if self._is_streaming() or self._has_limit_output():
+                self._lim_ok = True
+                self.log("Limit popup chilo kintu Claude HTML dicche/diyeche — kaj cholchhe, Chrome bondho hocche na", "ok")
+                return True
+            if time.time() >= end:
+                break
+            self._wait(1500)
+            self._close_limit_popup()                       # popup abar ashle abar X
+        self.log("Popup bondho kore dekhlam — HTML toiri hoyni, tai Chrome bondho hochhe", "warn")
+        raise AnimLimit()
+
     def _calc_until(self):
         """Limit popup ashle: kokhon porjonto ei Chrome e kaj hobe na. Popup er 'resets at' time, na pele kaj shuru + 5 ghonta."""
         now, d = time.time(), self.prof["dir"]
         parsed = None
-        for txt in self._limit_texts():
+        for txt in list(self._limit_texts()) + list(getattr(self, "_lim_texts", None) or []):
             parsed = anim_reset_ts(txt)
             if parsed:
                 break
@@ -7321,6 +7373,9 @@ class AnimWorker:
         while True:
             if hub.stop.is_set():
                 raise AnimStop()
+            if hub.draining.is_set() and self.prof is None:
+                self.log("Stop — ei thread er kaj shesh (Chrome bondho)", "ok")
+                return
             if self.prof is None:                 # free, limit-nei Chrome profile khuji
                 if not hub.has_work():
                     if hub.inflight() == 0:
@@ -7342,6 +7397,9 @@ class AnimWorker:
                 self.tag = f"T{self.idx + 1} {pr['name']}"
             task = hub.next_task()
             if task is None:
+                if hub.draining.is_set():         # Stop dewa — nijer kaj shesh, Chrome bondho kore ber hoye jao
+                    self.log("Stop — submit kora prompt shesh, Chrome bondho hochhe", "ok")
+                    return
                 if hub.inflight() > 0:            # onno Chrome limit khele tar box ekhane ashte pare
                     self._wait(3000)
                     continue
@@ -7488,6 +7546,11 @@ class AnimWorker:
         """Download howa file headless Chrome e khule check kore. -> (True/False/None, reason)"""
         if os.path.splitext(dest or "")[1].lower() not in (".html", ".htm"):
             return True, ""
+        sem = getattr(self.hub, "chk_sem", None)
+        if sem is not None:
+            while not sem.acquire(timeout=0.5):
+                if self.hub.stop.is_set():
+                    raise AnimStop()
         try:
             if self._chk is None:
                 self._chk = AnimChecker(self.pw)
@@ -7496,6 +7559,9 @@ class AnimWorker:
             raise
         except Exception as e:
             return None, (str(e).splitlines() or ["check error"])[0][:100]
+        finally:
+            if sem is not None:
+                sem.release()
 
     def _drop_bad(self, job, why=None):
         """Check e fail kora file muchhe dey — jate porer Start e 'done' dhore skip na kore.
@@ -7644,6 +7710,8 @@ class AnimWorker:
             raise RuntimeError("Prompt likhar box paoa jayni")
         self._mark_window()
         prev = self._resp_count()
+        self._lim_ok, self._lim_texts = False, []
+        self._say_prev, self._say_cards0 = prev, self._card_count()
         self._fill(comp, text)
         self._send(comp, self._nmsg == 0)
         self._nmsg += 1
@@ -7815,8 +7883,9 @@ class AnimWorker:
                 return
             if prev == 0 and "/chat/" in (self.page.url or ""):
                 return
-            if self._limit_strict() or self._limit():
-                raise AnimLimit()
+            if not getattr(self, "_lim_ok", False) and (self._limit_strict() or self._limit()):
+                self._limit_gate()          # popup X diye bondho + HTML ashe kina dekhe; na ashle AnimLimit
+                return
             self._dismiss_popups()
         raise RuntimeError("Claude er response shuru hoyni")
 
@@ -7833,8 +7902,8 @@ class AnimWorker:
         t0, last, stable = time.time(), None, 0
         while True:
             self._wait(2000)
-            if self._limit_strict():
-                raise AnimLimit()
+            if not getattr(self, "_lim_ok", False) and self._limit_strict():
+                self._limit_gate()
             self._dismiss_popups()
             txt = self._last_text()
             if self._is_streaming():
@@ -7843,8 +7912,8 @@ class AnimWorker:
                 stable = stable + 1 if (txt and txt == last) else 0
                 if stable >= 3:
                     return txt
-                if self._limit_strict() or (not txt and self._limit()):
-                    raise AnimLimit()
+                if not getattr(self, "_lim_ok", False) and (self._limit_strict() or (not txt and self._limit())):
+                    self._limit_gate()
             last = txt
             if time.time() - t0 > 3 * 3600:
                 raise RuntimeError("Response 3 ghontay-o shesh hoyni")
@@ -8438,7 +8507,8 @@ class Tab3Anim(tk.Frame):
 
     def _save_prompts(self):
         data = [{"name": b["name"].get(), "text": b["txt"].get("1.0", "end-1c"), "color": b["color"],
-                 "fail": sorted(b["fail"]), "imp": sorted(b["imp"]), "bad": sorted(b["bad"])}
+                 "fail": sorted(b["fail"]), "imp": sorted(b["imp"]), "bad": sorted(b["bad"]),
+                 "sel": bool(b["sel"].get())}
                 for b in self.boxes]
         os.makedirs(ANIM_BASE, exist_ok=True)
         atomic_write(ANIM_PROMPTS, json.dumps(data, ensure_ascii=False, indent=1))
@@ -8486,6 +8556,8 @@ class Tab3Anim(tk.Frame):
                "id": self._bidn, "live": {}, "disk": set(), "bad": set(), "fail": set(), "imp": set(),
                "nums": [], "sig": None}
         mk = marks if isinstance(marks, dict) else {}
+        box["sel"] = tk.BooleanVar(value=bool(mk.get("sel", False)))     # tick deya box e-i Start kaj korbe
+        box["sel"].trace_add("write", lambda *a: (self._changed(), self._refresh_info()))
         for k_ in ("fail", "imp", "bad"):       # ager run er ❌ / 🚫 mark file theke ferot ashe
             try:
                 box[k_] = {int(x) for x in (mk.get(k_) or [])}
@@ -8499,6 +8571,15 @@ class Tab3Anim(tk.Frame):
         badge = tk.Label(hd, text="", bg=col, fg="#0b1114", font=(FONT, 10, "bold"), width=3, cursor="fleur")
         badge.pack(side="left", padx=(2, 10), ipady=2)
         box["badge"] = badge
+        _tick = tk.Label(hd, bg=PANEL, font=(FONT, 20, "bold"), cursor="hand2", padx=4)
+        _tick.pack(side="left", padx=(0, 10))
+
+        def _tick_paint(*a, _t=_tick, _v=box["sel"]):
+            on = bool(_v.get())
+            _t.configure(text="\u2611 Run" if on else "\u2610 Run", fg=col if on else MUTED)
+        box["sel"].trace_add("write", _tick_paint)
+        _tick.bind("<Button-1>", lambda e, v=box["sel"]: v.set(not v.get()))
+        _tick_paint()
         for w in (handle, badge):
             w.bind("<ButtonPress-1>", lambda e, b=box: self._drag_start(b))
             w.bind("<B1-Motion>", self._drag_move)
@@ -8539,6 +8620,10 @@ class Tab3Anim(tk.Frame):
         box["chk_btn"].pack(side="left")
         box["fix_btn"] = mkbtn(act, "\U0001f527 Fix fails", lambda b=box: self._fix_fails(b), "ghost", pady=3, padx=12)
         box["fix_btn"].pack(side="left", padx=6)
+        box["fixlim_btn"] = mkbtn(act, "\U0001f6ab Fix limit", lambda b=box: self._fix_fails(b, "limit"), "ghost", pady=3, padx=10)
+        box["fixlim_btn"].pack(side="left")
+        box["fixall_btn"] = mkbtn(act, "\U0001f527 Fix fails + limit", lambda b=box: self._fix_fails(b, "all"), "ghost", pady=3, padx=10)
+        box["fixall_btn"].pack(side="left", padx=6)
         box["chk_lbl"] = mklabel(act, "", 9, MUTED, bg=PANEL)
         box["chk_lbl"].pack(side="left", padx=8)
         sb.bind("<Button-1>", lambda e, s_=sb, t=txt: self._sb_click(e, s_, t))
@@ -9145,9 +9230,23 @@ class Tab3Anim(tk.Frame):
             n = 1
         return max(1, min(15, n))
 
+    def _load_check_threads(self):
+        try:
+            n = int(json.loads(self._rd(ANIM_SETTINGS) or "{}").get("check_threads", 3))
+        except Exception:
+            n = 3
+        return max(1, min(5, n))
+
+    def _check_threads(self):
+        try:
+            return max(1, min(5, int(self.chk_thr_var.get())))
+        except Exception:
+            return 3
+
     def _save_threads(self, *_):
         try:
-            atomic_write(ANIM_SETTINGS, json.dumps({"threads": int(self.thr_var.get())}))
+            atomic_write(ANIM_SETTINGS, json.dumps({"threads": int(self.thr_var.get()),
+                                                    "check_threads": self._check_threads()}))
         except Exception:
             pass
         self._refresh_info()
@@ -9169,6 +9268,12 @@ class Tab3Anim(tk.Frame):
                                    state="readonly", width=4)
         self.thr_cb.pack(side="left")
         self.thr_cb.bind("<<ComboboxSelected>>", self._save_threads)
+        mklabel(row, "Check threads", 10, MUTED, bg=PANEL).pack(side="left", padx=(18, 6))
+        self.chk_thr_var = tk.StringVar(value=str(self._load_check_threads()))
+        self.chk_thr_cb = ttk.Combobox(row, textvariable=self.chk_thr_var, values=[str(i) for i in range(1, 6)],
+                                       state="readonly", width=3)
+        self.chk_thr_cb.pack(side="left")
+        self.chk_thr_cb.bind("<<ComboboxSelected>>", self._save_threads)
         self.run_lbl = mklabel(row, "Ready", 10, MUTED, bg=PANEL)
         self.run_lbl.pack(side="right", padx=6)
         self.info_lbl = mklabel(ctl, "", 9, MUTED, bg=PANEL, anchor="w", justify="left", wraplength=760)
@@ -9201,12 +9306,13 @@ class Tab3Anim(tk.Frame):
         if not hasattr(self, "info_lbl"):
             return
         try:
-            nb = len(self.boxes)
-            npr = sum(len(anim_parse_prompts(b["txt"].get("1.0", "end-1c"))) for b in self.boxes
+            sel = [b for b in self.boxes if b["sel"].get()]
+            nb = len(sel)
+            npr = sum(len(anim_parse_prompts(b["txt"].get("1.0", "end-1c"))) for b in sel
                       if b["txt"].get("1.0", "end-1c").strip())
             profs = [p for p in self.chrome_profiles if os.path.isdir(p["dir"])]
             n = int(self.thr_var.get())
-            msg = f"Prompts: {npr} ({nb} box)  \u00b7  Chrome profile: {len(profs)}  \u00b7  Output: {self._out_base()}"
+            msg = f"Tick deya prompts: {npr} ({nb}/{len(self.boxes)} box)  \u00b7  Chrome profile: {len(profs)}  \u00b7  Output: {self._out_base()}"
             col = MUTED
             if n > len(profs):
                 msg += f"\nThreads {n} kintu profile {len(profs)} ta — {len(profs)} ta thread cholbe (Chrome section e aro profile add koro)."
@@ -9266,7 +9372,10 @@ class Tab3Anim(tk.Frame):
                 self.pbar["value"] = (hub.done + hub.failed) * 100.0 / max(1, hub.total)
                 nl = getattr(self, "_lim_n", 0)
                 extra = f"  \u00b7  \u26d4 {nl} profile limit" if nl else ""
-                self.run_lbl.configure(text=f"Done {hub.done}/{hub.total}  \u00b7  Failed {hub.failed}{extra}", fg=ACCENT)
+                pre = ("Stopping (kaj shesh hole bondho)  \u00b7  "
+                       if (hub.draining.is_set() and not hub.stop.is_set()) else "")
+                self.run_lbl.configure(text=f"{pre}Done {hub.done}/{hub.total}  \u00b7  Failed {hub.failed}{extra}",
+                                       fg=WARN if pre else ACCENT)
                 if hub.launched and not any(t.is_alive() for t in hub.threads):
                     self._finish(hub)
         except Exception:
@@ -9278,12 +9387,16 @@ class Tab3Anim(tk.Frame):
 
     def _set_running(self, on):
         self.start_btn.configure(state="disabled" if on else "normal")
-        self.stop_btn.configure(state="normal" if on else "disabled")
+        self.stop_btn.configure(state="normal" if on else "disabled", text="\u25a0  STOP")
         self.thr_cb.configure(state="disabled" if on else "readonly")
+        try:
+            self.chk_thr_cb.configure(state="disabled" if on else "readonly")
+        except Exception:
+            pass
 
     def _finish(self, hub):
         left = sum(len(t["items"]) for t in hub.jobs)
-        stopped = hub.stop.is_set()
+        stopped = hub.stop.is_set() or hub.draining.is_set()
         self._log(f"{'Stop hoyeche' if stopped else 'Shesh'} \u2014 done {hub.done}, failed {hub.failed}, baki {left}",
                   "warn" if (stopped or left or hub.failed) else "ok")
         self.run_lbl.configure(text=("Stopped" if stopped else "Finished") + f"  \u00b7  Done {hub.done}/{hub.total}",
@@ -9301,16 +9414,22 @@ class Tab3Anim(tk.Frame):
             pass
 
     # ───── start / stop ─────
-    def _collect(self, only=None, regen=False):
+    def _collect(self, only=None, regen=False, mode="fails"):
         profs = [p for p in self.chrome_profiles if os.path.isdir(p["dir"])]
         if not profs:
             messagebox.showwarning("Start", "Kono Chrome profile nei.\n\nChrome section e '\uff0b Add new chrome' chepe profile "
                                             "baniye claude.ai e login koro.", parent=self.app)
             return None
+        if only is None and not any(b["sel"].get() for b in self.boxes):
+            messagebox.showwarning("Start", "Kono prompt box e tick (Run) deoa nei.\n\nJe box gulo korte chao "
+                                            "segulor 'Run' e tick dao, tarpor Start chapo.", parent=self.app)
+            return None
         tasks, total, skipped, nimp = [], 0, 0, 0
         outs = self._out_dirs()
         for b in self.boxes:
             if only is not None and b is not only:
+                continue
+            if only is None and not b["sel"].get():
                 continue
             outd = outs[b["id"]]
             have = anim_done_nums(outd)
@@ -9322,9 +9441,13 @@ class Tab3Anim(tk.Frame):
                 if num in have:
                     skipped += 1
                     continue
-                if regen and num in b["imp"]:
-                    nimp += 1                      # limit-impossible — Fix fails e skip
-                    continue
+                if regen:
+                    if num in b["imp"]:
+                        if mode == "fails":
+                            nimp += 1              # limit-impossible — shudhu 'Fix fails' e skip
+                            continue
+                    elif mode == "limit":
+                        continue                   # 'Fix limit' shudhu limit-e hoy ni gulo korbe
                 it = {"box": b["name"].get().strip() or anim_safe(b["name"].get()), "num": num, "text": t,
                       "out": outd, "attempts": 0, "bid": b["id"]}
                 if regen:                          # age-r bad file thakle seta Claude e upload kore fix hobe
@@ -9345,22 +9468,22 @@ class Tab3Anim(tk.Frame):
         if not tasks:
             if regen:
                 messagebox.showinfo("Fix fails", "Regenerate korar moto kichu nei." + (
-                    f"\n\n\U0001f6ab {nimp} ta prompt limit-e generate hoy ni \u2014 oigulo manually koro." if nimp else ""),
-                    parent=self.app)
+                    f"\n\n\U0001f6ab {nimp} ta prompt limit-e generate hoy ni \u2014 'Fix limit' ba 'Fix fails + limit' chapo."
+                    if nimp else ""), parent=self.app)
             else:
                 messagebox.showinfo("Start", "Shob prompt-ei age thekei Output e ache (done).\n\nAbar notun kore korte chaile "
                                              "Output folder er oi file gulo muchhe dao.", parent=self.app)
             return None
         return profs, tasks, skipped, nimp
 
-    def _start(self, only=None, regen=False):
+    def _start(self, only=None, regen=False, mode="fails"):
         if self._hub is not None:
             return
         if self._chk_busy:
             self.app.note("Check cholche \u2014 shesh hole Start koro", WARN)
             return
         self._flush()
-        got = self._collect(only, regen)
+        got = self._collect(only, regen, mode)
         if got is None:
             return
         profs, tasks, skipped, nimp = got
@@ -9371,6 +9494,7 @@ class Tab3Anim(tk.Frame):
         hub.statq = self._statq
         hub.profs = list(profs)
         hub.fix_prompt = self.fix_text()
+        hub.chk_sem = threading.Semaphore(self._check_threads())
         for b in self.boxes:
             b["live"] = {}
         for t in tasks:
@@ -9380,13 +9504,14 @@ class Tab3Anim(tk.Frame):
         self.pbar["value"] = 0
         self._set_running(True)
         self.run_lbl.configure(text="Starting\u2026", fg=ACCENT)
-        self._log((f"Fix fails [{only['name'].get()}]: " if regen else "Start: ") +
+        _lbl = {"fails": "Fix fails", "limit": "Fix limit", "all": "Fix fails + limit"}.get(mode, "Fix fails")
+        self._log((f"{_lbl} [{only['name'].get()}]: " if regen else "Start: ") +
                   f"{hub.total} ta prompt, {len(tasks)} ta box" +
                   (f" ({skipped} ta age-i done, skip)" if skipped else "") +
                   (f" ({nimp} ta \U0001f6ab limit-impossible skip)" if nimp else "") + f", threads {n}", "ok")
         threading.Thread(target=self._launch_all, args=(hub, profs, n), daemon=True).start()
 
-    def _fix_plan(self, box):
+    def _fix_plan(self, box, mode="fails"):
         """Fix fails e kon kon prompt abar hobe. -> (todo nums, bad file koyta, limit-impossible koyta)"""
         outd = self._out_dirs().get(box["id"], "")
         have = anim_done_nums(outd) - box["bad"]
@@ -9396,14 +9521,17 @@ class Tab3Anim(tk.Frame):
             if num in have:
                 continue
             if num in box["imp"]:
-                nimp += 1
+                if mode == "fails":
+                    nimp += 1
+                    continue
+            elif mode == "limit":
                 continue
             todo.append(num)
             if num in box["bad"]:
                 nbad += 1
         return todo, nbad, nimp
 
-    def _fix_fails(self, box):
+    def _fix_fails(self, box, mode="fails"):
         """Ei box er j prompt generate hoyni / fail / animate thik na — shegulo abar generate kore.
         \U0001f6ab (limit-e hoy ni) gulo skip kore, oigulo manually korte hobe."""
         if self._hub is not None:
@@ -9413,11 +9541,12 @@ class Tab3Anim(tk.Frame):
             return
         self._flush()
         self._status_refresh(box)
-        todo, nbad, nimp = self._fix_plan(box)
+        todo, nbad, nimp = self._fix_plan(box, mode)
         if not todo:
-            messagebox.showinfo("Fix fails", "Regenerate korar moto kichu nei." + (
-                f"\n\n\U0001f6ab {nimp} ta prompt limit-e generate hoy ni \u2014 oigulo manually koro." if nimp else ""),
-                parent=self.app)
+            messagebox.showinfo("Fix fails", ("Limit-e generate hoy ni emon kono prompt nei." if mode == "limit"
+                                              else "Regenerate korar moto kichu nei.") + (
+                f"\n\n\U0001f6ab {nimp} ta prompt limit-e generate hoy ni \u2014 'Fix limit' ba 'Fix fails + limit' chapo."
+                if nimp else ""), parent=self.app)
             return
         shown = ", ".join(str(x) for x in todo[:15]) + (" \u2026" if len(todo) > 15 else "")
         msg = f"'{box['name'].get()}' er {len(todo)} ta prompt abar generate hobe:\n{shown}"
@@ -9429,10 +9558,14 @@ class Tab3Anim(tk.Frame):
         if nbad:
             msg += f"\n\n({nbad} ta animate-thik-na file replace hobe)"
         if nimp:
-            msg += f"\n\U0001f6ab {nimp} ta limit-impossible prompt skip hobe (manually korte hobe)"
+            msg += f"\n\U0001f6ab {nimp} ta limit-impossible prompt skip hobe ('Fix limit' / 'Fix fails + limit' diye hobe)"
+        if mode == "limit":
+            msg += "\n\n\U0001f6ab Shudhu limit-e generate hoy ni gulo abar hobe."
+        elif mode == "all":
+            msg += "\n\n\U0001f527 Fail + \U0001f6ab limit \u2014 dui-i abar hobe."
         if not messagebox.askyesno("Fix fails", msg + "\n\nShuru korbo?", parent=self.app):
             return
-        self._start(only=box, regen=True)
+        self._start(only=box, regen=True, mode=mode)
 
     def full_template(self):
         return self.prompt_txt.get("1.0", "end-1c")
@@ -9441,10 +9574,18 @@ class Tab3Anim(tk.Frame):
         hub = self._hub
         if hub is None:
             return
-        hub.stop.set()
+        if not hub.draining.is_set():
+            hub.draining.set()                 # notun prompt nibe na; submit kora gulo shesh hole Chrome bondho
+            self.stop_btn.configure(text="\u25a0  FORCE STOP")
+            self.run_lbl.configure(text="Stopping (kaj shesh hole bondho)", fg=WARN)
+            self._log("Stop dewa hoyeche — notun prompt nibe na. Je prompt gulo submit hoye geche segulo shesh hole "
+                      "Chrome bondho hobe. Chrome nijer haate bondho korle sathe sathe bondho hobe, abar khulbe na. "
+                      "Ekdom jora kore thamate abar STOP (FORCE STOP) chapo.", "warn")
+            return
+        hub.stop.set()                         # 2nd click = force stop
         self.stop_btn.configure(state="disabled")
-        self.run_lbl.configure(text="Stopping\u2026", fg=WARN)
-        self._log("Stop dewa hoyeche — Chrome gulo bondho hocche\u2026", "warn")
+        self.run_lbl.configure(text="Force stopping\u2026", fg=WARN)
+        self._log("Force stop — Chrome gulo ekhuni bondho hocche\u2026", "warn")
 
     def _launch_all(self, hub, profs, n):
         try:
@@ -9471,14 +9612,14 @@ class Tab3Anim(tk.Frame):
             hub.log(f"{want} ta Chrome ek shathe cholbe (mot profile {len(profs)} ta) — kono ekta limit khele "
                     f"bondho hoye onno profile khulbe", "ok")
             for i in range(want):
-                if hub.stop.is_set():
+                if hub.stop.is_set() or hub.draining.is_set():
                     break
                 w = AnimWorker(i, hub)
                 t = threading.Thread(target=w.run, daemon=True)
                 hub.threads.append(t)
                 t.start()
                 for _ in range(8):
-                    if hub.stop.is_set():
+                    if hub.stop.is_set() or hub.draining.is_set():
                         break
                     time.sleep(0.25)
         except Exception as e:
@@ -9489,7 +9630,7 @@ class Tab3Anim(tk.Frame):
     # ───── Check animations (prottek box er button — shudhu oi box er file) ─────
     def _set_chk_buttons(self, enabled):
         for b in self.boxes:
-            for k in ("chk_btn", "fix_btn"):
+            for k in ("chk_btn", "fix_btn", "fixlim_btn", "fixall_btn"):
                 try:
                     b[k].configure(state="normal" if enabled else "disabled")
                 except Exception:
@@ -9518,11 +9659,12 @@ class Tab3Anim(tk.Frame):
             messagebox.showinfo("Check", f"'{box['name'].get()}' er Output e kono HTML file nei.", parent=self.app)
             return
         self._chk_busy = True
+        self._chk_n = self._check_threads()
         self._chk_box = box
         self._chk_done, self._chk_total = 0, len(files)
         self._set_chk_buttons(False)
         box["chk_lbl"].configure(text=f"Checking 0/{len(files)}\u2026", fg=ACCENT)
-        self._log(f"[Check] {box['name'].get()}: {len(files)} ta file check shuru (prottek file e ~{ANIM_CHECK_SECS}s lagbe)", "ok")
+        self._log(f"[Check] {box['name'].get()}: {len(files)} ta file check shuru, {self._chk_n} ta ekshathe (prottek file e ~{ANIM_CHECK_SECS}s lagbe)", "ok")
         threading.Thread(target=self._check_run, args=(files,), daemon=True).start()
 
     def _check_run(self, files):
@@ -9557,7 +9699,7 @@ class Tab3Anim(tk.Frame):
                             ck.close()
                 except Exception as e:
                     self._chkq.put(("log", f"[Check] worker error: {e}"))
-            ths = [threading.Thread(target=work, daemon=True) for _ in range(min(3, len(files)))]
+            ths = [threading.Thread(target=work, daemon=True) for _ in range(min(getattr(self, "_chk_n", 3), len(files)))]
             for t in ths:
                 t.start()
             for t in ths:
