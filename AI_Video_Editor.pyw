@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.1"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6476,6 +6476,47 @@ ANIM_PROMPTS = os.path.join(ANIM_BASE, "prompts.json")     # 2D Animation sectio
 ANIM_CHROME = os.path.join(ANIM_BASE, "chrome_profiles.json")   # Tab 3 er Chrome profile list
 ANIM_CHROME_DIR = os.path.join(ANIM_BASE, "chrome_profiles")      # prottek profile er nijosso user-data folder
 ANIM_CHROME_CFG = os.path.join(ANIM_BASE, "chrome_settings.json")   # notun profile kon folder/drive e toiri hobe
+# GPU acceleration flags for Tab 3 Chrome (Windows). Window offscreen/hidden hole-o GPU render bondho hobe na.
+ANIM_GPU_ARGS = ["--ignore-gpu-blocklist", "--enable-gpu-rasterization", "--enable-zero-copy",
+                 "--use-angle=d3d11", "--disable-features=CalculateNativeWinOcclusion",
+                 "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding"]
+ANIM_GPU_ARGS += ["--force-high-performance-gpu"]
+
+
+def _force_nvidia_for_chrome():
+    """Windows Graphics Settings: Chrome (ar Playwright Chromium) ke 'High performance' GPU (NVIDIA) e chalabe.
+    HKCU\\Software\\Microsoft\\DirectX\\UserGpuPreferences e GpuPreference=2 likhe. Admin lagbe na.
+    Chrome shuru howar AGE set korte hobe, tai launch er ageii call kora hoy."""
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+        exes = set()
+        for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(env)
+            if base:
+                exes.add(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+        try:
+            exe = _voice_chrome_exe()
+            if exe:
+                exes.add(exe)
+        except Exception:
+            pass
+        pw = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright")
+        if os.path.isdir(pw):
+            for root, _d, files in os.walk(pw):
+                if "chrome.exe" in files:
+                    exes.add(os.path.join(root, "chrome.exe"))
+        key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\DirectX\UserGpuPreferences",
+                                 0, winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
+        for e in exes:
+            if os.path.isfile(e):
+                winreg.SetValueEx(key, os.path.normpath(e), 0, winreg.REG_SZ, "GpuPreference=2;")
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
 ANIM_PROMPT = os.path.join(ANIM_BASE, "prompt.txt")
 ANIM_OUT = os.path.join(ANIM_BASE, "Output")                   # Start er generate kora animation file
 ANIM_SETTINGS = os.path.join(ANIM_BASE, "settings.json")         # threads
@@ -7113,7 +7154,8 @@ class AnimWorker:
 
     def _launch_once(self):
         os.makedirs(self.prof["dir"], exist_ok=True)
-        args = ["--disable-blink-features=AutomationControlled"]
+        _force_nvidia_for_chrome()
+        args = ["--disable-blink-features=AutomationControlled"] + ANIM_GPU_ARGS
         if self.hub.hidden:
             args += ["--window-position=-32000,-32000", "--window-size=1366,900"]
         else:
@@ -9078,7 +9120,8 @@ class Tab3Anim(tk.Frame):
             return False
         try:
             os.makedirs(pr["dir"], exist_ok=True)
-            subprocess.Popen([exe, f"--user-data-dir={pr['dir']}", "--no-first-run",
+            _force_nvidia_for_chrome()
+            subprocess.Popen([exe, f"--user-data-dir={pr['dir']}", "--no-first-run", *ANIM_GPU_ARGS,
                               "--no-default-browser-check", ANIM_URL])
         except Exception as e:
             messagebox.showerror("Chrome", f"Chrome khola jayni:\n{e}", parent=self.app)
