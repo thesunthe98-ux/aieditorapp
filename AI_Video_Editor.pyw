@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.1.2"
+APP_VERSION = "3.1.3"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -8002,17 +8002,85 @@ class AnimWorker:
                     return True
         return False
 
-    def _file_dl_btn(self):
+    def _dl_locs(self):
+        """File card er Download button (72.png er moto — Export button nai, card er upor download icon).
+        Age exact 'Download' aria-label, na pele broad. Shudhu VISIBLE gulo, DOM order e."""
         page = self.page
-        for loc in (page.locator('button[aria-label*="Download" i]'),
+        for loc in (page.locator('button[aria-label="Download" i]'),
+                    page.locator('button[aria-label*="Download" i]'),
                     page.get_by_role("button", name=re.compile(r"download", re.I))):
+            out = []
             try:
-                n = loc.count()
-                if n:
-                    return loc.nth(n - 1)
+                n = min(loc.count(), 40)
+                for i in range(n):
+                    e = loc.nth(i)
+                    if self._vis(e):
+                        out.append(e)
             except Exception:
-                pass
-        return None
+                out = []
+            if out:
+                return out
+        return []
+
+    def _dl_count(self):
+        try:
+            return len(self._dl_locs())
+        except Exception:
+            return 0
+
+    def _file_dl_btn(self):
+        locs = self._dl_locs()
+        return locs[-1] if locs else None
+
+    def _newest_is_file(self):
+        """Chat er shesh output ta ki 'file card + Download icon' (72.png)? na artifact card (65.png)?
+        Duita-i thakle DOM e jeta niche (notun) seta."""
+        try:
+            return bool(self.page.evaluate("""() => {
+                const vis = e => e.offsetParent !== null;
+                const cards = [...document.querySelectorAll('[data-testid="frame-card-open"]')];
+                let dls = [...document.querySelectorAll('button[aria-label="Download" i], button[aria-label="download" i]')].filter(vis);
+                if (!dls.length) dls = [...document.querySelectorAll('button[aria-label*="ownload"]')].filter(vis);
+                if (!dls.length) return false;
+                if (!cards.length) return true;
+                const c = cards[cards.length - 1], d = dls[dls.length - 1];
+                return !!(c.compareDocumentPosition(d) & Node.DOCUMENT_POSITION_FOLLOWING);
+            }"""))
+        except Exception:
+            return self._dl_count() > 0 and self._card_count_art() == 0
+
+    def _click_file_dl(self, job):
+        """File card er upor Download icon e click -> download dhore save. normal -> force -> JS click."""
+        last = None
+        for how in ("click", "force", "js"):
+            def go(how=how):
+                b = self._file_dl_btn()
+                if b is None:
+                    raise RuntimeError("file card er Download button paoa jayni")
+                try:
+                    b.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass
+                try:
+                    b.hover(timeout=2000)           # kichu UI te hover korle button active hoy
+                except Exception:
+                    pass
+                if how == "click":
+                    b.click(timeout=4000)
+                elif how == "force":
+                    b.click(timeout=4000, force=True)
+                else:
+                    b.evaluate("el => el.click()")
+            try:
+                return self._download(job, go, timeout=15000)
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception as e:
+                last = e
+                self.log(f"  file card Download click ({how}) kaj kore ni: {str(e).splitlines()[0][:80]}", "warn")
+                if self.page.is_closed():
+                    raise AnimClosed()
+        raise RuntimeError(f"file card Download hoyni ({last})")
 
     def _blob_text(self):
         """Page / iframe gulo te create hoye thaka sobcheye boro HTML blob er text (fallback)."""
@@ -8236,11 +8304,15 @@ class AnimWorker:
                 return best
         return None
 
-    def _card_count(self):
+    def _card_count_art(self):
         try:
             return self.page.locator('[data-testid="frame-card-open"]').count()
         except Exception:
             return 0
+
+    def _card_count(self):
+        """Chat e output koyta: artifact card (Export) + file card (Download icon)."""
+        return self._card_count_art() + self._dl_count()
 
     def _close_panel(self):
         """Artifact panel er X chepe bondho kore (porer prompt er jonno chat clean thake). True = bondho hoyeche."""
@@ -8318,23 +8390,28 @@ class AnimWorker:
                 if self._export_btn() is not None:      # purono / onno file er panel khola — bondho kore ei prompt er card khulbo
                     self.log("  ager panel khola chhilo — bondho kore notun file khulchi")
                     self._close_panel()
-                card = self._art_card()
-                if card is not None:
-                    try:
-                        self.log("  file: " + ((card.get_attribute("aria-label", timeout=2000) or "").replace("View ", "") or "?")
-                                 + f"  (card {now}/{now})")
-                    except Exception:
-                        pass
-                    self.log("Artifact file khola hocche")
-                    if not self._open_art_card():
-                        self.log("  card click kaj korlo na — abar chesta", "warn")
-                        self._wait(1500)
-                        self._open_art_card()
-                if self._export_btn() is not None:
-                    dest = self._export_html(job)
-                elif cards0 is None or now == 0:
-                    if self._file_dl_btn() is not None:
-                        dest = self._download(job, lambda: self._file_dl_btn().click())
+                if self._newest_is_file():
+                    # 72.png: Export nai — file card er upor Download icon
+                    self.log("File card paoa gelo (Export nai) — card er Download button e click hocche")
+                    dest = self._click_file_dl(job)
+                else:
+                    card = self._art_card()
+                    if card is not None:
+                        try:
+                            self.log("  file: " + ((card.get_attribute("aria-label", timeout=2000) or "").replace("View ", "") or "?")
+                                     + f"  (card {now}/{now})")
+                        except Exception:
+                            pass
+                        self.log("Artifact file khola hocche")
+                        if not self._open_art_card():
+                            self.log("  card click kaj korlo na — abar chesta", "warn")
+                            self._wait(1500)
+                            self._open_art_card()
+                    if self._export_btn() is not None:
+                        dest = self._export_html(job)
+                    elif self._file_dl_btn() is not None:      # Export asheni — file card Download diye chesta
+                        self.log("Export button nai — file card er Download button e click hocche")
+                        dest = self._click_file_dl(job)
         except (AnimStop, AnimClosed):
             raise
         except Exception as e:
