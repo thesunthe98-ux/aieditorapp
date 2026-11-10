@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.0.7"
+APP_VERSION = "3.0.8"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -6468,6 +6468,2400 @@ class Tab2Editor(tk.Frame):
 
 
 
+# ═════════════════════════════ TAB 3 : 2D ANIMATION ═════════════════════════════
+# Left sidebar (Tab 1 er moto): 2D Animation (prothom) -> Chrome -> Prompt
+
+ANIM_BASE = os.path.join(WORKSPACE, "Anim2D")
+ANIM_PROMPTS = os.path.join(ANIM_BASE, "prompts.json")     # 2D Animation section er shob prompt box
+ANIM_CHROME = os.path.join(ANIM_BASE, "chrome_profiles.json")   # Tab 3 er Chrome profile list
+ANIM_CHROME_DIR = os.path.join(ANIM_BASE, "chrome_profiles")      # prottek profile er nijosso user-data folder
+ANIM_CHROME_CFG = os.path.join(ANIM_BASE, "chrome_settings.json")   # notun profile kon folder/drive e toiri hobe
+ANIM_PROMPT = os.path.join(ANIM_BASE, "prompt.txt")
+ANIM_OUT = os.path.join(ANIM_BASE, "Output")                   # Start er generate kora animation file
+ANIM_SETTINGS = os.path.join(ANIM_BASE, "settings.json")         # threads
+ANIM_LOG = os.path.join(ANIM_BASE, "log.txt")
+ANIM_URL = "https://claude.ai/new"
+ANIM_LIM = os.path.join(ANIM_BASE, "limits.json")              # prottek Chrome profile er 5-ghonta window / limit reset somoy
+ANIM_OUT_CFG = os.path.join(ANIM_BASE, "output_dir.json")      # user er select kora Output folder
+ANIM_OLD_DEFAULT = (
+    "Create a 2D animation scene based on the script below.\n"
+    "Style: clean flat 2D cartoon, bright colors, smooth motion, simple backgrounds.\n"
+    "Keep characters consistent in every scene.\n\n"
+    "Script:\n{script}\n"
+)
+ANIM_LEGACY_TEMPLATE = (
+    "Create a beautiful 2D animation using code.\n\n"
+    "Requirements:\n"
+    "- Build it as ONE self-contained HTML file (HTML + CSS + JavaScript, using canvas or SVG). "
+    "No external libraries, fonts or images - it must run offline just by opening the file.\n"
+    "- The animation must play automatically and loop smoothly.\n"
+    "- Make it look stunning: rich harmonious colors, soft gradients, smooth easing, layered backgrounds, "
+    "lively details and polished, professional motion. Try your absolute best.\n"
+    "- Reply with the complete code inside a single ```html fenced code block directly in your message. "
+    "Do not create an artifact or a separate file, and keep any explanation very short.\n\n"
+    "Animation prompt:\n{script}\n"
+)
+ANIM_DEFAULT_PROMPT = "coding deye animation baneye diba,ami prompt dibo,best try krba jate onek shundor hoy"
+ANIM_LIMIT_RE = re.compile(
+    r"(reached (your|the|our) (usage |message |daily )?limit|usage limit|limit (will )?reset|"
+    r"free usage returns|out of free messages|"
+    r"you.?ve hit your|out of messages|too many messages)", re.I)
+ANIM_LIMIT_STRICT_RE = re.compile(
+    r"(free usage returns|out of free messages|Upgrade to keep chatting|hit your \d+-hour (message )?limit)", re.I)
+_ANIM_RESET_RE = re.compile(r"(?:(?:resets|returns)\s+at|until)\s+(\d{1,2}):(\d{2})\s*([AaPp])\.?[Mm]")
+_ANIM_LIM_LOCK = threading.Lock()
+_ANIM_DONE_RE = re.compile(r"^0*(\d+)(?:_code\.txt|\.(?!txt$)[A-Za-z0-9]+)$", re.I)
+_ANIM_NUM_RE = re.compile(r"^\s*(\d{1,4})\s*[.)]\s*(.*)$")
+
+
+def anim_parse_prompts(text):
+    """'1. ...  2. ...  3. ...' serial prompt gulo alada kore dey -> [(num, prompt), ...].
+    Notun prompt shuru hoy shudhu tokhon-i jokhon line ta thik porer serial number (n+1) diye shuru hoy,
+    tai prompt er vitore '1.' '2.' list thakleo bhenge jay na. Number na thakle puro text ekta prompt."""
+    cur, items, expect = None, [], None
+    for ln in text.replace("\r\n", "\n").split("\n"):
+        m = _ANIM_NUM_RE.match(ln)
+        if m:
+            n = int(m.group(1))
+            if expect is None or n == expect:
+                if cur:
+                    items.append(cur)
+                cur = [n, [m.group(2)]]
+                expect = n + 1
+                continue
+        if cur is not None:
+            cur[1].append(ln)
+    if cur:
+        items.append(cur)
+    out = [(n, "\n".join(parts).strip()) for n, parts in items]
+    out = [(n, t) for n, t in out if t]
+    if not out and text.strip():
+        out = [(1, text.strip())]
+    return out
+
+
+def anim_safe(name):
+    return re.sub(r'[\\/:*?"<>|]', "_", (name or "").strip()).strip(" .") or "box"
+
+
+def _anim_lim_load():
+    try:
+        with open(ANIM_LIM, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _anim_key(d):
+    return os.path.normcase(os.path.abspath(d))
+
+
+def anim_lim_get(d):
+    with _ANIM_LIM_LOCK:
+        return dict(_anim_lim_load().get(_anim_key(d), {}))
+
+
+def anim_lim_set(d, **kw):
+    with _ANIM_LIM_LOCK:
+        data = _anim_lim_load()
+        data.setdefault(_anim_key(d), {}).update(kw)
+        try:
+            os.makedirs(ANIM_BASE, exist_ok=True)
+            atomic_write(ANIM_LIM, json.dumps(data, indent=1))
+        except Exception:
+            pass
+
+
+def anim_lim_until(d):
+    try:
+        return float(anim_lim_get(d).get("until") or 0)
+    except Exception:
+        return 0.0
+
+
+def anim_reset_ts(txt):
+    """Popup er 'resets at 5:10 PM' theke epoch time. Bujhte na parle / 6 ghontar beshi hole None."""
+    m = _ANIM_RESET_RE.search(txt or "")
+    if not m:
+        return None
+    try:
+        h = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "p" else 0)
+        now = datetime.datetime.now()
+        t = now.replace(hour=h, minute=int(m.group(2)), second=0, microsecond=0)
+        if t <= now:
+            t += datetime.timedelta(days=1)
+        ts = t.timestamp()
+        return ts if ts - time.time() <= 6 * 3600 else None
+    except Exception:
+        return None
+
+
+def anim_done_nums(outd):
+    """Output folder e kon kon serial number er file (1.html, 2.html ...) already ache."""
+    res = set()
+    try:
+        for fn in os.listdir(outd):
+            m = _ANIM_DONE_RE.match(fn)
+            if m:
+                res.add(int(m.group(1)))
+    except Exception:
+        pass
+    return res
+
+
+class AnimStop(Exception):
+    pass
+
+
+class AnimLimit(Exception):
+    pass
+
+
+class AnimLogin(Exception):
+    pass
+
+
+class AnimClosed(Exception):
+    pass
+
+
+class AnimHub:
+    """Shob thread er shared state. Ekta 'task' = ekta prompt box (tar baki prompt gulo) = ekta chat."""
+
+    def __init__(self, tasks, template, hidden, logq):
+        from collections import deque
+        self.jobs = deque(tasks)
+        self.template, self.hidden, self.logq = template, hidden, logq
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+        self.total = sum(len(t["items"]) for t in tasks)
+        self.done = self.failed = self.skipped = 0
+        self.threads = []
+        self.launched = False
+        self.statq = None
+        self.limited = {}
+        self._inflight = 0
+        self.profs = []            # shob Chrome profile (pool) — thread er cheye beshi thakte pare
+        self.claimed = set()       # ekhon kon profile kono thread e use hocche
+        self.bad = set()           # login nei / window bondho — ei run e baad
+
+    def pick_profile(self):
+        """-> (profile | None, hopeless). Limit nei + kono thread e use hocche na + onno Chrome e khola nei emon profile."""
+        now = time.time()
+        with self.lock:
+            usable = [p for p in self.profs if p["dir"] not in self.bad]
+            if not usable:
+                return None, True
+            for p in usable:
+                d = p["dir"]
+                if d in self.claimed or anim_lim_until(d) > now:
+                    continue
+                if _voice_profile_in_use(d):
+                    continue
+                if anim_lim_until(d):                       # limit er somoy shesh — reset
+                    anim_lim_set(d, win=0, until=0)
+                self.claimed.add(d)
+                return p, False
+        return None, False
+
+    def unclaim(self, prof, bad=False):
+        with self.lock:
+            self.claimed.discard(prof["dir"])
+            if bad:
+                self.bad.add(prof["dir"])
+
+    def no_profile_msg(self):
+        now = time.time()
+        ups = [anim_lim_until(p["dir"]) for p in self.profs if p["dir"] not in self.bad]
+        ups = [u for u in ups if u > now]
+        if ups:
+            return ("Shob free profile limit e / byasto — shobcheye age reset: "
+                    + time.strftime("%I:%M %p", time.localtime(min(ups))) + " (tokhon oi profile nijei kaj dhorbe)")
+        return "Free Chrome profile nei (onno Chrome e khola / byasto) — opekkha korchhi"
+
+    def first_prompt(self):
+        """Prompt section er prompt — prottek notun chat e age eta jay (box prompt pore)."""
+        return (self.template or "").replace("{script}", "").strip()
+
+    def set_status(self, job, st):
+        q = self.statq
+        if q is not None and "bid" in job:
+            q.put((job["bid"], job["num"], st))
+
+    def log(self, msg, lv="info"):
+        self.logq.put((time.strftime("%H:%M:%S"), msg, lv))
+
+    def has_work(self):
+        with self.lock:
+            return any(t["items"] for t in self.jobs)
+
+    def next_task(self):
+        """Prothom box jar prompt ekhono baki ase. Ekta box e ekadhik Chrome (thread) ekshathe kaj korte pare."""
+        with self.lock:
+            for t in self.jobs:
+                if t["items"]:
+                    self._inflight += 1
+                    return t
+            return None
+
+    def claim_item(self, task):
+        """Box er pore'r prompt ta ei Chrome er jonno nao (onno Chrome ta pabe na)."""
+        with self.lock:
+            return task["items"].pop(0) if task["items"] else None
+
+    def give_back(self, task, job):
+        """Prompt ta hoyni — box er shurute ferot dao, jate onno (ba ei) Chrome abar nite pare."""
+        with self.lock:
+            task["items"].insert(0, job)
+
+    def inflight(self):
+        return self._inflight
+
+    def release(self, task, requeue):
+        with self.lock:
+            self._inflight -= 1
+
+    def add_done(self):
+        with self.lock:
+            self.done += 1
+
+    def add_failed(self):
+        with self.lock:
+            self.failed += 1
+
+
+class AnimWorker:
+    """Ekta Chrome profile = ekta thread. Claude (claude.ai/new) e prompt pathay, code ber kore save kore."""
+
+    def __init__(self, idx, hub):
+        """Ekta worker = ekta 'slot' (thread). Slot protibar ekta free profile (Chrome) nei; limit hole onno profile nei."""
+        self.idx, self.hub = idx, hub
+        self.prof = None
+        self.tag = f"T{idx + 1}"
+        self.pw = self.ctx = self.page = None
+        self._nmsg = 0
+
+    def log(self, m, lv="info"):
+        self.hub.log(f"[{self.tag}] {m}", lv)
+
+    # ───── helpers ─────
+    def _wait(self, ms):
+        end = time.time() + ms / 1000.0
+        while True:
+            if self.hub.stop.is_set():
+                raise AnimStop()
+            left = end - time.time()
+            if left <= 0:
+                return
+            if self.page is None:                 # Chrome bondho (limit opekkha / idle) — shudhu ghumao
+                time.sleep(min(0.5, left))
+                continue
+            try:
+                self.page.wait_for_timeout(int(min(500, left * 1000)))
+            except Exception:
+                if self.page.is_closed():
+                    raise AnimClosed()
+                time.sleep(min(0.5, left))
+
+    def run(self):
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                self.pw = pw
+                try:
+                    self._session()
+                finally:
+                    self._retire()
+        except AnimStop:
+            self.log("Stop hoyeche", "warn")
+        except Exception as e:
+            self.log(f"Chrome/Playwright error: {e}", "err")
+
+    def _retire(self, bad=False):
+        """Chrome bondho + profile ta pool e ferot (bad=true hole ei run e r use hobe na)."""
+        self._close()
+        if self.prof is not None:
+            self.hub.unclaim(self.prof, bad)
+            self.prof = None
+            self.tag = f"T{self.idx + 1}"
+
+    def _close(self):
+        self._closing = True
+        try:
+            if self.ctx is not None:
+                self.ctx.close()
+        except Exception:
+            pass
+        self.ctx = self.page = None
+        self._closing = False
+
+    def _live_page(self):
+        try:
+            for pg in self.ctx.pages:
+                if not pg.is_closed():
+                    return pg
+            return self.ctx.new_page()
+        except Exception:
+            return None
+
+    def _launch(self):
+        """Chrome khole. Khulei shathe shathe bondho hoye gele (first-run tab / crash) 3 bar porjonto abar chesta kore."""
+        last = ""
+        for k in range(3):
+            try:
+                self._launch_once()
+                pg = self._live_page()
+                if pg is not None:
+                    self.page = pg
+                    self._wait(1500)                  # ektu opekkha kore dekhi Chrome tike thake kina
+                    pg = self._live_page()
+                    if pg is not None:
+                        self.page = pg
+                        return
+                last = "Chrome khulei shathe shathe bondho hoye gelo"
+            except AnimStop:
+                raise
+            except Exception as e:
+                last = (str(e).splitlines() or [type(e).__name__])[0][:100]
+            self.log(f"  [debug] Chrome launch #{k + 1}/3 fail: {last} — abar chesta", "warn")
+            self._close()
+            time.sleep(2)
+        raise AnimClosed()
+
+    def _launch_once(self):
+        os.makedirs(self.prof["dir"], exist_ok=True)
+        args = ["--disable-blink-features=AutomationControlled"]
+        if self.hub.hidden:
+            args += ["--window-position=-32000,-32000", "--window-size=1366,900"]
+        else:
+            off = 28 * (self.idx % 10)
+            args += [f"--window-position={off},{off}", "--window-size=1280,860"]
+        self.ctx = self.pw.chromium.launch_persistent_context(
+            self.prof["dir"], channel="chrome", headless=False, no_viewport=True,
+            ignore_default_args=["--disable-extensions", "--enable-automation"], args=args)
+        self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        # download capture: JEKONO tab/popup e download hole dhore rakhbe (page.expect_download er moto ekta page er upor nirbhor na)
+        self._dls = []
+        self._closing = False
+        def _hook(pg):
+            try:
+                pg.on("download", lambda d: self._dls.append(d))
+                pg.on("crash", lambda *_: self.log("  [debug] Chrome tab crash hoyeche (memory kom?)", "warn"))
+                pg.on("close", lambda *_: (None if self._closing else
+                                           self.log("  [debug] Chrome tab bondho hoyeche (app na — onno kono karone)", "warn")))
+            except Exception:
+                pass
+        for _pg in list(self.ctx.pages):
+            _hook(_pg)
+        self.ctx.on("page", _hook)
+        try:
+            self.ctx.on("close", lambda *_: (None if self._closing else
+                                             self.log("  [debug] Chrome window/process bondho hoyeche (app na)", "warn")))
+        except Exception:
+            pass
+        try:   # blob capture: download event na ashle blob er content nije pore nibo
+            self.ctx.add_init_script(
+                "(()=>{if(window.__bh)return;window.__bh=1;window.__blobs=[];"
+                "const o=URL.createObjectURL;URL.createObjectURL=function(b){"
+                "try{if(b&&b.size>20)window.__blobs.push(b);}catch(e){}return o.apply(this,arguments);};})();")
+            for _pg in list(self.ctx.pages):
+                try:
+                    _pg.reload()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.log("Chrome khulechhe")
+
+    # ───── limit / 5-ghonta window ─────
+    def _mark_window(self):
+        """Prothom message pathanor somoy theke 5 ghonta = ei account er window."""
+        d, now = self.prof["dir"], time.time()
+        st = anim_lim_get(d)
+        if not st.get("win") or now - float(st["win"]) >= 5 * 3600:
+            anim_lim_set(d, win=now, until=0)
+
+    def _limit_texts(self):
+        """Popup ('resets at 7:20 AM') ar textbox er upor er banner ('out of free messages until 7:20 AM') er text gulo."""
+        res = []
+        for rx in (r"(?:resets|returns)\s+at\s+\d", r"until\s+\d{1,2}:\d{2}\s*[AaPp]"):
+            try:
+                loc = self.page.get_by_text(re.compile(rx, re.I))
+                for i in range(min(loc.count(), 4)):
+                    try:
+                        res.append(loc.nth(i).inner_text(timeout=2000))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return res
+
+    def _close_limit_popup(self):
+        """'Upgrade to keep chatting' popup thakle cross (X) button e click kore bondho kore."""
+        page = self.page
+
+        def shown():
+            try:
+                return page.get_by_text(re.compile(r"Upgrade to keep chatting", re.I)).first.is_visible()
+            except Exception:
+                return False
+        if not shown():
+            return False
+        tries = (
+            lambda: page.locator('[role="dialog"] button[aria-label*="Close" i]').first.click(timeout=2000),
+            lambda: page.get_by_role("button", name=re.compile(r"close", re.I)).first.click(timeout=2000),
+            lambda: page.locator('[role="dialog"] button:has(svg)').first.click(timeout=2000),
+            lambda: page.keyboard.press("Escape"),
+            lambda: page.get_by_role("button", name=re.compile(r"not now", re.I)).first.click(timeout=2000),
+        )
+        for t in tries:
+            try:
+                t()
+            except Exception:
+                pass
+            self._wait(700)
+            if not shown():
+                self.log("Limit popup bondho kora holo", "ok")
+                return True
+        return False
+
+    def _dismiss_popups(self):
+        """Onno kono popup/dialog (welcome, new feature, survey, cookie ...) thakle cross (X) button khuje bondho kore.
+        Limit popup hole bondho kore na — oti AnimLimit handle kore. Kono popup bondho hole True."""
+        page = self.page
+        dlg = '[role="dialog"]:visible, [role="alertdialog"]:visible, [aria-modal="true"]:visible'
+        closed = False
+        for _ in range(3):
+            try:
+                d = page.locator(dlg).first
+                if not d.is_visible():
+                    break
+                try:
+                    if ANIM_LIMIT_STRICT_RE.search(d.inner_text(timeout=1500) or ""):
+                        break
+                except Exception:
+                    pass
+            except Exception:
+                break
+            tries = (
+                lambda: d.locator('button[aria-label*="close" i], button[aria-label*="dismiss" i]').first.click(timeout=1500),
+                lambda: d.get_by_role("button", name=re.compile(r"^(close|dismiss|not now|skip|maybe later|no thanks|got it|done|ok)$", re.I)).first.click(timeout=1500),
+                lambda: d.locator("button:has(svg)").first.click(timeout=1500),
+                lambda: page.keyboard.press("Escape"),
+            )
+            gone = False
+            for t in tries:
+                try:
+                    t()
+                except Exception:
+                    continue
+                self._wait(700)
+                try:
+                    if not d.is_visible():
+                        gone = True
+                        break
+                except Exception:
+                    gone = True
+                    break
+            if not gone:
+                break
+            closed = True
+            self.log("Popup cross button e click kore bondho kora holo", "ok")
+        return closed
+
+    def _calc_until(self):
+        """Limit popup ashle: kokhon porjonto ei Chrome e kaj hobe na. Popup er 'resets at' time, na pele kaj shuru + 5 ghonta."""
+        now, d = time.time(), self.prof["dir"]
+        parsed = None
+        for txt in self._limit_texts():
+            parsed = anim_reset_ts(txt)
+            if parsed:
+                break
+        self._close_limit_popup()
+        win = float(anim_lim_get(d).get("win") or 0)
+        if parsed:
+            until = parsed
+        elif win and win + 5 * 3600 > now:
+            until = win + 5 * 3600
+        else:
+            until = now + 5 * 3600
+        until += 90
+        anim_lim_set(d, until=until)
+        return until
+
+    # ───── main loop ─────
+    def _session(self):
+        hub = self.hub
+        note_t = 0.0
+        while True:
+            if hub.stop.is_set():
+                raise AnimStop()
+            if self.prof is None:                 # free, limit-nei Chrome profile khuji
+                if not hub.has_work():
+                    if hub.inflight() == 0:
+                        self.log("Aar kono prompt nei — ei thread shesh", "ok")
+                        return
+                    self._wait(3000)
+                    continue
+                pr, hopeless = hub.pick_profile()
+                if hopeless:
+                    self.log("Kono usable Chrome profile nei — ei thread bondho", "err")
+                    return
+                if pr is None:
+                    if time.time() - note_t > 60:
+                        note_t = time.time()
+                        self.log(hub.no_profile_msg(), "warn")
+                    self._wait(3000)
+                    continue
+                self.prof = pr
+                self.tag = f"T{self.idx + 1} {pr['name']}"
+            task = hub.next_task()
+            if task is None:
+                if hub.inflight() > 0:            # onno Chrome limit khele tar box ekhane ashte pare
+                    self._wait(3000)
+                    continue
+                self.log("Aar kono prompt nei — ei thread shesh", "ok")
+                return
+            try:
+                if self.ctx is None:
+                    self._launch()
+                self._run_task(task)
+            except AnimStop:
+                hub.release(task, True)
+                raise
+            except AnimLogin:
+                hub.release(task, True)
+                self.log("Claude e login nei — Chrome section theke ei profile khule claude.ai te login koro. "
+                         "Ei run e ei profile use hobe na, onno profile nichhi.", "err")
+                self._retire(bad=True)
+                continue
+            except AnimClosed:
+                hub.release(task, True)
+                hits = self.__dict__.setdefault("_closed_hits", {})
+                d = self.prof["dir"] if self.prof else ""
+                hits[d] = hits.get(d, 0) + 1
+                bad = hits[d] >= 3
+                self.log(f"Chrome window bondho hoye geche ({hits[d]}/3) — "
+                         + ("ei run e ei profile baad, onno profile nichhi." if bad else "profile ta rekhe abar chalu korchhi."),
+                         "err")
+                self._retire(bad=bad)
+                self._wait(3000)
+                continue
+            except AnimLimit:
+                until = self._calc_until()
+                hub.release(task, True)
+                self.log("Account er limit shesh (reset " + time.strftime("%I:%M %p", time.localtime(until))
+                         + ") — Chrome bondho, onno Chrome khulchhe", "warn")
+                self._retire()
+                continue
+            except Exception as e:
+                hub.release(task, True)
+                self.log(f"Chrome error: {e} — onno profile nichhi", "err")
+                self._retire(bad=True)
+                continue
+            hub.release(task, False)
+
+    def _run_task(self, task):
+        """Ekta box er prompt gulo — ei box e onno Chrome (thread) o ekshathe kaj korte pare, prottek Chrome nijer chat e.
+        Prottek Chrome prothome box er prompt neye (serial onujayi), tarpor kaj shesh hole pore'r prompt nei.
+        Limit hole AnimLimit uthe jay (claim kora prompt box e ferot jay)."""
+        hub = self.hub
+        first = hub.first_prompt()
+        fresh = True
+        while True:
+            if hub.stop.is_set():
+                raise AnimStop()
+            job = hub.claim_item(task)
+            if job is None:
+                return
+            label = f"{job['box']} #{job['num']}"
+            self.log(f"{label} shuru")
+            hub.set_status(job, "run")
+            t0 = time.time()
+            try:
+                if fresh:
+                    self._goto_new()
+                    if first:
+                        self.log("new chat — Prompt section er prompt pathano hocche")
+                        self._say(first)
+                        self._wait(random.randint(1500, 3000))
+                        self.log("Response shesh — ebar box er prompt pathano hocche")
+                    fresh = False
+                job["_cards0"] = self._card_count()          # ei prompt pathanor age chat e koyta artifact card chhilo
+                self._say(job["text"])
+                self.log("Claude file toiri shesh koreche — download hocche")
+                self._wait(1500)
+                self._grab(job)
+            except AnimLimit as ex:
+                if ex.args and ex.args[0] == "pre":
+                    hub.give_back(task, job)
+                    hub.set_status(job, "queued")
+                    raise
+                job["limit_hits"] = job.get("limit_hits", 0) + 1
+                if job["limit_hits"] >= 2:
+                    hub.add_failed()
+                    hub.set_status(job, "fail")
+                    self.log(f"{label} FAIL — por por 2 ta Chrome e limit, ei prompt skip kora holo", "err")
+                else:
+                    hub.give_back(task, job)
+                    hub.set_status(job, "queued")
+                raise
+            except (AnimStop, AnimLogin, AnimClosed):
+                hub.give_back(task, job)
+                hub.set_status(job, "queued")
+                raise
+            except Exception as e:
+                job["attempts"] += 1
+                fresh = True
+                if job["attempts"] < 2:
+                    self.log(f"{label} hoyni ({e}) — notun chat e abar chesta korbo", "warn")
+                    hub.give_back(task, job)
+                    hub.set_status(job, "queued")
+                else:
+                    hub.add_failed()
+                    hub.set_status(job, "fail")
+                    self.log(f"{label} FAIL ({e})", "err")
+                self._wait(3000)
+                continue
+            hub.add_done()
+            try:
+                self.__dict__.setdefault("_closed_hits", {}).pop(self.prof["dir"], None)
+            except Exception:
+                pass
+            hub.set_status(job, "done")
+            self.log(f"{label} \u2713 download hoyeche ({int(time.time() - t0)}s)", "ok")
+            self._wait(random.randint(3000, 6000))
+
+    def _say(self, text):
+        self._dismiss_popups()
+        comp = self._composer()
+        if comp is None:
+            raise RuntimeError("Prompt likhar box paoa jayni")
+        self._mark_window()
+        prev = self._resp_count()
+        self._fill(comp, text)
+        self._send(comp, self._nmsg == 0)
+        self._nmsg += 1
+        self._wait_start(prev)
+        return self._wait_done()
+
+    # ───── page steps ─────
+    def _logged_out(self):
+        page = self.page
+        u = (page.url or "").lower()
+        if "/login" in u or "/logout" in u or "accounts.google" in u:
+            return True
+        for sel in ('button:has-text("Continue with Google")', 'input[type="email"]'):
+            try:
+                if page.locator(sel).first.is_visible():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _composer(self):
+        for sel in ('div[contenteditable="true"]', "textarea"):
+            try:
+                loc = self.page.locator(sel).first
+                if loc.is_visible():
+                    return loc
+            except Exception:
+                pass
+        return None
+
+    def _goto_new(self):
+        self._nmsg = 0
+        page = self.page
+        if page.is_closed():
+            raise AnimClosed()
+        try:
+            page.goto(ANIM_URL, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            if page.is_closed():
+                raise AnimClosed()
+            raise RuntimeError(f"claude.ai khola jayni: {e}")
+        for _ in range(40):
+            self._wait(1500)
+            if self._logged_out():
+                raise AnimLogin()
+            if self._limit_strict():
+                raise AnimLimit("pre")
+            self._dismiss_popups()
+            if self._composer() is not None:
+                self._wait(1500)
+                if self._limit_strict():
+                    raise AnimLimit("pre")
+                self._dismiss_popups()
+                return
+        raise RuntimeError("claude.ai load hoyni / prompt box paoa jayni")
+
+    def _ctext(self, comp):
+        try:
+            t = (comp.inner_text() or "").strip()
+            if t:
+                return t
+        except Exception:
+            pass
+        try:
+            return (comp.input_value() or "").strip()
+        except Exception:
+            return ""
+
+    def _fill(self, comp, prompt):
+        page = self.page
+        comp.click()
+        want = max(10, min(len(prompt) // 2, 200))
+        for how in (0, 1):
+            try:
+                if how == 0:
+                    comp.evaluate("""(el, text) => {
+                        el.focus();
+                        const dt = new DataTransfer();
+                        dt.setData('text/plain', text);
+                        el.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true}));
+                    }""", prompt)
+                else:
+                    comp.click()
+                    page.keyboard.press("Control+A")
+                    page.keyboard.insert_text(prompt)
+            except Exception:
+                pass
+            self._wait(800)
+            if len(self._ctext(comp)) >= want:
+                return
+        raise RuntimeError("Prompt paste hoyni")
+
+    def _send(self, comp, first_msg=False):
+        page = self.page
+        for _ in range(3):
+            btn = None
+            for sel in ('button[aria-label*="Send" i]', 'button[aria-label*="send message" i]'):
+                try:
+                    b = page.locator(sel).first
+                    if b.is_visible() and b.is_enabled():
+                        btn = b
+                        break
+                except Exception:
+                    pass
+            try:
+                if btn is not None:
+                    btn.click()
+                else:
+                    comp.click()
+                    page.keyboard.press("Enter")
+            except Exception:
+                pass
+            self._wait(2500)
+            if len(self._ctext(comp)) < 10 or (first_msg and "/chat/" in (page.url or "")):
+                return
+
+    def _resp_count(self):
+        page = self.page
+        for sel in ("div[data-is-streaming]", ".font-claude-response", ".font-claude-message"):
+            try:
+                n = page.locator(sel).count()
+                if n:
+                    return n
+            except Exception:
+                pass
+        return 0
+
+    def _limit_strict(self):
+        try:
+            return self.page.get_by_text(ANIM_LIMIT_STRICT_RE).first.is_visible()
+        except Exception:
+            return False
+
+    def _resp_el(self):
+        page = self.page
+        for sel in ("div[data-is-streaming]", ".font-claude-response", ".font-claude-message"):
+            try:
+                loc = page.locator(sel)
+                n = loc.count()
+                if n > 0:
+                    return loc.nth(n - 1)
+            except Exception:
+                pass
+        return None
+
+    def _is_streaming(self):
+        page = self.page
+        try:
+            if page.locator('[data-is-streaming="true"]').count() > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            return page.locator('button[aria-label*="Stop" i]').first.is_visible()
+        except Exception:
+            return False
+
+    def _limit(self):
+        try:
+            return self.page.get_by_text(ANIM_LIMIT_RE).first.is_visible()
+        except Exception:
+            return False
+
+    def _wait_start(self, prev=0):
+        """Notun response shuru hoyeche kina (ager message er response ke gona hoy na)."""
+        for _ in range(400):
+            self._wait(1500)
+            if self._is_streaming() or self._resp_count() > prev:
+                return
+            if prev == 0 and "/chat/" in (self.page.url or ""):
+                return
+            if self._limit_strict() or self._limit():
+                raise AnimLimit()
+            self._dismiss_popups()
+        raise RuntimeError("Claude er response shuru hoyni")
+
+    def _last_text(self):
+        el = self._resp_el()
+        try:
+            if el is not None:
+                return (el.inner_text() or "").strip()
+            return (self.page.locator("main").last.inner_text() or "").strip()
+        except Exception:
+            return ""
+
+    def _wait_done(self):
+        t0, last, stable = time.time(), None, 0
+        while True:
+            self._wait(2000)
+            if self._limit_strict():
+                raise AnimLimit()
+            self._dismiss_popups()
+            txt = self._last_text()
+            if self._is_streaming():
+                stable = 0
+            else:
+                stable = stable + 1 if (txt and txt == last) else 0
+                if stable >= 3:
+                    return txt
+                if self._limit_strict() or (not txt and self._limit()):
+                    raise AnimLimit()
+            last = txt
+            if time.time() - t0 > 3 * 3600:
+                raise RuntimeError("Response 3 ghontay-o shesh hoyni")
+
+    def _codes(self):
+        page = self.page
+        el = self._resp_el()
+        loc = (el if el is not None else page.locator("main").last).locator("pre")
+        try:
+            arr = loc.evaluate_all("els => els.map(e => (e.querySelector('code') || e).innerText)")
+        except Exception:
+            arr = []
+        return [c for c in arr if c and c.strip()]
+
+    # ───── output: artifact Export > HTML  /  file card Download ─────
+    def _vis(self, loc):
+        try:
+            return loc.is_visible()
+        except Exception:
+            return False
+
+    def _export_btn(self):
+        page = self.page
+        for loc in (page.get_by_role("button", name=re.compile(r"^\s*Export\s*$", re.I)),
+                    page.locator('button:has-text("Export")')):
+            try:
+                if loc.count() and self._vis(loc.first):
+                    return loc.first
+            except Exception:
+                pass
+        return None
+
+    def _art_card(self):
+        """Artifact card er asol click-link (frame-card-open) — shesh ta. Na pele purono text-based tarika."""
+        page = self.page
+        for sel in ('[data-testid="frame-card-open"]', '[aria-label^="View" i][data-cds="CardLink"]'):
+            try:
+                loc = page.locator(sel)
+                n = loc.count()
+                if n:
+                    return loc.nth(n - 1)
+            except Exception:
+                pass
+        try:
+            loc = page.get_by_text(re.compile(r"Artifact\s*[\u00b7\u2022]"))
+            n = loc.count()
+            if n:
+                return loc.nth(n - 1)
+        except Exception:
+            pass
+        return None
+
+    def _open_art_card(self):
+        """Card khule dey: normal click -> force click -> JS click -> keyboard Enter."""
+        card = self._art_card()
+        if card is None:
+            return False
+        try:
+            card.scroll_into_view_if_needed(timeout=4000)
+        except Exception:
+            pass
+        try:                                   # chat input box jeno card dhake na — ektu upore scroll
+            self.page.evaluate("()=>{const e=document.querySelector('[data-testid=\"frame-card-open\"]');"
+                               "if(e){const l=[...document.querySelectorAll('[data-testid=\"frame-card-open\"]')].pop();"
+                               "l.scrollIntoView({block:'center'});}}")
+        except Exception:
+            pass
+        for how in ("click", "force", "js", "enter"):
+            try:
+                if how == "click":
+                    card.click(timeout=4000)
+                elif how == "force":
+                    card.click(timeout=4000, force=True)
+                elif how == "js":
+                    card.evaluate("el => el.click()")
+                else:
+                    card.focus()
+                    self.page.keyboard.press("Enter")
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception:
+                continue
+            for _ in range(6):                 # panel khulte somoy lage
+                self._wait(500)
+                if self._export_btn() is not None:
+                    return True
+        return False
+
+    def _file_dl_btn(self):
+        page = self.page
+        for loc in (page.locator('button[aria-label*="Download" i]'),
+                    page.get_by_role("button", name=re.compile(r"download", re.I))):
+            try:
+                n = loc.count()
+                if n:
+                    return loc.nth(n - 1)
+            except Exception:
+                pass
+        return None
+
+    def _blob_text(self):
+        """Page / iframe gulo te create hoye thaka sobcheye boro HTML blob er text (fallback)."""
+        best = None
+        try:
+            frames = list(self.page.frames)
+        except Exception:
+            frames = []
+        for fr in frames:
+            try:
+                t = fr.evaluate("async()=>{const a=window.__blobs||[];let r=null;"
+                                "for(const b of a){try{const x=await b.text();"
+                                "if(!r||x.length>r.length)r=x;}catch(e){}}return r;}")
+            except Exception:
+                t = None
+            if t and len(t) > 20 and (best is None or len(t) > len(best)):
+                best = t
+        return best
+
+    def _download(self, job, click, timeout=45000):
+        """click() er por download dhore '<serial>.html' nam e save kore.
+        1) kono tab e download event ashle seta   2) na ashle page er blob content."""
+        n0 = len(getattr(self, "_dls", []))
+        for fr in list(self.page.frames):
+            try:
+                fr.evaluate("window.__blobs=[]")
+            except Exception:
+                pass
+        click()
+        end = time.time() + timeout / 1000.0
+        dl = None
+        while time.time() < end:
+            if len(self._dls) > n0:
+                dl = self._dls[-1]
+                break
+            self._wait(300)
+            if time.time() - (end - timeout / 1000.0) > 3:       # 3 sec por blob check
+                bt = self._blob_text()
+                if bt:
+                    dest = os.path.join(job["out"], f"{job['num']}.html")
+                    atomic_write(dest, bt)
+                    return dest
+        if dl is None:
+            raise RuntimeError("click holo kintu download event/blob ashenai")
+        ext = os.path.splitext(dl.suggested_filename or "")[1].lower()
+        if ext in ("", ".txt", ".htm"):
+            ext = ".html"
+        dest = os.path.join(job["out"], f"{job['num']}{ext}")
+        tmp = dest + ".part"
+        dl.save_as(tmp)
+        if not os.path.exists(tmp) or os.path.getsize(tmp) < 20:
+            raise RuntimeError("download howa file khali")
+        if os.path.exists(dest):
+            os.remove(dest)
+        os.replace(tmp, dest)
+        return dest
+
+    def _export_html(self, job):
+        """Export > HTML row. Prottekbar try er age dekhe menu khola ache kina — bondho hoye gele abar khole."""
+        page = self.page
+
+        ROW_RX = re.compile(r"Standalone\s+web\s+page", re.I)
+        MENU_RXS = (ROW_RX, re.compile(r"Plain-text\s*\.md", re.I), re.compile(r"browser.s\s+print\s+dialog", re.I))
+
+        def vis_text(rx):
+            """Shob frame (main + iframe) e rx match kora prothom *visible* element."""
+            try:
+                frames = list(page.frames)
+            except Exception:
+                frames = [page.main_frame]
+            for fr in frames:
+                try:
+                    loc = fr.get_by_text(rx)
+                    n = min(loc.count(), 12)
+                except Exception:
+                    continue
+                for i in range(n):
+                    try:
+                        e = loc.nth(i)
+                        if e.is_visible():
+                            return e
+                    except Exception:
+                        pass
+            return None
+
+        class _Row:                      # lazy locator-er moto: jokhon dorkar tokhon visible element khuje
+            def _e(self):
+                e = vis_text(ROW_RX)
+                if e is None:
+                    raise RuntimeError("HTML row dekha jacche na")
+                return e
+            def hover(self, **k): return self._e().hover(**k)
+            def click(self, **k): return self._e().click(**k)
+            def focus(self): return self._e().focus()
+            def bounding_box(self): return self._e().bounding_box()
+
+        _row = _Row()
+        row_txt = lambda: _row
+
+        def menu_open():
+            return any(vis_text(rx) is not None for rx in MENU_RXS)
+
+        def open_menu():
+            """Menu already khola thakle kichu kore na (Export abar chaple bondho hoye jay)."""
+            for _ in range(2):
+                for _ in range(5):
+                    if menu_open():
+                        return True
+                    self._wait(400)
+                b = self._export_btn()
+                if b is not None:
+                    try:
+                        b.click(timeout=3000)
+                    except Exception:
+                        pass
+                self._wait(1200)
+            return menu_open()
+
+        def dump_debug():
+            try:
+                for k, fr in enumerate(page.frames):
+                    self.log("  [debug] frame#%d url=%s  Standalone=%d Markdown=%d" % (
+                        k, (fr.url or "")[:70], fr.get_by_text("Standalone").count(),
+                        fr.get_by_text("Markdown").count()), "warn")
+            except Exception:
+                pass
+
+        def row_btn():
+            return _row._e().locator(
+                "xpath=ancestor-or-self::*[self::button or @role='menuitem' or @role='button' or self::a][1]")
+
+        def mouse_click():
+            bb = row_txt().bounding_box()
+            if not bb:
+                raise RuntimeError("HTML row er position paoa jayni")
+            page.mouse.move(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)
+            page.mouse.down()
+            self._wait(80)
+            page.mouse.up()
+
+        def mouse_dl_icon():          # row er dan dike download icon
+            bb = row_txt().bounding_box()
+            if not bb:
+                raise RuntimeError("HTML row er position paoa jayni")
+            row = row_btn().bounding_box(timeout=2000) or bb
+            page.mouse.click(row["x"] + row["width"] - 24, bb["y"] + bb["height"] / 2)
+
+        def key_enter():
+            row_txt().focus()
+            page.keyboard.press("Enter")
+
+        cands = (
+            mouse_click,
+            lambda: row_btn().click(timeout=3000),
+            lambda: row_txt().click(timeout=3000, force=True),
+            mouse_dl_icon,
+            lambda: row_btn().locator("svg").last.click(timeout=3000, force=True),
+            lambda: page.get_by_role("button", name=re.compile(r"^\s*HTML\b", re.I)).first.click(timeout=3000),
+            key_enter,
+        )
+        last = None
+        if not open_menu():
+            dump_debug()
+            raise RuntimeError("Export menu detect hoyni")
+        for i, fn in enumerate(cands):
+            try:
+                if not open_menu():
+                    raise RuntimeError("Export menu khola jacche na")
+                try:
+                    row_txt().hover(timeout=1500)
+                except Exception:
+                    pass
+                return self._download(job, fn, timeout=9000)
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception as e:
+                last = e
+                self.log(f"  HTML click tarika #{i + 1} kaj kore ni: {str(e).splitlines()[0][:90]}", "warn")
+                if page.is_closed():
+                    raise AnimClosed()
+        raise RuntimeError(f"Export > HTML download hoyni ({last})")
+
+    def _api_html(self):
+        """Permanent fallback: UI na use kore, conversation er data (same logged-in Chrome theke) theke HTML tule ane."""
+        m = re.search(r"/chat/([0-9a-fA-F-]{36})", self.page.url or "")
+        if not m:
+            return None
+        js = """async (cid) => {
+          const o = await (await fetch('/api/organizations', {credentials: 'include'})).json();
+          const ids = (Array.isArray(o) ? o : []).map(x => x.uuid).filter(Boolean);
+          for (const id of ids) {
+            const r = await fetch(`/api/organizations/${id}/chat_conversations/${cid}?tree=True&rendering_mode=messages&render_all_tools=true`, {credentials: 'include'});
+            if (r.ok) return await r.text();
+          }
+          return null; }"""
+        raw = self.page.evaluate(js, m.group(1))
+        if not raw:
+            return None
+        data = json.loads(raw)
+
+        def walk(o, out):
+            if isinstance(o, str):
+                out.append(o)
+            elif isinstance(o, dict):
+                for v in o.values():
+                    walk(v, out)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v, out)
+
+        msgs = [x for x in (data.get("chat_messages") or []) if x.get("sender") == "assistant"]
+        for msg in msgs[-1:]:                           # shudhu SHESH assistant message (ei prompter response) — purono file na
+            strs = []
+            walk(msg.get("content"), strs)
+            best = None
+            for t in strs:
+                low = t.lower()
+                if len(t) > 300 and ("<html" in low or "<!doctype" in low) and (best is None or len(t) > len(best)):
+                    best = t
+            if best:
+                return best
+        return None
+
+    def _card_count(self):
+        try:
+            return self.page.locator('[data-testid="frame-card-open"]').count()
+        except Exception:
+            return 0
+
+    def _close_panel(self):
+        """Artifact panel er X chepe bondho kore (porer prompt er jonno chat clean thake). True = bondho hoyeche."""
+        page = self.page
+        if self._export_btn() is None:
+            return True
+        js = """el => { let c = el;
+            for (let i = 0; i < 6 && c; i++) {
+              c = c.parentElement; if (!c) break;
+              const bs = [...c.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+              if (bs.length >= 4) { bs[bs.length - 1].click(); return true; }
+            } return false; }"""
+
+        def gone():
+            self._wait(700)
+            return self._export_btn() is None
+
+        try:
+            page.keyboard.press("Escape")            # Export popover khola thakle
+        except Exception:
+            pass
+        self._wait(300)
+        for attempt in range(3):
+            try:
+                if attempt == 0:                      # header er shesh button = X
+                    eb = self._export_btn()
+                    if eb is not None:
+                        eb.evaluate(js)
+                elif attempt == 1:                    # aria-label "Close" (sidebar/menu bad)
+                    loc = page.get_by_role("button", name=re.compile(r"^\s*close(?!.*(sidebar|menu|nav))", re.I))
+                    for i in range(loc.count() - 1, -1, -1):
+                        if loc.nth(i).is_visible():
+                            loc.nth(i).click(timeout=2000)
+                            break
+                else:
+                    page.keyboard.press("Escape")
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception:
+                pass
+            if gone():
+                return True
+        self.log("  artifact panel bondho kora gelo na", "warn")
+        return False
+
+    def _grab(self, job):
+        dest = self._grab_inner(job)
+        if dest:
+            try:
+                if self._close_panel():
+                    self.log("  artifact panel bondho — porer prompt er jonno ready")
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception:
+                pass
+        return dest
+
+    def _grab_inner(self, job):
+        os.makedirs(job["out"], exist_ok=True)
+        cards0 = job.get("_cards0")
+        # 1) ei prompt er notun artifact card ashar opekkha (chat e purono file thakle seta jeno download na hoy)
+        for _ in range(20):
+            if cards0 is not None and self._card_count() > cards0:
+                break
+            if cards0 is None and (self._export_btn() or self._art_card() or self._file_dl_btn()):
+                break
+            self._wait(1500)
+        now = self._card_count()
+        stale = cards0 is not None and now > 0 and now <= cards0
+        dest = None
+        try:
+            if stale:
+                self.log(f"  notun artifact card ashe ni (cards {cards0} -> {now}) — purono file download korbo na", "warn")
+            else:
+                if self._export_btn() is not None:      # purono / onno file er panel khola — bondho kore ei prompt er card khulbo
+                    self.log("  ager panel khola chhilo — bondho kore notun file khulchi")
+                    self._close_panel()
+                card = self._art_card()
+                if card is not None:
+                    try:
+                        self.log("  file: " + ((card.get_attribute("aria-label", timeout=2000) or "").replace("View ", "") or "?")
+                                 + f"  (card {now}/{now})")
+                    except Exception:
+                        pass
+                    self.log("Artifact file khola hocche")
+                    if not self._open_art_card():
+                        self.log("  card click kaj korlo na — abar chesta", "warn")
+                        self._wait(1500)
+                        self._open_art_card()
+                if self._export_btn() is not None:
+                    dest = self._export_html(job)
+                elif cards0 is None or now == 0:
+                    if self._file_dl_btn() is not None:
+                        dest = self._download(job, lambda: self._file_dl_btn().click())
+        except (AnimStop, AnimClosed):
+            raise
+        except Exception as e:
+            self.log(f"Download hoyni ({e}) — conversation data theke chesta kora hocche", "warn")
+        if dest:
+            return dest
+        try:                                   # fallback: shesh assistant message er HTML (conversation data)
+            h = self._api_html()
+        except (AnimStop, AnimClosed):
+            raise
+        except Exception as e:
+            h = None
+            self.log(f"  conversation data theke neya gelo na ({str(e).splitlines()[0][:80]})", "warn")
+        if h:
+            dest = os.path.join(job["out"], f"{job['num']}.html")
+            atomic_write(dest, h)
+            self.log("HTML conversation data theke neya hoyeche", "ok")
+            return dest
+        html, best = None, 0                   # fallback: reply te code block thakle seta
+        for c in self._codes():
+            low = c.lower()
+            if any(k in low for k in ("<html", "<!doctype", "<svg", "<canvas", "<script")) and len(c) > best:
+                html, best = c, len(c)
+        if html:
+            dest = os.path.join(job["out"], f"{job['num']}.html")
+            atomic_write(dest, html)
+            return dest
+        raise RuntimeError("Artifact / download button / code kichui paoa jayni")
+
+class Tab3Anim(tk.Frame):
+    SECTIONS = [("start", "\u25b6", "Start"), ("anim", "\U0001f3ac", "2D Animation"),
+                ("chrome", "\U0001f310", "Chrome"), ("prompt", "\u270d", "Prompt")]
+
+    def __init__(self, app):
+        super().__init__(app, bg=BG)
+        self.app = app
+        self.cur = None
+        self.nav, self.pages = {}, {}
+        self._jobs = {}
+        self._hub = None
+        self._logq = queue.Queue()
+        self._statq = queue.Queue()
+        self._spin = 0
+        self._bidn = 0
+        os.makedirs(ANIM_BASE, exist_ok=True)
+
+        self.side = tk.Frame(self, bg=SIDE, width=96)
+        self.side.pack(side="left", fill="y")
+        self.side.pack_propagate(False)
+        tk.Frame(self, bg=PANEL2, width=1).pack(side="left", fill="y")
+        self.nav_ind = tk.Frame(self.side, bg=ACCENT, width=3)
+        self.content = tk.Frame(self, bg=BG)
+        self.content.pack(side="left", fill="both", expand=True)
+        for key, icon, name in self.SECTIONS:
+            b = NavItem(self.side, icon, name, lambda k=key: self.show(k))
+            b.pack(fill="x", padx=8, pady=2)
+            self.nav[key] = b
+            self.pages[key] = tk.Frame(self.content, bg=BG)
+        self._build_anim(self.pages["anim"])
+        self._build_chrome(self.pages["chrome"])
+        self._build_prompt(self.pages["prompt"])
+        self._build_start(self.pages["start"])
+        self.side.bind("<Configure>", lambda e: self._move_ind())
+        self.show("start")
+        self.after(300, self._pump)
+
+    @staticmethod
+    def _rd(path):
+        """File na thakle crash na kore khali string."""
+        try:
+            return read_text(path) if os.path.exists(path) else ""
+        except Exception:
+            return ""
+
+    # ───── nav ─────
+    def show(self, key):
+        if self.cur and self.cur != key:
+            self.pages[self.cur].place_forget()
+            self.nav[self.cur].set_active(False)
+        self.cur = key
+        if key == "start":
+            self._refresh_info()
+        self.nav[key].set_active(True, animate=False)
+        self.pages[key].place(x=0, y=0, relwidth=1, relheight=1)
+        self.after(30, self._move_ind)
+
+    def _move_ind(self):
+        b = self.nav.get(self.cur)
+        if b is None or b.winfo_height() < 20:
+            return
+        self.nav_ind.place(x=0, y=b.winfo_y() + 12, width=3, height=b.winfo_height() - 24)
+        self.nav_ind.lift()
+
+    def activate(self):
+        self.after(60, self._move_ind)
+        self._chrome_sync()
+
+    def deactivate(self):
+        self._flush()
+
+    # ───── debounce save ─────
+    def _sched(self, key, fn, ms=600):
+        old = self._jobs.get(key)
+        if old:
+            try:
+                self.after_cancel(old)
+            except Exception:
+                pass
+        self._jobs[key] = self.after(ms, fn)
+
+    def _flush(self):
+        for k in list(self._jobs):
+            try:
+                self.after_cancel(self._jobs.pop(k))
+            except Exception:
+                pass
+        try:
+            self._save_prompts()
+            atomic_write(ANIM_PROMPT, self.prompt_txt.get("1.0", "end-1c"))
+        except Exception:
+            pass
+
+    # ───── 2D Animation : prompt boxes ─────
+    BOX_COLORS = ("#4f9dff", "#ff8a3d", "#b36bff", "#2fd1a5", "#ff5fa2",
+                  "#e6c229", "#5fd0ff", "#9be15d", "#ff7a7a", "#8c8cff")
+
+    def _build_anim(self, f):
+        self.boxes = []
+        self._drag = None
+        self._outb = self._read_out_cfg()
+        self.app.header(f, "2D Animation", "Prompt box add koro, nam dao — Start dile upor er box er kaj age hobe")
+        bar = tk.Frame(f, bg=BG)
+        bar.pack(fill="x", padx=22, pady=(0, 8))
+        mkbtn(bar, "\uff0b  Add prompts", lambda: self._add_box(), "primary", pady=6, padx=16).pack(side="left")
+        self.cnt_lbl = mklabel(bar, "", 9, MUTED, bg=BG)
+        self.cnt_lbl.pack(side="left", padx=12)
+        mkbtn(bar, "\U0001f4c2 Open folder", self._open_out, "ghost", pady=3, padx=12).pack(side="right")
+        mkbtn(bar, "\U0001f4c1 Select folder", self._pick_out, "ghost", pady=3, padx=12).pack(side="right", padx=6)
+        self.out_lbl = mklabel(f, "", 9, MUTED, anchor="w")
+        self.out_lbl.pack(fill="x", padx=24, pady=(0, 4))
+        self._out_sync()
+        mklabel(f, "\u2630 handle dhore upor-niche tano (upor er box er kaj age) \u00b7 .txt box e drop korle oi box e boshbe, "
+                   "baire drop korle notun box hobe", 9, MUTED, anchor="w").pack(fill="x", padx=24, pady=(0, 6))
+        self.sf = ScrollFrame(f)
+        self.sf.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 14))
+        self.empty_lbl = mklabel(self.sf.inner, "Ekhono kono prompt nei.\n'\uff0b Add prompts' chepe prothom box banao.",
+                                 11, MUTED, justify="center")
+        self._load_prompts()
+        self._refresh_empty()
+
+    def _load_prompts(self):
+        try:
+            data = json.loads(self._rd(ANIM_PROMPTS) or "[]")
+        except Exception:
+            data = []
+        for d in data if isinstance(data, list) else []:
+            if isinstance(d, dict):
+                c = d.get("color")
+                self._add_box(str(d.get("name", "")), str(d.get("text", "")), save=False, focus=False,
+                              color=c if isinstance(c, int) else None)
+
+    def _save_prompts(self):
+        data = [{"name": b["name"].get(), "text": b["txt"].get("1.0", "end-1c"), "color": b["color"]}
+                for b in self.boxes]
+        os.makedirs(ANIM_BASE, exist_ok=True)
+        atomic_write(ANIM_PROMPTS, json.dumps(data, ensure_ascii=False, indent=1))
+
+    def _changed(self):
+        self._sched("prompts", self._save_prompts)
+        self._sched("status_all", self._status_all, 500)
+
+    def _refresh_empty(self):
+        n = len(self.boxes)
+        self.cnt_lbl.configure(text=f"{n} prompt" + ("s" if n != 1 else ""))
+        if n == 0:
+            self.empty_lbl.pack(pady=60)
+        else:
+            self.empty_lbl.pack_forget()
+
+    def _free_name(self):
+        used = {b["name"].get().strip().lower() for b in self.boxes}
+        k = 1
+        while f"prompt {k}" in used:
+            k += 1
+        return f"Prompt {k}"
+
+    def _free_color(self):
+        used = {b["color"] for b in self.boxes}
+        for k in range(len(self.BOX_COLORS)):
+            if k not in used:
+                return k
+        return len(self.boxes) % len(self.BOX_COLORS)
+
+    def _repack(self):
+        """boxes list er order onujayi frame gulo sajay + number badge update."""
+        for b in self.boxes:
+            b["frame"].pack_forget()
+        for i, b in enumerate(self.boxes):
+            b["frame"].pack(fill="x", pady=(0, 10), padx=(0, 48))   # right e faka — okhane mouse rekhe page scroll hoy
+            b["badge"].configure(text=str(i + 1))
+
+    def _add_box(self, name="", text="", save=True, focus=True, color=None):
+        ci = (color % len(self.BOX_COLORS)) if isinstance(color, int) else self._free_color()
+        col = self.BOX_COLORS[ci]
+        fr = tk.Frame(self.sf.inner, bg=PANEL, highlightthickness=2, highlightbackground=col, highlightcolor=col)
+        self._bidn += 1
+        box = {"frame": fr, "name": tk.StringVar(value=name or self._free_name()), "color": ci,
+               "id": self._bidn, "live": {}, "disk": set(), "nums": [], "sig": None}
+        fr._pbox = box
+        hd = tk.Frame(fr, bg=PANEL)
+        hd.pack(fill="x", padx=12, pady=(10, 6))
+        handle = tk.Label(hd, text="\u2630", bg=PANEL, fg=col, font=(FONT, 15, "bold"), cursor="fleur", padx=4)
+        handle.pack(side="left")
+        badge = tk.Label(hd, text="", bg=col, fg="#0b1114", font=(FONT, 10, "bold"), width=3, cursor="fleur")
+        badge.pack(side="left", padx=(2, 10), ipady=2)
+        box["badge"] = badge
+        for w in (handle, badge):
+            w.bind("<ButtonPress-1>", lambda e, b=box: self._drag_start(b))
+            w.bind("<B1-Motion>", self._drag_move)
+            w.bind("<ButtonRelease-1>", self._drag_end)
+        ent = mkentry(hd, box["name"], width=32)
+        ent.configure(highlightcolor=col)
+        ent.pack(side="left", ipady=3)
+        box["cnt"] = mklabel(hd, "", 9, MUTED, bg=PANEL)
+        box["cnt"].pack(side="left", padx=12)
+        mkbtn(hd, "\U0001f5d1 Delete", lambda b=box: self._delete_box(b), "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "\U0001f4c4 Load .txt", lambda b=box: self._load_file_into(b), "ghost", pady=2, padx=10).pack(side="right", padx=5)
+        mkbtn(hd, "\u21e7 Top", lambda b=box: self._move_top(b), "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "\U0001f4c2 Open file", lambda b=box: self._open_box_dir(b), "ghost", pady=2, padx=10).pack(side="right", padx=5)
+
+        tw = tk.Frame(fr, bg=PANEL)
+        tw.pack(fill="x", padx=12, pady=(0, 6))
+        sb = ttk.Scrollbar(tw, orient="vertical")
+        txt = mktext(tw, height=6, yscrollcommand=sb.set)
+        txt.configure(bg=PANEL2, padx=12, pady=10, highlightthickness=1,
+                      highlightbackground=PANEL2, highlightcolor=col)
+        sb.configure(command=txt.yview)
+        sb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        box["txt"] = txt
+        sw = tk.Frame(fr, bg=PANEL)                     # prompt gulor status: ○ pending  ◐ processing  ✓ downloaded
+        sw.pack(fill="x", padx=12, pady=(0, 12))
+        box["sum"] = mklabel(sw, "", 9, MUTED, bg=PANEL, anchor="w")
+        box["sum"].pack(fill="x", pady=(0, 4))
+        stt = tk.Frame(sw, bg=PANEL)
+        stt.pack(fill="x")
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            stt.bind(ev, lambda e: (self.sf._wheel(e), "break")[1])
+        stt.bind("<Configure>", lambda e, b=box: self.after_idle(lambda: self._fit_status(b)))
+        box["stt"] = stt
+        sb.bind("<Button-1>", lambda e, s_=sb, t=txt: self._sb_click(e, s_, t))
+        txt.insert("1.0", text)
+        txt.edit_reset()
+        txt.edit_modified(False)
+        txt.bind("<<Modified>>", lambda e, b=box: self._box_modified(b))
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            txt.bind(ev, lambda e, t=txt: self._txt_wheel(e, t))
+        box["name"].trace_add("write", lambda *a: self._changed())
+        self.boxes.append(box)
+        self._fit_box(box)
+        self._status_refresh(box)
+        self._repack()
+        if DND_OK:
+            self.app._dnd_register_tree(fr)
+        self._refresh_empty()
+        if save:
+            self._changed()
+        if focus:
+            self.sf.after(80, lambda: self.sf.cv.yview_moveto(1.0))
+            ent.focus_set()
+            ent.select_range(0, "end")
+        return box
+
+    def _sb_click(self, e, sb, t):
+        """Scrollbar er faka jayga (trough) e click korle sheikhane-i lafiye jay — 'click kore akdom niche'."""
+        try:
+            el = str(sb.identify(e.x, e.y))
+        except Exception:
+            return None
+        if "trough" in el:
+            lo, hi = t.yview()
+            frac = e.y / max(1, sb.winfo_height())
+            t.yview_moveto(max(0.0, min(1.0, frac - (hi - lo) / 2)))
+            return "break"
+        return None
+
+    def _fit_box(self, box):
+        t = box["txt"]
+        lines = int(t.index("end-1c").split(".")[0])
+        t.configure(height=max(6, min(14, lines + 1)))
+        n = len(t.get("1.0", "end-1c").split())
+        box["cnt"].configure(text=f"{n} words")
+
+    def _box_modified(self, box):
+        t = box["txt"]
+        if not t.edit_modified():
+            return
+        t.edit_modified(False)
+        self._fit_box(box)
+        self._changed()
+
+    def _txt_wheel(self, e, t):
+        """Text er vitore scroll hole text, nahole pura page scroll."""
+        lo, hi = t.yview()
+        if lo <= 0.0 and hi >= 1.0:
+            self.sf._wheel(e)
+        else:
+            if getattr(e, "num", 0) == 4:
+                n = -1
+            elif getattr(e, "num", 0) == 5:
+                n = 1
+            else:
+                n = int(-e.delta / 120) or (-1 if e.delta > 0 else 1)
+            t.yview_scroll(n, "units")
+        return "break"
+
+    # ───── Output folder ─────
+    def _read_out_cfg(self):
+        try:
+            d = json.loads(self._rd(ANIM_OUT_CFG) or "{}").get("dir")
+        except Exception:
+            d = None
+        return d if isinstance(d, str) and d.strip() else ANIM_OUT
+
+    def _out_base(self):
+        return self._outb
+
+    def _out_sync(self):
+        self.out_lbl.configure(text="\U0001f4c1 Output folder: " + self._outb +
+                                    "   (prottek box er nam e ekta folder, tar vitore HTML)")
+
+    def _pick_out(self):
+        init = self._outb if os.path.isdir(self._outb) else None
+        d = filedialog.askdirectory(parent=self.app, title="Output folder select koro (box folder gulo ekhane toiri hobe)",
+                                    initialdir=init)
+        if not d:
+            return
+        try:
+            os.makedirs(d, exist_ok=True)
+            probe = os.path.join(d, ".write_test")
+            with open(probe, "w") as fh:
+                fh.write("ok")
+            os.remove(probe)
+        except Exception as e:
+            messagebox.showerror("Folder", f"Ei folder e likhte parchhi na:\n{e}", parent=self.app)
+            return
+        self._outb = d
+        atomic_write(ANIM_OUT_CFG, json.dumps({"dir": d}, ensure_ascii=False))
+        self._out_sync()
+        self._status_all()
+        self.app.note(f"Output folder: {d}", OK)
+
+    def _open_out(self):
+        os.makedirs(self._outb, exist_ok=True)
+        open_path(self._outb)
+
+    def _open_box_dir(self, box):
+        d = self._out_dirs().get(box["id"])
+        if not d:
+            return
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        open_path(d)
+
+    # ───── prompt status (box er niche) ─────
+    _SPIN = "\u25d0\u25d3\u25d1\u25d2"
+
+    def _out_dirs(self):
+        """Prottek box er Output folder (box id -> path). _collect-o ekhan theke ney."""
+        seen, res = {}, {}
+        for b in self.boxes:
+            safe = anim_safe(b["name"].get())
+            k = seen.get(safe.lower(), 0)
+            seen[safe.lower()] = k + 1
+            if k:
+                safe = f"{safe} ({k + 1})"
+            res[b["id"]] = os.path.join(self._out_base(), safe)
+        return res
+
+    def _pstate(self, box, n):
+        lv = box["live"].get(n)
+        if lv == "run":
+            return "run"
+        if n in box["disk"] or lv == "done":
+            return "done"
+        if lv == "fail":
+            return "fail"
+        return "queued" if lv == "queued" else "idle"
+
+    def _status_refresh(self, box, outs=None):
+        txt = box["txt"].get("1.0", "end-1c")
+        box["nums"] = [n for n, _ in anim_parse_prompts(txt)] if txt.strip() else []
+        outs = outs or self._out_dirs()
+        box["disk"] = anim_done_nums(outs.get(box["id"], ""))
+        self._render_status(box)
+
+    def _status_all(self):
+        outs = self._out_dirs()
+        for b in self.boxes:
+            self._status_refresh(b, outs)
+        self._refresh_info()
+
+    def _render_status(self, box, force=False):
+        """Prottek prompt = ekta soman maper rongin chip (emoji + number). Chip gulo wrap hoy, bhenge na."""
+        nums = box["nums"]
+        st = [self._pstate(box, n) for n in nums]
+        frame = self._spin // 2 % 2
+        sig = (tuple(nums), tuple(st), frame if "run" in st else 0)
+        if not force and sig == box["sig"]:
+            return
+        prev, box["sig"] = box["sig"], sig
+        t = box["stt"]
+        chips = box.setdefault("chips", {})
+        if prev is None or prev[0] != tuple(nums):
+            for w in list(chips.values()):
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+            chips.clear()
+            box["cs"] = {}
+            box["laid"] = None
+            for n in nums:
+                lb = tk.Label(t, text="", font=(FONT, 8, "bold"), width=6, padx=1, pady=0, bd=0)
+                for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    lb.bind(ev, lambda e: (self.sf._wheel(e), "break")[1])
+                chips[n] = lb
+        cs = box.setdefault("cs", {})
+        sym = {"idle": "\u26aa", "queued": "\U0001f552", "run": ("\u23f3", "\u231b"),
+               "done": "\u2705", "fail": "\u274c"}
+        col = {"idle": (PANEL2, MUTED), "queued": (PANEL2, FG), "run": (_mix(PANEL, WARN, 0.3), WARN),
+               "done": (_mix(PANEL, OK, 0.28), OK), "fail": (_mix(PANEL, BAD, 0.3), BAD)}
+        for n, s_ in zip(nums, st):
+            key = (s_, frame if s_ == "run" else 0)
+            if cs.get(n) == key:
+                continue
+            cs[n] = key
+            sy = sym[s_][frame] if s_ == "run" else sym[s_]
+            bg, fg = col[s_]
+            chips[n].configure(text=f"{sy} {n}", bg=bg, fg=fg)
+        d, r, f_ = st.count("done"), st.count("run"), st.count("fail")
+        parts = [f"{len(nums)} prompt" + ("s" if len(nums) != 1 else ""), f"\u2705 {d} done"]
+        if r:
+            parts.append(f"\u23f3 {r} processing")
+        if f_:
+            parts.append(f"\u274c {f_} failed")
+        box["sum"].configure(text="  \u00b7  ".join(parts) if nums else "Prompt nei",
+                             fg=OK if (nums and d == len(nums)) else MUTED)
+        self._fit_status(box)
+
+    def _fit_status(self, box):
+        """Chip gulo jayga onujayi grid e sajay (soman column, nicher shari kete jay na)."""
+        t, chips = box.get("stt"), box.get("chips")
+        if t is None or not chips:
+            return
+        try:
+            w = t.winfo_width()
+            if w < 40:
+                return
+            cw = max(c.winfo_reqwidth() for c in chips.values()) + 3
+            cols = max(1, w // cw)
+            key = (cols, len(chips))
+            if box.get("laid") == key:
+                return
+            box["laid"] = key
+            for i, n in enumerate(box["nums"]):
+                if n in chips:
+                    chips[n].grid(row=i // cols, column=i % cols, padx=1, pady=1, sticky="w")
+        except Exception:
+            pass
+
+    def _drain_stat(self):
+        dirty = set()
+        try:
+            while True:
+                bid, num, st = self._statq.get_nowait()
+                b = next((x for x in self.boxes if x["id"] == bid), None)
+                if b is None:
+                    continue
+                b["live"][num] = st
+                if st == "done":
+                    b["disk"].add(num)
+                dirty.add(bid)
+        except queue.Empty:
+            pass
+        self._spin = (self._spin + 1) % 8
+        for b in self.boxes:
+            if b["id"] in dirty or (self._spin % 2 == 0 and "run" in b["live"].values()):
+                self._render_status(b, force=True)
+
+    # ───── reorder (drag) ─────
+    def _drag_start(self, box):
+        self._drag = box
+        box["frame"].configure(highlightthickness=4)
+
+    def _drag_move(self, e):
+        box = self._drag
+        if box is None or box not in self.boxes:
+            return
+        inner, cv = self.sf.inner, self.sf.cv
+        y = e.y_root - inner.winfo_rooty()
+        new = sum(1 for b in self.boxes
+                  if b is not box and b["frame"].winfo_y() + b["frame"].winfo_height() / 2 < y)
+        if new != self.boxes.index(box):
+            self.boxes.remove(box)
+            self.boxes.insert(new, box)
+            self._repack()
+            inner.update_idletasks()
+        cy = e.y_root - cv.winfo_rooty()          # kinarar kache gele auto scroll
+        if cy < 40:
+            cv.yview_scroll(-1, "units")
+        elif cy > cv.winfo_height() - 40:
+            cv.yview_scroll(1, "units")
+
+    def _drag_end(self, e=None):
+        box, self._drag = self._drag, None
+        if box is not None:
+            try:
+                box["frame"].configure(highlightthickness=2)
+            except tk.TclError:
+                pass
+            self._changed()
+
+    def _move_top(self, box):
+        if box in self.boxes and self.boxes[0] is not box:
+            self.boxes.remove(box)
+            self.boxes.insert(0, box)
+            self._repack()
+            self._changed()
+        self.sf.after(50, lambda: self.sf.cv.yview_moveto(0.0))
+
+    def _delete_box(self, box):
+        if box["txt"].get("1.0", "end-1c").strip():
+            if not messagebox.askyesno("Delete", f"'{box['name'].get()}' delete korbo?", parent=self.app):
+                return
+        self.boxes.remove(box)
+        box["frame"].destroy()
+        self._repack()
+        self._refresh_empty()
+        self._save_prompts()
+
+    # ───── .txt load / drop ─────
+    def _fill_box(self, box, path):
+        txt = read_text(path)
+        t = box["txt"]
+        t.delete("1.0", "end")
+        t.insert("1.0", txt)
+        t.edit_separator()
+        if not box["name"].get().strip():
+            box["name"].set(os.path.splitext(os.path.basename(path))[0])
+        self._fit_box(box)
+        self._changed()
+
+    def _load_file_into(self, box):
+        p = filedialog.askopenfilename(parent=self.app, title=".txt file select koro",
+                                       filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if p:
+            try:
+                self._fill_box(box, p)
+            except Exception as e:
+                messagebox.showerror("Load", f"File pora jayni:\n{e}", parent=self.app)
+
+    def _box_at(self, event):
+        try:
+            w = self.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        while w is not None:
+            b = getattr(w, "_pbox", None)
+            if b:
+                return b
+            w = getattr(w, "master", None)
+        return None
+
+    def on_drop(self, event):
+        """App._on_drop (Tab 3 khola thakle) ekhane pathay."""
+        if self.cur != "anim":
+            self.app.note(".txt drop korte '2D Animation' section e jao", WARN)
+            return event.action
+        try:
+            paths = []
+            for p in self.tk.splitlist(event.data):
+                p = p.strip()
+                if os.path.isdir(p):
+                    paths += sorted(os.path.join(p, f) for f in os.listdir(p))
+                else:
+                    paths.append(p)
+            txts = [p for p in paths if os.path.isfile(p) and p.lower().endswith(".txt")]
+            if not txts:
+                self.app.note("Shudhu .txt file drop korte paren", WARN)
+                return event.action
+            target = self._box_at(event)
+            if target is not None:
+                self._fill_box(target, txts.pop(0))
+            for p in txts:
+                b = self._add_box(os.path.splitext(os.path.basename(p))[0], read_text(p), focus=False)
+            self.app.note("Drop hoyeche \u2713", OK)
+        except Exception as e:
+            self.app.note(f"Drop error: {e}", BAD)
+        return event.action
+
+    # ───── Chrome ─────
+    def _chrome_base(self):
+        try:
+            b = json.loads(self._rd(ANIM_CHROME_CFG) or "{}").get("base")
+        except Exception:
+            b = None
+        return b if isinstance(b, str) and b.strip() else ANIM_CHROME_DIR
+
+    def _build_chrome(self, f):
+        self.app.header(f, "Chrome", "Alada alada real Chrome profile")
+        sf = ScrollFrame(f)
+        sf.pack(fill="both", expand=True, padx=22)
+        b0 = mkcard(sf.inner, "Save folder", "notun Chrome profile kothay toiri hobe (C / D / onno drive)")
+        self.base_lbl = mklabel(b0, "", 10, FG, bg=PANEL, wraplength=520, justify="left", anchor="w")
+        self.base_lbl.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        mkbtn(b0, "\U0001f4c1 Change folder\u2026", self._pick_chrome_base, "ghost", pady=4, padx=14).grid(
+            row=1, column=0, sticky="w")
+        mkbtn(b0, "Open", lambda: (os.makedirs(self._chrome_base(), exist_ok=True), open_path(self._chrome_base())),
+              "ghost", pady=4, padx=14).grid(row=1, column=1, sticky="w", padx=8)
+        fnote(b0, 2, "Folder bodlale shudhu notun profile gulo ei jayga e hobe. Ager profile gulo ager jayga tei thakbe.")
+        b = mkcard(sf.inner, "Chrome Profiles", "clone na — prottek-ta nijosso real Chrome profile")
+        fspan(b, 0, mkbtn(b, "\uff0b  Add new chrome", self._add_chrome, "primary", pady=6, padx=16))
+        fnote(b, 1, "Click korle notun Chrome profile toiri hoye claude.ai khulbe. Prottek profile e Claude account login "
+                    "kore rakho — Start ei profile gulo-i use korbe. Ekbar login korlei hoy.")
+        self.prof_box = tk.Frame(b, bg=PANEL)
+        fspan(b, 2, self.prof_box, sticky="we", pady=(6, 0))
+        self.chrome_profiles = []
+        try:
+            data = json.loads(self._rd(ANIM_CHROME) or "[]")
+            self.chrome_profiles = [d for d in data if isinstance(d, dict) and d.get("name") and d.get("dir")]
+        except Exception:
+            self.chrome_profiles = []
+        self._render_profiles()
+        self._base_sync()
+        b2 = mkcard(sf.inner, "Window", "automation er somoy Chrome dekhabe kina")
+        self.hide_btn = mkbtn(b2, "", self._toggle_hide, "ghost")
+        fspan(b2, 0, self.hide_btn)
+        fnote(b2, 1, "Hide ON hole Chrome screen er baire cholbe, onno kaj korte parben.")
+        self._chrome_sync()
+
+    def _base_sync(self):
+        self.base_lbl.configure(text=self._chrome_base())
+
+    def _pick_chrome_base(self):
+        d = filedialog.askdirectory(parent=self.app, title="Chrome profile folder select koro (jemon D:/)",
+                                    initialdir=os.path.dirname(self._chrome_base()) or None)
+        if not d:
+            return
+        base = os.path.join(d, "AI Chrome Profiles")
+        try:
+            os.makedirs(base, exist_ok=True)
+            probe = os.path.join(base, ".write_test")
+            with open(probe, "w") as fh:
+                fh.write("ok")
+            os.remove(probe)
+        except Exception as e:
+            messagebox.showerror("Folder", f"Ei folder e likhte parchhi na:\n{e}", parent=self.app)
+            return
+        atomic_write(ANIM_CHROME_CFG, json.dumps({"base": base}, ensure_ascii=False, indent=1))
+        self._base_sync()
+        self.app.note(f"Notun profile ekhon theke: {base}", OK)
+
+    def _render_profiles(self):
+        self._lim_lbls = {}
+        for w in self.prof_box.winfo_children():
+            w.destroy()
+        if not self.chrome_profiles:
+            mklabel(self.prof_box, "Ekhono kono profile nei.", 9, MUTED, bg=PANEL).pack(anchor="w")
+            return
+        for pr in self.chrome_profiles:
+            row = tk.Frame(self.prof_box, bg=PANEL)
+            row.pack(fill="x", pady=3)
+            mkbtn(row, "\U0001f310  " + pr["name"], lambda p=pr: self._open_chrome(p),
+                  "ghost", pady=5, padx=16).pack(side="left")
+            mkbtn(row, "\U0001f5d1 Delete", lambda p=pr: self._delete_chrome(p),
+                  "ghost", pady=5, padx=12).pack(side="left", padx=6)
+            lb = mklabel(row, "", 9, BAD, True, bg=PANEL)
+            lb.pack(side="left", padx=8)
+            self._lim_lbls[pr["dir"]] = lb
+            mklabel(row, pr["dir"], 8, MUTED, bg=PANEL).pack(side="left", padx=8)
+            self._refresh_limits()
+
+    def _refresh_limits(self):
+        """Chrome profile er pashe: limit hole 'koi reset', kaj korle 'kaj korche'."""
+        now = time.time()
+        hub = self._hub
+        lims = getattr(self, "_lim_lbls", {})
+        n = 0
+        for pr in self.chrome_profiles:
+            lb = lims.get(pr["dir"])
+            u = anim_lim_until(pr["dir"])
+            txt, col = "", BAD
+            if u > now:
+                n += 1
+                left = int(u - now)
+                h, m = left // 3600, left % 3600 // 60
+                rem = f"{h}h {m}m" if h else f"{max(1, m)}m"
+                txt = (f"\u26d4 Limit hoyeche \u00b7 reset: {time.strftime('%I:%M %p', time.localtime(u))} "
+                       f"({rem} baki)")
+            elif hub is not None and pr["dir"] in hub.claimed:
+                txt, col = "\u25b6 kaj korche", OK
+            if lb is not None:
+                try:
+                    lb.configure(text=txt, fg=col)
+                except tk.TclError:
+                    pass
+        self._lim_n = n
+
+    def _save_profiles(self):
+        atomic_write(ANIM_CHROME, json.dumps(self.chrome_profiles, ensure_ascii=False, indent=1))
+
+    def _add_chrome(self):
+        used = {p["name"].lower() for p in self.chrome_profiles}
+        n = 1
+        while f"profile {n}" in used:
+            n += 1
+        base = self._chrome_base()
+        k = n
+        while os.path.exists(os.path.join(base, f"profile_{k}")):     # ager bachha folder e jeno mishe na jay
+            k += 1
+        pr = {"name": f"Profile {n}", "dir": os.path.join(base, f"profile_{k}")}
+        try:
+            os.makedirs(pr["dir"], exist_ok=True)
+        except Exception as e:
+            messagebox.showerror("Chrome", f"Profile folder toiri hoyni:\n{e}", parent=self.app)
+            return
+        if not self._open_chrome(pr):       # Chrome-i na thakle profile list e joma korbo na
+            try:
+                os.rmdir(pr["dir"])
+            except Exception:
+                pass
+            return
+        self.chrome_profiles.append(pr)
+        self._save_profiles()
+        self._render_profiles()
+
+    def _delete_chrome(self, pr):
+        if not messagebox.askyesno("Delete", f"'{pr['name']}' delete korbo?\n\nEi profile er login / data shob muchhe jabe.\n"
+                                             f"Folder: {pr['dir']}", parent=self.app):
+            return
+        d = pr["dir"]
+        if os.path.isdir(d):
+            try:
+                rm_tree(d)
+            except Exception:
+                pass
+            if os.path.exists(d):
+                messagebox.showerror("Delete", "Folder muchha jayni — ei profile er Chrome ta khola thakle "
+                                               "age bondho koro, tarpor abar Delete chapo.", parent=self.app)
+                return
+        self.chrome_profiles = [p for p in self.chrome_profiles if p is not pr]
+        self._save_profiles()
+        self._render_profiles()
+        self.app.note(f"{pr['name']} delete hoyeche", OK)
+
+    def _open_chrome(self, pr):
+        exe = _voice_chrome_exe()
+        if not exe:
+            messagebox.showerror("Chrome", "Google Chrome paoa jayni. Age Chrome install koro.", parent=self.app)
+            return False
+        try:
+            os.makedirs(pr["dir"], exist_ok=True)
+            subprocess.Popen([exe, f"--user-data-dir={pr['dir']}", "--no-first-run",
+                              "--no-default-browser-check", ANIM_URL])
+        except Exception as e:
+            messagebox.showerror("Chrome", f"Chrome khola jayni:\n{e}", parent=self.app)
+            return False
+        self.app.note(f"{pr['name']} khulchhe\u2026", OK)
+        return True
+
+    def _toggle_hide(self):
+        self.app.voice_toggle_chrome()
+        self._chrome_sync()
+
+    def _chrome_sync(self):
+        hid = getattr(self.app, "_voice_chrome_hidden", False)
+        self.hide_btn.configure(text="\U0001f441 Unhide Chrome" if hid else "\U0001f441 Hide Chrome")
+
+    # ───── Start ─────
+    def _load_threads(self):
+        try:
+            n = int(json.loads(self._rd(ANIM_SETTINGS) or "{}").get("threads", 1))
+        except Exception:
+            n = 1
+        return max(1, min(15, n))
+
+    def _save_threads(self, *_):
+        try:
+            atomic_write(ANIM_SETTINGS, json.dumps({"threads": int(self.thr_var.get())}))
+        except Exception:
+            pass
+        self._refresh_info()
+
+    def _build_start(self, f):
+        self.app.header(f, "Start", "Prompt box er prompt gulo serially Claude e pathabe")
+        ctl = tk.Frame(f, bg=PANEL)
+        ctl.pack(fill="x", padx=22, pady=(0, 10))
+        row = tk.Frame(ctl, bg=PANEL)
+        row.pack(fill="x", padx=14, pady=(12, 6))
+        self.start_btn = mkbtn(row, "\u25b6  START", self._start, "primary", padx=22)
+        self.start_btn.pack(side="left")
+        self.stop_btn = mkbtn(row, "\u25a0  STOP", self._stop, "danger", padx=18)
+        self.stop_btn.pack(side="left", padx=8)
+        self.stop_btn.configure(state="disabled")
+        mklabel(row, "Threads", 10, MUTED, bg=PANEL).pack(side="left", padx=(24, 6))
+        self.thr_var = tk.StringVar(value=str(self._load_threads()))
+        self.thr_cb = ttk.Combobox(row, textvariable=self.thr_var, values=[str(i) for i in range(1, 16)],
+                                   state="readonly", width=4)
+        self.thr_cb.pack(side="left")
+        self.thr_cb.bind("<<ComboboxSelected>>", self._save_threads)
+        self.run_lbl = mklabel(row, "Ready", 10, MUTED, bg=PANEL)
+        self.run_lbl.pack(side="right", padx=6)
+        self.info_lbl = mklabel(ctl, "", 9, MUTED, bg=PANEL, anchor="w", justify="left", wraplength=760)
+        self.info_lbl.pack(fill="x", padx=14, pady=(0, 6))
+        self.pbar = SmoothBar(ctl, maximum=100, active=lambda: self._hub is not None)
+        self.pbar.pack(fill="x", padx=14, pady=(0, 12))
+
+        lw = tk.Frame(f, bg=PANEL)
+        lw.pack(fill="both", expand=True, padx=22, pady=(0, 16))
+        hd = tk.Frame(lw, bg=PANEL)
+        hd.pack(fill="x", padx=14, pady=(10, 6))
+        tk.Frame(hd, bg=ACCENT, width=3, height=15).pack(side="left", padx=(0, 9))
+        mklabel(hd, "Live log", 11, FG, True, bg=PANEL).pack(side="left")
+        mkbtn(hd, "\U0001f4c2 Output", self._open_out,
+              "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "Clear", self._clear_log, "ghost", pady=2, padx=10).pack(side="right", padx=6)
+        body = tk.Frame(lw, bg=LOG_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        sb = ttk.Scrollbar(body, orient="vertical")
+        self.log_txt = tk.Text(body, bg=LOG_BG, fg=LOG_FG, font=(MONO, 10), relief="flat", bd=0, wrap="word",
+                               state="disabled", padx=10, pady=8, highlightthickness=0, yscrollcommand=sb.set)
+        sb.configure(command=self.log_txt.yview)
+        sb.pack(side="right", fill="y")
+        self.log_txt.pack(side="left", fill="both", expand=True)
+        for tg, col in (("info", LOG_FG), ("ok", OK), ("warn", WARN), ("err", BAD), ("dim", MUTED)):
+            self.log_txt.tag_configure(tg, foreground=col)
+        self._refresh_info()
+
+    def _refresh_info(self):
+        if not hasattr(self, "info_lbl"):
+            return
+        try:
+            nb = len(self.boxes)
+            npr = sum(len(anim_parse_prompts(b["txt"].get("1.0", "end-1c"))) for b in self.boxes
+                      if b["txt"].get("1.0", "end-1c").strip())
+            profs = [p for p in self.chrome_profiles if os.path.isdir(p["dir"])]
+            n = int(self.thr_var.get())
+            msg = f"Prompts: {npr} ({nb} box)  \u00b7  Chrome profile: {len(profs)}  \u00b7  Output: {self._out_base()}"
+            col = MUTED
+            if n > len(profs):
+                msg += f"\nThreads {n} kintu profile {len(profs)} ta — {len(profs)} ta thread cholbe (Chrome section e aro profile add koro)."
+                col = WARN
+            self.info_lbl.configure(text=msg, fg=col)
+        except Exception:
+            pass
+
+    def _log(self, msg, lv="info"):
+        self._logq.put((time.strftime("%H:%M:%S"), msg, lv))
+
+    def _clear_log(self):
+        self.log_txt.configure(state="normal")
+        self.log_txt.delete("1.0", "end")
+        self.log_txt.configure(state="disabled")
+
+    def _drain_log(self):
+        items = []
+        try:
+            while len(items) < 300:
+                items.append(self._logq.get_nowait())
+        except queue.Empty:
+            pass
+        if not items:
+            return
+        t = self.log_txt
+        at_end = t.yview()[1] >= 0.98
+        t.configure(state="normal")
+        for ts, msg, lv in items:
+            t.insert("end", ts + "  ", "dim")
+            t.insert("end", msg + "\n", lv if lv in ("ok", "warn", "err") else "info")
+        n = int(t.index("end-1c").split(".")[0])
+        if n > 3000:
+            t.delete("1.0", f"{n - 3000}.0")
+        t.configure(state="disabled")
+        if at_end:
+            t.see("end")
+        try:
+            with open(ANIM_LOG, "a", encoding="utf-8") as fh:
+                for ts, msg, lv in items:
+                    fh.write(f"{ts}  {msg}\n")
+        except Exception:
+            pass
+
+    def _pump(self):
+        try:
+            self._drain_log()
+            self._drain_stat()
+            self._lim_tick = getattr(self, "_lim_tick", 0) + 1
+            if self._lim_tick % 25 == 0:
+                self._refresh_limits()
+            hub = self._hub
+            if hub is not None:
+                self.pbar["value"] = (hub.done + hub.failed) * 100.0 / max(1, hub.total)
+                nl = getattr(self, "_lim_n", 0)
+                extra = f"  \u00b7  \u26d4 {nl} profile limit" if nl else ""
+                self.run_lbl.configure(text=f"Done {hub.done}/{hub.total}  \u00b7  Failed {hub.failed}{extra}", fg=ACCENT)
+                if hub.launched and not any(t.is_alive() for t in hub.threads):
+                    self._finish(hub)
+        except Exception:
+            pass
+        try:
+            self.after(200, self._pump)
+        except Exception:
+            pass
+
+    def _set_running(self, on):
+        self.start_btn.configure(state="disabled" if on else "normal")
+        self.stop_btn.configure(state="normal" if on else "disabled")
+        self.thr_cb.configure(state="disabled" if on else "readonly")
+
+    def _finish(self, hub):
+        left = sum(len(t["items"]) for t in hub.jobs)
+        stopped = hub.stop.is_set()
+        self._log(f"{'Stop hoyeche' if stopped else 'Shesh'} \u2014 done {hub.done}, failed {hub.failed}, baki {left}",
+                  "warn" if (stopped or left or hub.failed) else "ok")
+        self.run_lbl.configure(text=("Stopped" if stopped else "Finished") + f"  \u00b7  Done {hub.done}/{hub.total}",
+                               fg=WARN if (stopped or left) else OK)
+        self._hub = None
+        self._set_running(False)
+        self._drain_stat()
+        self._refresh_limits()
+        for b in self.boxes:
+            b["live"] = {n: v for n, v in b["live"].items() if v == "fail"}
+        self._status_all()
+        try:
+            self.app.note(f"2D Animation: done {hub.done}, failed {hub.failed}", OK if not hub.failed else WARN)
+        except Exception:
+            pass
+
+    # ───── start / stop ─────
+    def _collect(self):
+        profs = [p for p in self.chrome_profiles if os.path.isdir(p["dir"])]
+        if not profs:
+            messagebox.showwarning("Start", "Kono Chrome profile nei.\n\nChrome section e '\uff0b Add new chrome' chepe profile "
+                                            "baniye claude.ai e login koro.", parent=self.app)
+            return None
+        tasks, total, skipped = [], 0, 0
+        outs = self._out_dirs()
+        for b in self.boxes:
+            outd = outs[b["id"]]
+            have = anim_done_nums(outd)
+            items = []
+            for num, t in anim_parse_prompts(b["txt"].get("1.0", "end-1c")):
+                total += 1
+                if num in have:
+                    skipped += 1
+                    continue
+                items.append({"box": b["name"].get().strip() or anim_safe(b["name"].get()), "num": num, "text": t,
+                              "out": outd, "attempts": 0, "bid": b["id"]})
+            if items:
+                tasks.append({"bid": b["id"], "box": b["name"].get().strip(), "out": outd, "items": items})
+        if total == 0:
+            messagebox.showwarning("Start", "'2D Animation' section e kono prompt nei.", parent=self.app)
+            return None
+        if not tasks:
+            messagebox.showinfo("Start", "Shob prompt-ei age thekei Output e ache (done).\n\nAbar notun kore korte chaile "
+                                         "Output folder er oi file gulo muchhe dao.", parent=self.app)
+            return None
+        return profs, tasks, skipped
+
+    def _start(self):
+        if self._hub is not None:
+            return
+        self._flush()
+        got = self._collect()
+        if got is None:
+            return
+        profs, tasks, skipped = got
+        n = int(self.thr_var.get())
+        hidden = bool(getattr(self.app, "_voice_chrome_hidden", False))
+        hub = AnimHub(tasks, self.full_template(), hidden, self._logq)
+        hub.skipped = skipped
+        hub.statq = self._statq
+        hub.profs = list(profs)
+        for b in self.boxes:
+            b["live"] = {}
+        for t in tasks:
+            for j in t["items"]:
+                hub.set_status(j, "queued")
+        self._hub = hub
+        self.pbar["value"] = 0
+        self._set_running(True)
+        self.run_lbl.configure(text="Starting\u2026", fg=ACCENT)
+        self._log(f"Start: {hub.total} ta prompt, {len(tasks)} ta box" +
+                  (f" ({skipped} ta age-i done, skip)" if skipped else "") + f", threads {n}", "ok")
+        threading.Thread(target=self._launch_all, args=(hub, profs, n), daemon=True).start()
+
+    def full_template(self):
+        return self.prompt_txt.get("1.0", "end-1c")
+
+    def _stop(self):
+        hub = self._hub
+        if hub is None:
+            return
+        hub.stop.set()
+        self.stop_btn.configure(state="disabled")
+        self.run_lbl.configure(text="Stopping\u2026", fg=WARN)
+        self._log("Stop dewa hoyeche — Chrome gulo bondho hocche\u2026", "warn")
+
+    def _launch_all(self, hub, profs, n):
+        try:
+            hub.log("Playwright check kora hocche\u2026")
+            ok, err = _ensure_playwright()
+            if not ok:
+                hub.log(f"Playwright install hoyni: {err}", "err")
+                return
+            if not _voice_chrome_exe():
+                hub.log("Google Chrome paoa jayni — Chrome install koro", "err")
+                return
+            want = min(n, len(profs))
+            if n > len(profs):
+                hub.log(f"Threads {n} chaoa hoyechhe kintu profile mot {len(profs)} ta — {want} ta Chrome cholbe "
+                        f"(beshi profile add koro).", "warn")
+            now = time.time()
+            for pr in profs:
+                u = anim_lim_until(pr["dir"])
+                if u > now:
+                    hub.log(f"{pr['name']} e limit — {time.strftime('%I:%M %p', time.localtime(u))} porjonto kaj hobe na "
+                            f"(tarpor nijei kaj dhorbe)", "warn")
+            hub.log(f"{want} ta Chrome ek shathe cholbe (mot profile {len(profs)} ta) — kono ekta limit khele "
+                    f"bondho hoye onno profile khulbe", "ok")
+            for i in range(want):
+                if hub.stop.is_set():
+                    break
+                w = AnimWorker(i, hub)
+                t = threading.Thread(target=w.run, daemon=True)
+                hub.threads.append(t)
+                t.start()
+                for _ in range(8):
+                    if hub.stop.is_set():
+                        break
+                    time.sleep(0.25)
+        except Exception as e:
+            hub.log(f"Launch error: {e}", "err")
+        finally:
+            hub.launched = True
+
+    # ───── Prompt ─────
+    def _build_prompt(self, f):
+        self.app.header(f, "Prompt", "Prottek notun chat e age ei prompt jabe, response shesh hole box er prompt jabe")
+        bar = tk.Frame(f, bg=BG)
+        bar.pack(fill="x", padx=22, pady=(0, 8))
+        mkbtn(bar, "Reset to default", self._reset_prompt, "ghost", pady=3, padx=12).pack(side="right")
+        wrap = tk.Frame(f, bg=PANEL)
+        wrap.pack(fill="both", expand=True, padx=22, pady=(0, 18))
+        self.prompt_txt = mktext(wrap)
+        self.prompt_txt.pack(fill="both", expand=True)
+        cur = self._rd(ANIM_PROMPT)
+        if not cur.strip() or cur.strip() in (ANIM_OLD_DEFAULT.strip(), ANIM_LEGACY_TEMPLATE.strip()):     # ager sample prompt hole notun default
+            cur = ANIM_DEFAULT_PROMPT
+            atomic_write(ANIM_PROMPT, cur)
+        self.prompt_txt.insert("1.0", cur)
+        self.prompt_txt.edit_reset()
+        self.prompt_txt.edit_modified(False)
+        self.prompt_txt.bind("<<Modified>>", self._prompt_mod)
+
+    def _prompt_mod(self, e=None):
+        if not self.prompt_txt.edit_modified():
+            return
+        self.prompt_txt.edit_modified(False)
+        self._sched("prompt", lambda: atomic_write(ANIM_PROMPT, self.prompt_txt.get("1.0", "end-1c")))
+
+    def _reset_prompt(self):
+        if not messagebox.askyesno("Prompt", "Prompt default e ferot nibo? (ekhon ja lekha ache muchhe jabe)"):
+            return
+        self.prompt_txt.delete("1.0", "end")
+        self.prompt_txt.insert("1.0", ANIM_DEFAULT_PROMPT)
+
+    def full_prompt(self, box_text=""):
+        """Prompt section er text + ekta prompt (Start ei-bhabe pathay)."""
+        t = self.prompt_txt.get("1.0", "end-1c").strip()
+        if not t:
+            return box_text.strip()
+        return t.replace("{script}", box_text.strip()) if "{script}" in t else t + "\n\n" + box_text.strip()
+
+    def is_running(self):
+        return self._hub is not None
+
+    def shutdown(self):
+        hub = self._hub
+        if hub is not None:
+            hub.stop.set()
+            end = time.time() + 8
+            for t in list(hub.threads):
+                t.join(max(0.1, end - time.time()))
+        self._flush()
+
+
 class App(_Base):
     SECTIONS = [("script", "✎", "Script"), ("audio", "♫", "Audio"), ("srt", "❝", "SRT"),
                 ("clips", "▣", "Clips"), ("avatar", "☺", "Avatar+Subs"),
@@ -6553,6 +8947,17 @@ class App(_Base):
         self._build_export(self.frames["export"])
         self._build_voice(self.frames["voice"])
         self.tab2 = Tab2Editor(self)          # Tab 2: timeline editor (shown by show_tab(2))
+        try:
+            self.tab3 = Tab3Anim(self)        # Tab 3: 2D Animation (shown by show_tab(3))
+        except Exception:
+            import traceback
+            self.tab3 = None
+            try:
+                os.makedirs(WORKSPACE, exist_ok=True)
+                with open(os.path.join(WORKSPACE, "tab3_error.log"), "w", encoding="utf-8") as _f:
+                    _f.write(traceback.format_exc())
+            except Exception:
+                pass
 
         self.statusbar = mklabel(self, "", 9, MUTED, bg=SIDE, anchor="w", padx=16, pady=5)
         self.statusbar.pack(fill="x", side="bottom")
@@ -6615,7 +9020,7 @@ class App(_Base):
         bar.pack_propagate(False)
         tk.Frame(self, bg=PANEL2, height=1).pack(fill="x")
         self._tabs = {}
-        for n, text in ((1, "Tab 1  ·  Studio"), (2, "Tab 2  ·  Timeline Editor")):
+        for n, text in ((1, "Tab 1  ·  Studio"), (2, "Tab 2  ·  Timeline Editor"), (3, "Tab 3  ·  2D Animation")):
             h = tk.Frame(bar, bg=SIDE, cursor="hand2")
             h.pack(side="left", padx=(16 if n == 1 else 4, 4), fill="y")
             ul = tk.Frame(h, bg=SIDE, height=3)
@@ -6634,17 +9039,29 @@ class App(_Base):
             ul.configure(bg=ACCENT if on else SIDE)
 
     def show_tab(self, n):
-        if n == self.active_tab:
+        if n == self.active_tab or (n == 3 and self.tab3 is None):
+            if n == 3 and self.tab3 is None:
+                messagebox.showerror("Tab 3", "Tab 3 load hoy ni. Details: Documents/AI Video Editor/tab3_error.log")
             return
-        if n == 2:
+        old = self.active_tab
+        if old == 1:
             self._avp_pause()
             self.body.pack_forget()
+        elif old == 2:
+            self.tab2.deactivate()
+            self.tab2.pack_forget()
+        elif old == 3:
+            self.tab3.deactivate()
+            self.tab3.pack_forget()
+        if n == 2:
             self.tab2.pack(fill="both", expand=True, before=self.statusbar)
             self.active_tab = 2
             self.tab2.activate()
+        elif n == 3:
+            self.tab3.pack(fill="both", expand=True, before=self.statusbar)
+            self.active_tab = 3
+            self.tab3.activate()
         else:
-            self.tab2.deactivate()
-            self.tab2.pack_forget()
             self.body.pack(fill="both", expand=True, before=self.statusbar)
             self.active_tab = 1
             self.after(60, lambda: self._move_ind(False))
@@ -6692,7 +9109,7 @@ class App(_Base):
         self.space_lbl.bind("<Button-1>", lambda e: self.show_usage())
 
     def show(self, key):
-        if self.active_tab == 2:
+        if self.active_tab != 1:
             self.show_tab(1)
         prev = self.cur
         if prev == "avatar" and key != "avatar":
@@ -10212,9 +12629,14 @@ class App(_Base):
             if not messagebox.askyesno("Quit", "Kaj cholche. Stop kore quit korbe?"):
                 return
             self.stop()
+        if self.tab3 is not None and self.tab3.is_running():
+            if not messagebox.askyesno("Quit", "2D Animation (Tab 3) cholche. Stop kore quit korbe?"):
+                return
         self._avp_pause()
         try:
             self.tab2.shutdown()
+            if self.tab3 is not None:
+                self.tab3.shutdown()
         except Exception:
             pass
         self.save_all(quiet=True)
@@ -10657,6 +13079,12 @@ class App(_Base):
         return False
 
     def _on_drop(self, event):
+        if self.active_tab == 3 and self.tab3 is not None:
+            try:
+                return self.tab3.on_drop(event)
+            except Exception as e:
+                self.note(f"Drop error: {e}", BAD)
+                return event.action
         if self.active_tab == 2:
             try:
                 return self.tab2.on_drop(event)
