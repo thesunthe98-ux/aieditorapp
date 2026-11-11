@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.1.4"
+APP_VERSION = "3.1.5"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -17227,6 +17227,121 @@ class FlowBar(tk.Frame):
             pass
 
 
+# ───────────────────────── Auto voice (Tab 2): clip er voice nijei thik kore ─────────────────────────
+class _AutoVoiceDSP:
+    """Shob clip er golar tone (EQ) ekta 'reference' clip er moto kore (numpy only, scipy lage na).
+    Pipeline (Tab2Editor._av_process): audio ber -> noise remove -> tone match -> compressor + loudness -> clip er voice."""
+    SR = 44100
+    NFFT = 4096
+    SMOOTH_OCT = 0.5          # boro = beshi smooth
+    MAX_EQ_DB = 6.0           # ek frequency te max boost/cut (dB)
+    # ffmpeg filter chains
+    # afftdn 1104 sample (~25ms) deri kore -> atrim e fire anlam, apad e length thik rakhlam (clip er shathe sync thakbe)
+    AF_EXTRACT = ("aresample=44100:async=1:first_pts=0,highpass=f=80,afftdn=nf=-25,"
+                  "atrim=start_sample=1104,asetpts=N/SR/TB,apad=pad_len=1104")
+    AF_FIX = ("highpass=f=100,lowpass=f=9500,"
+              "acompressor=threshold=-24dB:ratio=4:attack=5:release=150:makeup=4,"
+              "dynaudnorm=f=200:g=11:p=0.9,"
+              "loudnorm=I=-16:TP=-1.5:LRA=11")
+
+    @staticmethod
+    def grid(np):
+        return np.geomspace(60, 12000, 220)
+
+    @staticmethod
+    def _smooth(np, a, w):
+        w = max(1, int(w))
+        if w == 1:
+            return a
+        pad = w // 2
+        p = np.pad(a, (pad, w - 1 - pad), mode="edge")
+        return np.convolve(p, np.ones(w) / w, mode="valid")
+
+    @classmethod
+    def ltas(cls, np, x):
+        """Kotha bola frame gulor gor spectrum (dB), log-frequency grid e, smooth kora."""
+        n_fft = cls.NFFT
+        hop = n_fft // 2
+        if len(x) < n_fft:
+            x = np.pad(x, (0, n_fft - len(x)))
+        win = np.hanning(n_fft).astype(np.float32)
+        view = np.lib.stride_tricks.sliding_window_view(x, n_fft)[::hop]
+        nfr = len(view)
+        B = 256
+        rms = np.empty(nfr, dtype=np.float64)
+        for i in range(0, nfr, B):
+            blk = view[i:i + B].astype(np.float64)
+            rms[i:i + B] = np.sqrt((blk * blk).mean(axis=1))
+        thr = max(float(np.percentile(rms, 50)), 10 ** (-50 / 20))
+        use = rms >= thr
+        if int(use.sum()) < 3:
+            use[:] = True
+        acc = np.zeros(n_fft // 2 + 1, dtype=np.float64)
+        cnt = 0
+        for i in range(0, nfr, B):
+            m = use[i:i + B]
+            if not m.any():
+                continue
+            blk = view[i:i + B][m] * win
+            acc += (np.abs(np.fft.rfft(blk, axis=1)) ** 2).sum(axis=0)
+            cnt += int(m.sum())
+        db = 10 * np.log10(acc / max(cnt, 1) + 1e-12)
+        freqs = np.fft.rfftfreq(n_fft, 1.0 / cls.SR)
+        g = cls.grid(np)
+        curve = np.interp(g, freqs, db)
+        ppo = len(g) / np.log2(g[-1] / g[0])
+        return cls._smooth(np, curve, int(round(ppo * cls.SMOOTH_OCT)))
+
+    @classmethod
+    def pick_reference(cls, np, curves):
+        """curves: {id: curve}. Shobcheye 'typical' (median er kachhe) tone er clip ta reference."""
+        g = cls.grid(np)
+        band = (g >= 150) & (g <= 4000)
+        ids = list(curves)
+        norm = {i: curves[i] - curves[i][band].mean() for i in ids}
+        med = np.median(np.stack([norm[i] for i in ids]), axis=0)
+        return min(ids, key=lambda i: float(np.mean(np.abs(norm[i][band] - med[band]))))
+
+    @classmethod
+    def eq_curve(cls, np, ref, clip):
+        """Clip ke reference er moto korte kon frequency te koto dB lagbe (log grid e)."""
+        g = cls.grid(np)
+        band = (g >= 150) & (g <= 4000)
+        diff = ref - clip
+        diff = diff - diff[band].mean()                  # overall level bodlabe na
+        diff = np.clip(diff, -cls.MAX_EQ_DB, cls.MAX_EQ_DB)
+        w_low = np.clip((g - 60) / 50.0, 0, 1)           # khub nicher bass / uporer hiss e EQ nai
+        w_high = np.clip((12000 - g) / 3000.0, 0, 1)
+        diff = diff * w_low * w_high
+        return cls._smooth(np, diff, 5)
+
+    @classmethod
+    def apply_eq(cls, np, x, diff_db):
+        """Zero-phase EQ (STFT overlap-add, periodic Hann 50% => sum = 1). Length same thake."""
+        N = 8192
+        hop = N // 2
+        n = len(x)
+        if n == 0:
+            return x
+        freqs = np.fft.rfftfreq(N, 1.0 / cls.SR)
+        gain = 10 ** (np.interp(freqs, cls.grid(np), diff_db, left=0.0, right=0.0) / 20.0)
+        win = (0.5 - 0.5 * np.cos(2 * np.pi * np.arange(N) / N)).astype(np.float32)
+        nfr = (n + hop) // hop + 1
+        L = hop * (nfr + 1)
+        xp = np.zeros(L, dtype=np.float32)
+        xp[hop:hop + n] = x
+        y = np.zeros(L, dtype=np.float32)
+        view = np.lib.stride_tricks.sliding_window_view(xp, N)[::hop]
+        B = 64
+        for i in range(0, len(view), B):
+            blk = view[i:i + B] * win
+            out = np.fft.irfft(np.fft.rfft(blk, axis=1) * gain, N, axis=1).astype(np.float32)
+            for j in range(len(out)):
+                s = (i + j) * hop
+                y[s:s + N] += out[j]
+        return y[hop:hop + n]
+
+
 _T2_TL = threading.local()      # per-thread progress context (parallel clip render)
 
 
@@ -17270,6 +17385,8 @@ class Tab2Editor(tk.Frame):
         self._probe_q, self._thumb_q = queue.Queue(), queue.Queue()
         self._wave, self._wave_req, self._wave_q, self._wave_cols = {}, set(), queue.Queue(), {}
         self._wrms = {}
+        self._av_enabled, self._av_busy, self._av_np_tried = False, False, False   # Auto voice
+        self._av_done, self._av_ltas = {"setsig": None, "files": {}}, {}
         self._lock = threading.Lock()
         self._dq = collections.deque()
         self._gen = 0
@@ -17301,7 +17418,7 @@ class Tab2Editor(tk.Frame):
         self.cut_on = tk.StringVar(value="0")        # "Cut clips": "1" = silence before/after the sound is trimmed
         self.cut_val = tk.StringVar(value="1")
         self.cut_unit = tk.StringVar(value="seconds")
-        self.norm_on = tk.StringVar(value="0")       # "Auto volume": every clip's voice brought to the same level
+        self.norm_on = tk.StringVar(value="0")       # "Auto voice": clip gulor voice clip er moddhei thik hoy (noise / tone / volume)
         self._srange, self._cut_job = {}, None
         self.voice_path, self.voice_dur = None, 0.0  # separate voice track (imported / Fix Voice result)
         self.aspect_var = tk.StringVar(value="16:9")
@@ -17409,7 +17526,7 @@ class Tab2Editor(tk.Frame):
         self.cut_cb = ttk.Combobox(ab, textvariable=self.cut_unit, values=("seconds", "milliseconds"),
                                    width=11, state="readonly")
         ab.add(self.cut_cb, (0, 4))
-        _tool("🔊", "Auto vol", _flip(self.norm_on), self.norm_on)
+        _tool("🔊", "Auto voice", _flip(self.norm_on), self.norm_on)
         _tool("🔇", "Mute all", _flip(self.mute_var), self.mute_var)
         _sep()
         # ── voice controls
@@ -19489,6 +19606,8 @@ class Tab2Editor(tk.Frame):
                         _g = self._norm_gain(s["path"]) if vid else 1.0
                         if abs(_g - 1.0) > 0.03:
                             right += f"  {20 * math.log10(_g):+.0f}dB"
+                        if vid and self._av_enabled and self._av_done.get("files", {}).get(s["path"]):
+                            right += "  🎙✓"
                         c.create_text(x1 - 6, y1 - 36, text=right, fill=MUTED, font=(FONT, 9), anchor="ne")
                         c.create_text(x0 + 8, y1 - 36, text=self._fit_text(os.path.basename(s["path"]), bw - 24 - len(right) * 7),
                                       fill=FG, font=(FONT, 10, "bold"), anchor="nw")
@@ -19909,6 +20028,8 @@ class Tab2Editor(tk.Frame):
         """Gain (linear) that brings this clip's voice to the common level; 1.0 when Auto volume is off."""
         if self.norm_on.get() != "1" or not path or self._is_img(path):
             return 1.0
+        if self._av_src(path) != path:                       # Auto voice e volume already balanced
+            return 1.0
         r = self._wrms.get(path)
         if r is None:
             self._wave_want(path)
@@ -19918,6 +20039,7 @@ class Tab2Editor(tk.Frame):
         return max(0.2, min(5.0, self.NORM_TARGET / r))
 
     def _norm_changed(self):
+        self._av_enabled = (self.norm_on.get() == "1")
         self._cfg_touch()
         if self._loading:
             return
@@ -19926,10 +20048,16 @@ class Tab2Editor(tk.Frame):
         for sl in self.slots:                            # make sure every clip gets analysed
             if sl.get("path"):
                 self._norm_gain(sl["path"])
+        if self._av_enabled:
+            self._av_kick()
+            if self._av_clip_paths():
+                self.app.note("Auto voice shuru hoyeche — clip gulor voice thik hochhe…")
         self._draw_soon()
 
     def _analysis_pending(self):
-        """True (+ queues the work) when Cut clips / Auto volume need audio analysis that is not finished yet."""
+        """True (+ queues the work) when Cut clips / Auto voice need audio analysis that is not finished yet."""
+        if self._av_pending():
+            return True
         if self.norm_on.get() != "1" and self._cut_margin() is None:
             return False
         pend = False
@@ -19939,6 +20067,211 @@ class Tab2Editor(tk.Frame):
                 self._wave_want(p)
                 pend = True
         return pend
+
+    # ───────── Auto voice: clip gulor voice (noise / tone / volume) clip er moddhei thik kore ─────────
+    _AV_VER = "v1"
+
+    def _av_dir(self):
+        d = os.path.join(tempfile.gettempdir(), "ave_autovoice")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _av_key(path):
+        try:
+            st = os.stat(path)
+            raw = f"{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}"
+        except OSError:
+            raw = os.path.abspath(str(path))
+        return hashlib.md5(raw.encode("utf-8", "ignore")).hexdigest()[:16]
+
+    def _av_clip_paths(self):
+        out, seen = [], set()
+        for sl in self.slots:
+            p = sl.get("path")
+            if p and p not in seen and os.path.isfile(p) and not self._is_img(p):
+                seen.add(p)
+                out.append(p)
+        return out
+
+    def _av_cur_setsig(self):
+        keys = sorted(self._av_key(p) for p in self._av_clip_paths())
+        return hashlib.md5(("|".join(keys) + self._AV_VER).encode()).hexdigest()
+
+    def _av_src(self, path):
+        """Auto voice on + clip process hoye gele: thik kora audio file. Na hole original clip."""
+        if not self._av_enabled or not path:
+            return path
+        f = self._av_done.get("files", {}).get(path)
+        if f and os.path.isfile(f):
+            return f
+        return path
+
+    def _av_pending(self):
+        """True = Auto voice ekhono process kortese (ba shuru korlam). Main thread theke dako."""
+        if not self._av_enabled:
+            return False
+        if self._av_busy:
+            return True
+        if not self._av_clip_paths():
+            return False
+        if self._av_done.get("setsig") != self._av_cur_setsig():
+            self._av_kick()
+            return True
+        return False
+
+    def _av_kick(self):
+        if self._av_busy or not self._av_enabled:
+            return
+        paths = self._av_clip_paths()
+        if not paths:
+            return
+        self._av_busy = True
+        sig = self._av_cur_setsig()
+        threading.Thread(target=self._av_worker, args=(paths, sig), daemon=True).start()
+
+    def _av_say(self, msg):
+        try:
+            self.after(0, lambda m=str(msg): self.app.note(m))
+        except Exception:
+            pass
+
+    def _av_worker(self, paths, sig):
+        add_ffmpeg_path()
+        files, msg = {}, ""
+        try:
+            files, msg = self._av_process(paths)
+        except Exception as e:
+            msg = "error: " + (str(e) or type(e).__name__)
+        self._av_done = {"setsig": sig, "files": files}
+        n, tot = len(files), len(paths)
+        try:
+            self.after(0, lambda: self._av_finished(n, tot, msg))
+        except Exception:
+            self._av_busy = False
+
+    def _av_finished(self, n, tot, msg):
+        self._av_busy = False
+        if self._av_enabled and self._av_clip_paths() and self._av_done.get("setsig") != self._av_cur_setsig():
+            self._av_kick()                               # process er shomoy clips bodlayeche -> abar
+            return
+        if msg:
+            self.app.note("Auto voice: " + msg, WARN)
+        else:
+            self.app.note(f"Auto voice ready — {n}/{tot} clip er voice thik hoyeche. Ekhon Play / Export korte paro.", OK)
+        self._draw_soon()
+
+    def _av_numpy(self):
+        try:
+            import numpy as np
+            return np
+        except ImportError:
+            pass
+        if self._av_np_tried:
+            return None
+        self._av_np_tried = True
+        self._av_say("Auto voice: numpy install hochhe (shudhu prothombar, ektu somoy lagbe)…")
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "numpy"],
+                           capture_output=True, creationflags=NOWIN, timeout=900)
+            import importlib
+            importlib.invalidate_caches()
+            import numpy as np
+            return np
+        except Exception:
+            return None
+
+    def _av_process(self, paths):
+        """Returns ({original_path: fixed_wav}, warning_text)."""
+        DSP = _AutoVoiceDSP
+        SR = DSP.SR
+        ff = shutil.which("ffmpeg") or "ffmpeg"
+        d = self._av_dir()
+        warn = ""
+        try:                                              # purono cache (3 din+) muche fela
+            now = time.time()
+            for fn in os.listdir(d):
+                fp = os.path.join(d, fn)
+                if now - os.path.getmtime(fp) > 3 * 86400:
+                    os.remove(fp)
+        except OSError:
+            pass
+        tot = len(paths)
+        # 1) shob clip theke audio ber + noise remove
+        raws = {}
+        for i, p in enumerate(paths):
+            self._av_say(f"Auto voice: audio ber + noise remove {i + 1}/{tot} …")
+            key = self._av_key(p)
+            raw = os.path.join(d, f"raw_{key}.f32")
+            if not (os.path.isfile(raw) and os.path.getsize(raw) > 3200):
+                tmp = raw + ".part"
+                r = subprocess.run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", p, "-vn",
+                                    "-af", DSP.AF_EXTRACT, "-ac", "1", "-ar", str(SR), "-f", "f32le", tmp],
+                                   capture_output=True, creationflags=NOWIN)
+                if r.returncode != 0 or not os.path.isfile(tmp) or os.path.getsize(tmp) < 3200:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                    continue                              # ei clip e audio nai
+                os.replace(tmp, raw)
+            raws[p] = (key, raw)
+        if not raws:
+            return {}, "kono clip e audio paoa jayni."
+        # 2) tone analysis + reference
+        np = self._av_numpy()
+        curves, ref = {}, None
+        if np is not None and len(raws) > 1:
+            for i, (p, (key, raw)) in enumerate(raws.items()):
+                self._av_say(f"Auto voice: golar tone mapa hochhe {i + 1}/{len(raws)} …")
+                cv = self._av_ltas.get(key)
+                if cv is None:
+                    cv = DSP.ltas(np, np.fromfile(raw, dtype="<f4"))
+                    self._av_ltas[key] = cv
+                curves[p] = cv
+            ref = DSP.pick_reference(np, curves)
+        elif np is None:
+            warn = "numpy paoa jayni — tone match hoyni (noise + volume thik hoyeche). CMD te 'pip install numpy' dao."
+        refkey = self._av_key(ref) if ref else "solo"
+        # 3) tone match + compressor + loudness
+        files = {}
+        for i, (p, (key, raw)) in enumerate(raws.items()):
+            self._av_say(f"Auto voice: voice thik hochhe {i + 1}/{len(raws)} …")
+            out = os.path.join(d, f"fixed_{key}_{refkey}_{self._AV_VER}.wav")
+            if os.path.isfile(out) and os.path.getsize(out) > 1000:
+                files[p] = out
+                continue
+            src, eq = raw, None
+            if ref is not None and p != ref:
+                x = np.fromfile(raw, dtype="<f4")
+                y = DSP.apply_eq(np, x, DSP.eq_curve(np, curves[ref], curves[p]))
+                pk = float(np.max(np.abs(y))) if len(y) else 0.0
+                if pk > 0.98:
+                    y = y * (0.98 / pk)
+                eq = os.path.join(d, f"eq_{key}_{refkey}.f32")
+                y.astype("<f4").tofile(eq)
+                src = eq
+            dur = os.path.getsize(src) // 4 / float(SR)
+            tmp = out + ".part.wav"
+            r = subprocess.run([ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "f32le", "-ar", str(SR),
+                                "-ac", "1", "-i", src, "-af", DSP.AF_FIX + ",apad", "-t", f"{dur:.3f}",
+                                "-ar", str(SR), "-ac", "1", "-c:a", "pcm_s16le", tmp],
+                               capture_output=True, creationflags=NOWIN)
+            if eq:
+                try:
+                    os.remove(eq)
+                except OSError:
+                    pass
+            if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 1000:
+                os.replace(tmp, out)
+                files[p] = out
+            else:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                warn = warn or "kichu clip process hoyni (original sound-i thakbe)."
+        return files, warn
 
     def _wave_cols_for(self, path, n, i0=0, i1=None):
         key = (path, n, i0, i1)
@@ -20375,6 +20708,9 @@ class Tab2Editor(tk.Frame):
         if not self.slots or self._total <= 0.05:
             self.app.note("Age clips import koro.", WARN)
             return
+        if self._av_pending():
+            self.app.note("Auto voice process hochhe — ektu por abar Play chap.", WARN)
+            return
         t = self.cur_t if self.cur_t < self._total - 0.05 else 0.0
         plan = self._plan(t)
         if not plan:
@@ -20431,7 +20767,7 @@ class Tab2Editor(tk.Frame):
         wav = self._wav_path(gen, k)
         try:
             r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{e['off'] + e.get('tin', 0.0):.3f}",
-                                "-t", f"{e['len']:.3f}", "-i", e["path"], "-vn", "-ac", "1", "-ar", "32000",
+                                "-t", f"{e['len']:.3f}", "-i", self._av_src(e["path"]), "-vn", "-ac", "1", "-ar", "32000",
                                 "-af", (f"volume={e['gain']:.3f},alimiter=limit=0.97," if abs(e.get("gain", 1.0) - 1.0) > 0.005 else "")
                                 + f"volume={self._vol:.2f}", "-c:a", "pcm_s16le", wav],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NOWIN, timeout=120)
@@ -20939,7 +21275,7 @@ class Tab2Editor(tk.Frame):
         for it in plan:
             d = max(0.04, float(it["dur"]))
             if it["path"] and not it["img"] and os.path.isfile(it["path"]):
-                cmd += (["-ss", f"{it['tin']:.3f}"] if it.get("tin", 0) > 0 else []) + ["-i", it["path"]]
+                cmd += (["-ss", f"{it['tin']:.3f}"] if it.get("tin", 0) > 0 else []) + ["-i", self._av_src(it["path"])]
                 filt.append(f"[{n}:a:0]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
                             + self._gain_f(it) + f"apad,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{len(labels)}]")
                 n += 1
@@ -20967,7 +21303,7 @@ class Tab2Editor(tk.Frame):
                 d = max(0.04, float(it["dur"]))
                 k = len(labels)
                 if it["path"] and not it["img"] and os.path.isfile(it["path"]) and has_a.get(it["path"], True):
-                    cmd += (["-ss", f"{it['tin']:.3f}"] if it.get("tin", 0) > 0 else []) + ["-i", it["path"]]
+                    cmd += (["-ss", f"{it['tin']:.3f}"] if it.get("tin", 0) > 0 else []) + ["-i", self._av_src(it["path"])]
                     filt.append(f"[{n}:a:0]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
                                 + self._gain_f(it) + f"apad,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{k}]")
                     n += 1
@@ -21163,7 +21499,7 @@ class Tab2Editor(tk.Frame):
             messagebox.showerror("Export", "ffmpeg pawa jayni \u2014 Export tab e 'Install FFmpeg' chap.", parent=self.app)
             return
         if self._analysis_pending():
-            self.app.note("Audio analyse hochhe (Cut clips / Auto volume) — ektu por abar Export chap.", WARN)
+            self.app.note("Audio analyse / Auto voice process hochhe — ektu por abar Export chap.", WARN)
             return
         proj = self.app.proj or self._proj
         if not proj:
