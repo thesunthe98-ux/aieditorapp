@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.1.5"
+APP_VERSION = "3.1.6"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -33447,6 +33447,28 @@ class VoiceRunner:
         except Exception:
             pass
 
+    def _sp_open_email_form(self, page, timeout=45):
+        """Sign-in page e direct email form na eshe 'Continue with Google/Apple/Email' page ashle
+        'Continue with Email' e click kore email+password form ber kore."""
+        t0 = time.time()
+        clicked = False
+        while time.time() - t0 < timeout:
+            try:
+                if page.get_by_placeholder("Email address").first.is_visible():
+                    return
+            except Exception:
+                pass
+            if not clicked or time.time() - t0 > 8:
+                try:
+                    b = page.get_by_role("button", name=re.compile(r"Continue with Email", re.I)).first
+                    if b.is_visible():
+                        self.log("  'Continue with Email' page eshechhe — button e click korchi")
+                        b.click(timeout=5000)
+                        clicked = True
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
     def speechify(self, page, email, password, text, out_mp3, voice=None):
         cfg = self.cfg
         self.log(f"Speechify: login -> {email}")
@@ -33458,6 +33480,7 @@ class VoiceRunner:
         except Exception:
             pass
         page.goto(VOICE_SIGN_IN, timeout=90000)
+        self._sp_open_email_form(page)
         page.get_by_placeholder("Email address").fill(email, timeout=30000)
         page.get_by_placeholder("Password").fill(password)
         page.get_by_role("button", name="Continue", exact=True).click()
@@ -35570,6 +35593,7 @@ class Tab2SpeechifyRunner(VoiceRunner):
         page.goto(VOICE_SIGN_IN, timeout=90000)
         self._wipe_session(page)
         page.goto(VOICE_SIGN_IN, timeout=90000)
+        self._sp_open_email_form(page)
         page.get_by_placeholder("Email address").fill(email, timeout=30000)
         page.get_by_placeholder("Password").fill(pw)
         page.get_by_role("button", name="Continue", exact=True).click()
