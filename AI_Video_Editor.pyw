@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.1.7"
+APP_VERSION = "3.1.8"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -17411,7 +17411,6 @@ class Tab2Editor(tk.Frame):
         self._fix_stop = threading.Event()
         self._fix_btn = None
         self._exp_busy = False                          # Tab 2 export state
-        self._exp_warns = []                            # export er shomoy joma howa sotorkota / error
         self._exp_stop = threading.Event()
         self._exp_btn = None
         self._exp_btns = []
@@ -19918,7 +19917,46 @@ class Tab2Editor(tk.Frame):
         return out
 
     def _t2_ovl_graph(self, ovs, W, H):
-        """(extra ffmpeg inputs, filter parts, last label) - input 0 = the joined video, overlays = inputs 1..N."""
+        """(extra ffmpeg inputs, filter parts, last label) - input 0 = the joined video, overlays = inputs 1..N.
+        FAST: shudhu leak er window e RGB blend hoy; baki ongsho yuv420p te ei pass kore (tpad-black / full-length blend nai)."""
+        F = self.FPS
+        wins = []
+        for n, o in sorted(enumerate(ovs, 1), key=lambda x: x[1]["t"]):
+            d = max(0.1, o["t1"] - o["t0"])
+            sf = max(0, int(round(o["t"] * F)))
+            wins.append((n, o, sf, sf + max(1, int(round(d * F)))))
+        if any(b[2] < a[3] for a, b in zip(wins, wins[1:])):      # overlap -> purono (dhire) chain
+            return self._t2_ovl_graph_legacy(ovs, W, H)
+        ins = []
+        for o in ovs:
+            d = max(0.1, o["t1"] - o["t0"])
+            ins += ["-ss", f"{o['t0']:.3f}", "-t", f"{d:.3f}", "-i", o["p"]]
+        segs, pos = [], 0
+        for n, o, sf, ef in wins:
+            if sf > pos:
+                segs.append(("g", pos, sf, None))
+            segs.append(("w", sf, ef, (n, o)))
+            pos = ef
+        segs.append(("g", pos, None, None))
+        m = len(segs)
+        parts = [f"[0:v]split={m}" + "".join(f"[s{k}]" for k in range(m))]
+        outs = []
+        for k, (kind, sf, ef, info) in enumerate(segs):
+            rng = f"start_frame={sf}" + (f":end_frame={ef}" if ef is not None else "")
+            if kind == "g":
+                parts.append(f"[s{k}]trim={rng},setpts=PTS-STARTPTS[p{k}]")
+            else:
+                n, o = info
+                parts.append(f"[s{k}]trim={rng},setpts=PTS-STARTPTS,format=gbrp[w{k}]")
+                parts.append(f"[{n}:v]setpts=PTS-STARTPTS,fps={F},scale={W}:{H}:force_original_aspect_ratio=increase,"
+                             f"crop={W}:{H},trim=end_frame={ef - sf},format=gbrp[l{k}]")
+                parts.append(f"[w{k}][l{k}]blend=all_mode=screen:all_opacity={o.get('op', 1.0):.3f}:eof_action=pass,"
+                             f"format=yuv420p,setpts=PTS-STARTPTS[p{k}]")
+            outs.append(f"[p{k}]")
+        parts.append("".join(outs) + f"concat=n={m}:v=1:a=0,fps={F}[vo]")
+        return ins, parts, "vo"
+
+    def _t2_ovl_graph_legacy(self, ovs, W, H):
         F = self.FPS
         ins, parts, last = [], ["[0:v]format=gbrp[v0]"], "v0"
         for n, o in enumerate(ovs, 1):
@@ -19933,14 +19971,8 @@ class Tab2Editor(tk.Frame):
     def _t2_apply_ovl(self, src, dst, ovs, W, H, total, venc):
         """Screen-blend every overlay (light leak) onto the joined video at its timeline position."""
         F = self.FPS
-        ins, parts, last = ["-i", src], ["[0:v]format=gbrp[v0]"], "v0"
-        for n, o in enumerate(ovs, 1):
-            d = max(0.1, o["t1"] - o["t0"])
-            ins += ["-ss", f"{o['t0']:.3f}", "-t", f"{d:.3f}", "-i", o["p"]]
-            parts.append(f"[{n}:v]setpts=PTS-STARTPTS,fps={F},scale={W}:{H}:force_original_aspect_ratio=increase,"
-                         f"crop={W}:{H},tpad=start_duration={o['t']:.3f}:color=black,format=gbrp[l{n}]")
-            parts.append(f"[{last}][l{n}]blend=all_mode=screen:all_opacity={o.get('op', 1.0):.3f}:eof_action=pass[v{n}]")
-            last = f"v{n}"
+        ins_o, parts, last = self._t2_ovl_graph(ovs, W, H)
+        ins = ["-i", src] + ins_o
         parts.append(f"[{last}]format=yuv420p[o]")
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + ins + \
               ["-filter_complex", ";".join(parts), "-map", "[o]", "-an", "-r", str(F)] + list(venc) + \
@@ -20158,14 +20190,7 @@ class Tab2Editor(tk.Frame):
             return
         if msg:
             self.app.note("Auto voice: " + msg, WARN)
-            if msg != getattr(self, "_av_shown_warn", None):
-                self._av_shown_warn = msg
-                try:
-                    messagebox.showwarning("Auto voice — sotorkota", msg, parent=self.app)
-                except Exception:
-                    pass
         else:
-            self._av_shown_warn = ""
             self.app.note(f"Auto voice ready — {n}/{tot} clip er voice thik hoyeche. Ekhon Play / Export korte paro.", OK)
         self._draw_soon()
 
@@ -20207,7 +20232,6 @@ class Tab2Editor(tk.Frame):
         tot = len(paths)
         # 1) shob clip theke audio ber + noise remove
         raws = {}
-        first_err = ""
         for i, p in enumerate(paths):
             self._av_say(f"Auto voice: audio ber + noise remove {i + 1}/{tot} …")
             key = self._av_key(p)
@@ -20222,14 +20246,11 @@ class Tab2Editor(tk.Frame):
                         os.remove(tmp)
                     except OSError:
                         pass
-                    first_err = first_err or (os.path.basename(p) + ": " + (r.stderr or b"").decode("utf-8", "replace").strip()[-300:])
                     continue                              # ei clip e audio nai
                 os.replace(tmp, raw)
             raws[p] = (key, raw)
         if not raws:
-            return {}, "kono clip theke audio ber kora jayni." + ((" ffmpeg error: " + first_err) if first_err else "")
-        if first_err:
-            warn = "kichu clip theke audio ber kora jayni (ffmpeg error: " + first_err + ")"
+            return {}, "kono clip e audio paoa jayni."
         # 2) tone analysis + reference
         np = self._av_numpy()
         curves, ref = {}, None
@@ -20243,7 +20264,7 @@ class Tab2Editor(tk.Frame):
                 curves[p] = cv
             ref = DSP.pick_reference(np, curves)
         elif np is None:
-            warn = (warn + " | " if warn else "") + "numpy paoa jayni — tone match hoyni (noise + volume thik hoyeche). CMD te 'pip install numpy' dao."
+            warn = "numpy paoa jayni — tone match hoyni (noise + volume thik hoyeche). CMD te 'pip install numpy' dao."
         refkey = self._av_key(ref) if ref else "solo"
         # 3) tone match + compressor + loudness
         files = {}
@@ -20282,8 +20303,7 @@ class Tab2Editor(tk.Frame):
                     os.remove(tmp)
                 except OSError:
                     pass
-                warn = warn or ("kichu clip process hoyni (original sound-i thakbe). ffmpeg error: "
-                                + (r.stderr or b"").decode("utf-8", "replace").strip()[-300:])
+                warn = warn or "kichu clip process hoyni (original sound-i thakbe)."
         return files, warn
 
     def _wave_cols_for(self, path, n, i0=0, i1=None):
@@ -21310,9 +21330,6 @@ class Tab2Editor(tk.Frame):
             except Exception:
                 has_a[it["path"]] = True
         if not all(has_a.values()):
-            if self._exp_busy:
-                _na = [os.path.basename(p) for p, v in has_a.items() if not v]
-                self._exp_warn("Ei clip gulo te AUDIO nei (nirob thakbe): " + ", ".join(_na[:8]) + (" ..." if len(_na) > 8 else ""))
             cmd = [ff, "-y", "-hide_banner", "-loglevel", "error"]
             filt, labels, n = [], [], 0
             for it in plan:
@@ -21340,7 +21357,7 @@ class Tab2Editor(tk.Frame):
         except Exception:
             pass
         if r.returncode != 0 or not os.path.isfile(out_path):
-            return False, "ffmpeg merge error: " + (r.stderr or "").strip()[-700:]
+            return False, "ffmpeg merge error: " + (r.stderr or "")[-300:]
         return True, ""
 
     def _t2_split_chunks(self, path, work, max_sec=300.0):
@@ -21368,110 +21385,6 @@ class Tab2Editor(tk.Frame):
                 _b.config(text="\u25a0 Stop export" if busy else "\U0001F3AC Export")
             except Exception:
                 pass
-
-    def _exp_warn(self, msg):
-        """Export cholar shomoy kono kichu missing / fail hole ekhane joma hoy; export shesh e user ke dekhano hoy."""
-        try:
-            msg = str(msg).strip()
-            if msg and msg not in self._exp_warns:
-                self._exp_warns.append(msg)
-            self._exp_say("\u26a0 " + msg.split("\n")[0][:170])
-        except Exception:
-            pass
-
-    @staticmethod
-    def _ff_list(kind):
-        """ffmpeg -encoders / -filters er output (text). Chalano na gele ''."""
-        try:
-            r = subprocess.run([shutil.which("ffmpeg") or "ffmpeg", "-hide_banner", "-" + kind],
-                               capture_output=True, text=True, errors="replace", creationflags=NOWIN, timeout=40)
-            return (r.stdout or "") + (r.stderr or "")
-        except Exception:
-            return ""
-
-    def _exp_preflight(self, job):
-        """Export shuru hoyar age: sound er jonno dorkari ffmpeg encoder / filter / ffprobe ache kina check."""
-        ff = shutil.which("ffmpeg") or ""
-        if not ff:
-            self._exp_warn("ffmpeg pawa jayni (PATH e nei). Export tab theke 'Install FFmpeg' chapo.")
-            return
-        enc = self._ff_list("encoders")
-        flt = self._ff_list("filters")
-        head = "ffmpeg: " + ff
-
-        def has(txt, name):
-            return re.search(r"\s" + re.escape(name) + r"\s", txt) is not None
-
-        if not enc.strip():
-            self._exp_warn("ffmpeg chalie encoder list ana jayni — ei ffmpeg ta thik moto kaj korchhe na.\n" + head)
-        else:
-            miss = [n for n in ("libmp3lame", "aac") if not has(enc, n)]
-            if miss:
-                self._exp_warn("ffmpeg e audio encoder nei: " + ", ".join(miss) + ". Tai sound merge / export fail hobe "
-                               "(video te sound thakbe na). Export tab theke 'Install FFmpeg' chepe full ffmpeg boshao.\n" + head)
-        if flt.strip():
-            need = ["aresample", "aformat", "apad", "atrim", "asetpts", "concat", "volume", "anullsrc"]
-            if getattr(self, "_av_enabled", False):
-                need += ["afftdn", "highpass", "lowpass", "acompressor", "dynaudnorm", "loudnorm"]
-            miss = [n for n in need if not has(flt, n)]
-            if miss:
-                self._exp_warn("ffmpeg e ei filter gulo nei: " + ", ".join(miss) + ". Tai sound process / merge fail hote pare.\n" + head)
-        if not shutil.which("ffprobe"):
-            self._exp_warn("ffprobe pawa jayni (ffmpeg er pashe thakar kotha). Clip e audio ache kina check kora jabe na.\n" + head)
-        try:
-            if getattr(self, "_av_enabled", False):
-                real = [it["path"] for it in job["items"] if it["path"] and not it["img"]]
-                if real and not any(self._av_src(p) != p for p in real):
-                    why = getattr(self, "_av_shown_warn", "") or ""
-                    self._exp_warn("Auto voice on chhilo kintu kono clip er voice process hoyni — export e clip er ORIGINAL sound jabe."
-                                   + ("\nAuto voice er karon: " + why if why else ""))
-        except Exception:
-            pass
-
-    def _exp_verify_audio(self, job):
-        """Export hoye gele: video te asholei sound ache kina (volumedetect). Nirob hole sotorkota."""
-        if job.get("mute"):
-            return
-        voice = job.get("voice")
-        expect = bool(voice and os.path.isfile(voice)) or any(it["path"] and not it["img"] for it in job["items"])
-        if not expect:
-            return
-        self._exp_say("Video te sound ache kina check hochhe\u2026")
-        try:
-            r = subprocess.run([shutil.which("ffmpeg") or "ffmpeg", "-hide_banner", "-nostats", "-i", job["out"],
-                                "-vn", "-af", "volumedetect", "-f", "null", "-"],
-                               capture_output=True, text=True, errors="replace", creationflags=NOWIN, timeout=300)
-        except Exception as e:
-            self._exp_warn("Export er por sound check korte parlam na: %s" % e)
-            return
-        txt = r.stderr or ""
-        if "Audio:" not in txt:
-            self._exp_warn("Export kora video te AUDIO STREAM-i nei (video silent).")
-            return
-        m = re.search(r"max_volume:\s*(-inf|-?[\d.]+)\s*dB", txt)
-        if not m:
-            self._exp_warn("Sound level check hoyni. ffmpeg: " + txt.strip()[-250:])
-            return
-        try:
-            mx = -999.0 if m.group(1) == "-inf" else float(m.group(1))
-        except ValueError:
-            return
-        if mx <= -60.0:
-            self._exp_warn("Export kora video er sound ekdom nirob (max volume %s dB) — jodio Mute off chhilo." % m.group(1))
-
-    def _exp_show_warns(self, out, warns):
-        txt = "\n\n".join("%d) %s" % (i + 1, w) for i, w in enumerate(warns))
-        try:
-            with open(os.path.splitext(out)[0] + "_export_log.txt", "w", encoding="utf-8") as fh:
-                fh.write(txt + "\n")
-        except OSError:
-            pass
-        try:
-            messagebox.showwarning("Export — sotorkota / problem",
-                                   "Export hoyeche, kintu ei problem gulo pawa gelo:\n\n" + txt
-                                   + "\n\n(Eta video folder e _export_log.txt file e-o save kora hoyeche)", parent=self.app)
-        except Exception:
-            pass
 
     def _exp_say(self, msg):
         try:
@@ -21580,9 +21493,6 @@ class Tab2Editor(tk.Frame):
         if out:
             self.app.note("Export shesh \u2713  " + out, OK, 12)
             self._exp_done_dialog(out)
-            if self._exp_warns:
-                _w, self._exp_warns = list(self._exp_warns), []
-                self._exp_show_warns(out, _w)
         elif err:
             self.app.note("Export: " + str(err), WARN, 12)
             if "stop kora" not in str(err):
@@ -21669,7 +21579,6 @@ class Tab2Editor(tk.Frame):
                "mute": self.mute_var.get() == "1", "ovs": self._ov_export_list(),
                "sub_base": self._t2_sub_base(cum) if cfg.get("SUB_ENABLED") == "1" else []}
         self._exp_stop.clear()
-        self._exp_warns = []
         self._exp_ui(True)
         self._exp_dlg_open(out)
         threading.Thread(target=self._exp_worker, args=(job,), daemon=True).start()
@@ -21685,11 +21594,6 @@ class Tab2Editor(tk.Frame):
         if self._exp_stop.is_set():
             ok, err = False, "Export stop kora hoyeche."
             self._rm(job["out"])
-        elif ok:
-            try:
-                self._exp_verify_audio(job)
-            except Exception as e:
-                self._exp_warn("Sound check e error: %s" % e)
         out = job["out"]
         self.after(0, lambda: self._exp_done(out if ok else None, err))
 
@@ -21831,18 +21735,14 @@ class Tab2Editor(tk.Frame):
     def _t2_export_run(self, job, tmp):
         F = self.FPS
         W, H, out, items, total, cfg = job["W"], job["H"], job["out"], job["items"], job["total"], job["cfg"]
-        try:
-            self._exp_preflight(job)
-        except Exception as _pe:
-            self._exp_warn("Preflight check e error: %s" % _pe)
         eng, venc = None, ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-bf", "0"]
         try:
             eng = self._t2_engine()
             self._exp_say("Encoder check hochhe\u2026")
             eng.setup_encoder(cfg)
             venc = list(eng.VENC)
-        except Exception as _ee:
-            self._exp_warn("Video encoder / engine load hoyni (%s) — default libx264 diye export hochhe. Subtitle thakle seta hobe na." % (str(_ee) or type(_ee).__name__))
+        except Exception:
+            pass
         # 1) per-slot segments - PARALLEL (Tab 1 er moto); frame count cumulative round kore \u2014 drift hoy na
         from concurrent.futures import ThreadPoolExecutor, as_completed
         jobs, cum_f = [], 0
@@ -21932,8 +21832,6 @@ class Tab2Editor(tk.Frame):
         pt = f"apad=whole_dur={total:.3f},atrim=0:{total:.3f}"
         a_in, af, aud_src = [], None, None
         voice = job["voice"]
-        if voice and not os.path.isfile(voice):
-            self._exp_warn("Voice track file pawa jayni: %s — tai clip er sound use hochhe." % voice)
         if voice and os.path.isfile(voice):
             a_in, af, aud_src = ["-i", voice], vaf + "," + pt, voice
         elif not job["mute"] and any(it["path"] and not it["img"] for it in items):
@@ -21943,16 +21841,10 @@ class Tab2Editor(tk.Frame):
             ok, err = self._t2_build_merged_audio(items, merged)
             if ok:
                 a_in, af, aud_src = ["-i", merged], vaf + "," + pt, merged
-            else:
-                self._exp_warn("Clip er sound MERGE fail hoyeche — video te sound thakbe na.\nKaron (ffmpeg error): " + str(err))
         if not a_in:                                         # silent track
-            if not job["mute"] and not any(it["path"] and not it["img"] for it in items) and not (voice and os.path.isfile(voice)):
-                self._exp_warn("Timeline e kono video clip / voice track nei (shob image ba khali slot) — tai export e sound nei.")
             a_in, af = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"], None
         # 4) subtitles (engine write_ass \u2014 Tab 2 er nijosso style)
         ass = None
-        if job["sub_base"] and eng is None:
-            self._exp_warn("Subtitle chhilo kintu engine load hoyni — export e subtitle bosheni.")
         if job["sub_base"] and eng is not None:
             try:
                 cfgd = dict(cfg)
@@ -21965,8 +21857,7 @@ class Tab2Editor(tk.Frame):
                 if events:
                     ass = os.path.join(tmp, "subs.ass")
                     eng.write_ass(ass, events, cfgd, W, H)
-            except Exception as _se:
-                self._exp_warn("Subtitle toiri fail hoyeche (%s) — subtitle chhara export hochhe." % (str(_se) or type(_se).__name__))
+            except Exception:
                 ass = None
         # 5) final: [light leak overlay +] subtitle burn + audio
         aenc = ["-c:a", "aac", "-b:a", "192k"] + (["-af", af] if af else []) + ["-t", f"{total:.3f}"]
@@ -22002,7 +21893,6 @@ class Tab2Editor(tk.Frame):
                 vid = vid2
             else:
                 self._exp_say("Overlay fail \u2014 overlay chhara export korchhi: " + str(err2)[-120:])
-                self._exp_warn("Light leak overlay boshano fail — overlay chhara export hoyeche.\nKaron: " + str(err2)[-300:])
         base = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", vid] + a_in + ["-map", "0:v:0", "-map", "1:a:0"]
         self._exp_prog(85)
         self._pg_ctx = (85.0, 14.0, max(0.05, total))
@@ -22014,7 +21904,6 @@ class Tab2Editor(tk.Frame):
                 return False, "stopped"
             if rc != 0 or not os.path.isfile(outp):
                 self._exp_say("Subtitle burn fail \u2014 subtitle chhara export korchhi")
-                self._exp_warn("Subtitle burn fail — subtitle chhara export hoyeche.\nKaron (ffmpeg error): " + str(err)[-300:])
                 ass = None
         if not ass:
             self._exp_say("audio mux hochhe\u2026")
