@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.1.8"
+APP_VERSION = "3.1.9"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -21519,6 +21519,94 @@ class Tab2Editor(tk.Frame):
             return [(i * step, (i + 1) * step, t) for i, t in enumerate(script)]
         return []
 
+    # ───────── ffmpeg check + auto install (Export click e) ─────────
+    _FF_NEED_FILTERS = ("afftdn", "loudnorm", "dynaudnorm", "acompressor", "alimiter", "highpass", "lowpass",
+                        "aresample", "apad", "atrim", "concat", "anullsrc", "aformat")
+    _FF_NEED_ENCODERS = ("libmp3lame", "aac")
+
+    def _ff_missing(self):
+        """Export / Auto voice er dorkari ffmpeg filter + encoder na thakle tar list. [] = shob ase."""
+        ff = shutil.which("ffmpeg") or "ffmpeg"
+        if getattr(self, "_ff_caps_ok", None) == ff:
+            return []
+
+        def names(flag):
+            r = subprocess.run([ff, "-hide_banner", flag], capture_output=True, text=True,
+                               creationflags=NOWIN, timeout=40)
+            out = set()
+            for ln in (r.stdout or "").splitlines():
+                t = ln.split()
+                if len(t) >= 2:
+                    out.add(t[1])
+            return out
+        try:
+            have_f, have_e = names("-filters"), names("-encoders")
+        except Exception as e:
+            return ["ffmpeg chalano jachhe na (" + (str(e) or type(e).__name__) + ")"]
+        miss = [n for n in self._FF_NEED_FILTERS if n not in have_f]
+        miss += [n for n in self._FF_NEED_ENCODERS if n not in have_e]
+        if not miss:
+            self._ff_caps_ok = ff
+        return miss
+
+    def _ff_autofix(self, miss):
+        """ffmpeg e feature nei -> (Windows e) notun ffmpeg nijei download kore, tarpor Export abar shuru kore."""
+        if getattr(self, "_ff_fixing", False):
+            return
+        need = ", ".join(miss[:8])
+        if os.name != "nt" or getattr(self, "_ff_fix_tried", False):
+            messagebox.showerror(
+                "Export",
+                "Ei PC r ffmpeg e Export / Auto voice er dorkari feature nei:\n%s\n\n"
+                "Auto install hoy nai. Full ffmpeg install koro (https://www.gyan.dev/ffmpeg/builds/ — "
+                "'release-essentials' ba 'release-full'), tarpor Export tab theke 'Locate' diye ffmpeg.exe select koro." % need,
+                parent=self.app)
+            return
+        self._ff_fixing = True
+        self.app.note("ffmpeg e kichu feature nei (%s) — notun ffmpeg auto install hochhe, ektu opekkha koro…" % need, WARN, 12)
+
+        def work():
+            ok = False
+            try:
+                ok = bool(install_ffmpeg(self._av_say, lambda v: None))
+            except Exception:
+                ok = False
+
+            def fin():
+                self._ff_fixing = False
+                if not ok:
+                    self._ff_fix_tried = True
+                    messagebox.showerror(
+                        "Export",
+                        "ffmpeg auto install hoy nai (internet / firewall / antivirus block korte pare).\n"
+                        "Manual: https://www.gyan.dev/ffmpeg/builds/ theke 'ffmpeg-release-essentials.zip' nao, "
+                        "unzip kore Export tab e 'Locate' diye ffmpeg.exe select koro.", parent=self.app)
+                    return
+                try:
+                    rec = getattr(self.app, "rec", None)
+                    if not isinstance(rec, dict):
+                        rec = load_recent()
+                    rec["ffmpeg_dir"] = FF_BIN
+                    save_recent(rec)
+                except Exception:
+                    pass
+                cur = os.environ.get("PATH", "").split(os.pathsep)
+                os.environ["PATH"] = os.pathsep.join([FF_BIN] + [d for d in cur if d != FF_BIN])
+                self._ff_caps_ok = None
+                again = self._ff_missing()
+                if again:
+                    self._ff_fix_tried = True
+                    messagebox.showerror("Export", "Notun ffmpeg install hoyeche kintu ekhono feature nei: "
+                                         + ", ".join(again[:8]), parent=self.app)
+                    return
+                self.app.note("ffmpeg install hoyeche ✓ — Export abar shuru hochhe…", OK, 12)
+                self.export_video()
+            try:
+                self.after(0, fin)
+            except Exception:
+                self._ff_fixing = False
+        threading.Thread(target=work, daemon=True).start()
+
     def export_video(self):
         if self._exp_busy:
             self._exp_stop.set()
@@ -21530,6 +21618,10 @@ class Tab2Editor(tk.Frame):
         add_ffmpeg_path()
         if not shutil.which("ffmpeg"):
             messagebox.showerror("Export", "ffmpeg pawa jayni \u2014 Export tab e 'Install FFmpeg' chap.", parent=self.app)
+            return
+        miss = self._ff_missing()
+        if miss:
+            self._ff_autofix(miss)
             return
         if self._analysis_pending():
             self.app.note("Audio analyse / Auto voice process hochhe — ektu por abar Export chap.", WARN)
@@ -21839,6 +21931,9 @@ class Tab2Editor(tk.Frame):
             self._exp_say("clips er sound merge hochhe\u2026")
             merged = os.path.join(tmp, "clips_audio.mp3")
             ok, err = self._t2_build_merged_audio(items, merged)
+            if not ok:
+                return False, ("Clips er audio merge hoyni, tai Export bondho kora holo "
+                               "(audio chhara video banabo na).\n\n" + str(err or "ffmpeg error"))
             if ok:
                 a_in, af, aud_src = ["-i", merged], vaf + "," + pt, merged
         if not a_in:                                         # silent track
