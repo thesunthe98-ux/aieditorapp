@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.1.9"
+APP_VERSION = "3.2.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -1074,6 +1074,34 @@ def sync_engine(proj):
         pass
     with open(eng, "wb") as f:
         f.write(data)
+
+
+def run_ff_complex(cmd_head, filt_text, fs_path, tail):
+    """cmd_head + filter graph + tail chalao. Notun ffmpeg e '-filter_complex_script' nei, purono e '-/filter_complex' nei,
+    tai ekta ekta kore try kore (inline -> -/filter_complex -> -filter_complex_script)."""
+    variants = []
+    if len(filt_text) < 20000:
+        variants.append(["-filter_complex", filt_text.replace("\n", "")])
+    variants += [["-/filter_complex", fs_path], ["-filter_complex_script", fs_path]]
+    res = []
+    try:
+        if len(variants) > 1 or len(filt_text) >= 20000:
+            with open(fs_path, "w", encoding="utf-8") as fh:
+                fh.write(filt_text)
+        for v in variants:
+            r = subprocess.run(list(cmd_head) + v + list(tail), capture_output=True, text=True, creationflags=NOWIN)
+            if r.returncode == 0:
+                return r
+            res.append(r)
+    finally:
+        try:
+            os.remove(fs_path)
+        except OSError:
+            pass
+    for r in res:                                   # asol error dekhao, 'Unrecognized option' na
+        if "Unrecognized option" not in (r.stderr or ""):
+            return r
+    return res[-1]
 
 
 def ff_ok(folder=None):
@@ -21278,17 +21306,8 @@ class Tab2Editor(tk.Frame):
                         f"asetpts=PTS-STARTPTS[a{k}]")
             labels.append(f"[a{k}]")
         filt.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[out]")
-        fs = final + ".filter.txt"
-        with open(fs, "w", encoding="utf-8") as fh:
-            fh.write(";\n".join(filt))
-        cmd += ["-filter_complex_script", fs, "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "192k", final]
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, creationflags=NOWIN)
-        finally:
-            try:
-                os.remove(fs)
-            except OSError:
-                pass
+        r = run_ff_complex(cmd, ";\n".join(filt), final + ".filter.txt",
+                           ["-map", "[out]", "-c:a", "libmp3lame", "-b:a", "192k", final])
         if r.returncode != 0 or not os.path.isfile(final) or os.path.getsize(final) < 1000:
             raise RuntimeError("Join fail: " + (r.stderr or "")[-300:])
         return final
@@ -21344,18 +21363,11 @@ class Tab2Editor(tk.Frame):
                     filt.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{k}]")
                 labels.append(f"[a{k}]")
         filt.append("".join(labels) + f"concat=n={len(labels)}:v=0:a=1[out]")
-        fs = out_path + ".filter.txt"
-        with open(fs, "w", encoding="utf-8") as fh:
-            fh.write(";\n".join(filt))
-        cmd += ["-filter_complex_script", fs, "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "192k", out_path]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, creationflags=NOWIN)
+            r = run_ff_complex(cmd, ";\n".join(filt), out_path + ".filter.txt",
+                               ["-map", "[out]", "-c:a", "libmp3lame", "-b:a", "192k", out_path])
         except Exception as e:
             return False, str(e)
-        try:
-            os.remove(fs)
-        except Exception:
-            pass
         if r.returncode != 0 or not os.path.isfile(out_path):
             return False, "ffmpeg merge error: " + (r.stderr or "")[-300:]
         return True, ""
