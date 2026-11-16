@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.2"
+APP_VERSION = "3.2.3"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -23170,7 +23170,7 @@ class AnimWorker:
         self._closing = False
         def _hook(pg):
             try:
-                pg.on("download", lambda d: self._dls.append(d))
+                pg.on("download", lambda d: (self._dls.append(d), self.log(f"  [dl] Chrome download event: {d.suggested_filename!r}  url={d.url[:90]}")))
                 pg.on("crash", lambda *_: self.log("  [debug] Chrome tab crash hoyeche (memory kom?)", "warn"))
                 pg.on("close", lambda *_: (None if self._closing else
                                            self.log("  [debug] Chrome tab bondho hoyeche (app na — onno kono karone)", "warn")))
@@ -23250,10 +23250,48 @@ class AnimWorker:
                 return True
         return False
 
+    def _auto_allow(self):
+        """Claude 'wants to run a command' permission card dekhle nijei 'Allow once' e click kore.
+        Kichu na paile False. Click hole True."""
+        page = self.page
+        if page is None:
+            return False
+        try:
+            if not page.get_by_text(re.compile(r"Claude wants to (run|use|access|create|edit|read)|wants to run a command", re.I)).first.is_visible():
+                return False
+        except Exception:
+            return False
+        tries = (
+            lambda: page.get_by_role("button", name=re.compile(r"^\s*Allow once", re.I)).first.click(timeout=2000),
+            lambda: page.locator("button", has_text=re.compile(r"^\s*Allow once", re.I)).first.click(timeout=2000),
+            lambda: page.get_by_text(re.compile(r"^\s*Allow once", re.I)).first.click(timeout=2000),
+            lambda: page.keyboard.press("Control+Enter"),
+        )
+        for t in tries:
+            try:
+                t()
+            except Exception:
+                continue
+            self._wait(800)
+            try:
+                if not page.get_by_text(re.compile(r"wants to run a command", re.I)).first.is_visible():
+                    self.log("Permission card e 'Allow once' click kora holo", "ok")
+                    return True
+            except Exception:
+                self.log("Permission card e 'Allow once' click kora holo", "ok")
+                return True
+        return False
+
     def _dismiss_popups(self):
         """Onno kono popup/dialog (welcome, new feature, survey, cookie ...) thakle cross (X) button khuje bondho kore.
         Limit popup hole bondho kore na — oti AnimLimit handle kore. Kono popup bondho hole True."""
         page = self.page
+        try:
+            self._auto_allow()
+        except AnimStop:
+            raise
+        except Exception:
+            pass
         dlg = '[role="dialog"]:visible, [role="alertdialog"]:visible, [aria-modal="true"]:visible'
         closed = False
         for _ in range(3):
@@ -24560,7 +24598,14 @@ class Anim3DWorker(AnimWorker):
         t0, last, stable = time.time(), None, 0
         self.log("Claude er response cholche — 10s por por check korchi…")
         while True:
-            self._wait(10000)
+            for _i in range(5):
+                self._wait(2000)
+                try:
+                    self._auto_allow()
+                except AnimStop:
+                    raise
+                except Exception:
+                    pass
             if not getattr(self, "_lim_ok", False) and self._limit_strict():
                 self._limit_gate()
             self._dismiss_popups()
@@ -24942,16 +24987,24 @@ class Anim3DWorker(AnimWorker):
         n0 = len(self._dls)
         last = None
         self._close_file_panel()
+        try:
+            self.log(f"  [dl] card save shuru -> folder: {folder}  (ager download event: {n0})")
+        except Exception:
+            pass
         for how in ("click", "any", "mouse", "js", "panel"):
             try:
                 if self._is_card(btn) is False and btn.count() == 0:
                     self._mark_cards()                     # React re-render e mark hariye gele abar mark
+                self.log(f"  [dl] upay '{how}' — card e click korchi")
+                _t0 = time.time()
                 self._card_try(btn, how)
+                self.log(f"  [dl] '{how}' click hoyeche ({time.time() - _t0:.1f}s) — download event er opekkha (max 15s)")
                 end = time.time() + 15
                 while time.time() < end and len(self._dls) <= n0:
                     self._wait(300)
                 if len(self._dls) > n0:
                     dl = self._dls[-1]
+                    self.log(f"  [dl] download event peyechi ({time.time() - _t0:.1f}s): {dl.suggested_filename!r}", "ok")
                     name = re.sub(r'[\\/:*?"<>|]+', "_", dl.suggested_filename or "file")
                     dest = os.path.join(folder, name)
                     k = 1
@@ -24959,16 +25012,25 @@ class Anim3DWorker(AnimWorker):
                         b0, e0 = os.path.splitext(name)
                         dest = os.path.join(folder, f"{b0}_{k}{e0}")
                         k += 1
+                    self.log(f"  [dl] save_as shuru -> {dest}")
+                    _t1 = time.time()
                     dl.save_as(dest)
+                    try:
+                        _sz = os.path.getsize(dest) / 1048576
+                    except Exception:
+                        _sz = -1
+                    self.log(f"  [dl] save_as shesh ({time.time() - _t1:.1f}s), size {_sz:.2f} MB", "ok")
                     self.log(f"  file download hoyeche ({how})", "info")
                     if how == "panel":
                         self._close_file_panel()
                     return dest
                 last = f"download event ashe ni ({how})"
+                self.log(f"  [dl] '{how}': 15s e download event ashe ni (tab: {len(self.ctx.pages)} ta, url: {self.page.url[:70]})", "warn")
             except (AnimStop, AnimClosed):
                 raise
             except Exception as e:
                 last = (str(e).splitlines() or [""])[0][:80]
+                self.log(f"  [dl] '{how}' error: {last}", "warn")
                 if self.page.is_closed():
                     raise AnimClosed()
         raise RuntimeError(f"file download hoyni ({last})")
@@ -26767,7 +26829,7 @@ class Tab3Anim(tk.Frame):
 
     # ───── 3D Animation ─────
     _3D_TABS = (("input", "Input"), ("skill", "Skill file"), ("prompt", "Prompt"),
-                ("files", "Files"), ("last", "Last file"))
+                ("files", "Files"), ("last", "Last file"), ("live", "Live log"))
 
     def _load_3d_cfg(self):
         try:
@@ -26839,6 +26901,7 @@ class Tab3Anim(tk.Frame):
         self._build_3d_prompt(self.d3_pages["prompt"], cfg)
         self._build_3d_files(self.d3_pages["files"])
         self._build_3d_last(self.d3_pages["last"])
+        self._build_3d_live(self.d3_pages["live"])
 
         # ── niche: log ──
         lg = tk.Frame(f, bg=LOG_BG)
@@ -26865,6 +26928,11 @@ class Tab3Anim(tk.Frame):
             self._3d_refresh_files()
         elif cur == "last":
             self._3d_refresh_last()
+        elif cur == "live":
+            try:
+                self.d3_live.see("end")
+            except Exception:
+                pass
 
     def _3d_note(self, msg, lv="info"):
         self._3d_q.put((time.strftime("%H:%M:%S"), msg, lv))
@@ -26891,6 +26959,7 @@ class Tab3Anim(tk.Frame):
                 self.d3_log.insert("end", f"[{t}] {m}\n", lv)
                 self.d3_log.see("end")
                 self.d3_log.configure(state="disabled")
+                self._3d_live_add(t, m, lv)
         except queue.Empty:
             pass
         except Exception:
@@ -27277,6 +27346,93 @@ class Tab3Anim(tk.Frame):
     def _3d_open_out(self):
         os.makedirs(ANIM3D_OUT, exist_ok=True)
         open_path(ANIM3D_OUT)
+
+    # ── Live log (full detail) ──
+    D3_LIVE_MAX = 20000          # screen e max koyta line thakbe (puroton gulo muchhe jabe)
+    D3_LIVE_FILE = os.path.join(ANIM3D_BASE, "live_log.txt")   # shob log file e-o jomay (app bondho holeo thake)
+
+    def _build_3d_live(self, f):
+        c = tk.Frame(f, bg=PANEL)
+        c.pack(fill="both", expand=True)
+        hd = tk.Frame(c, bg=PANEL)
+        hd.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Frame(hd, bg=ACCENT, width=3, height=15).pack(side="left", padx=(0, 9))
+        mklabel(hd, "Live log", 11, FG, True, bg=PANEL).pack(side="left")
+        self.d3_live_auto = tk.BooleanVar(value=True)
+        tk.Checkbutton(hd, text="Auto scroll", variable=self.d3_live_auto, bg=PANEL, fg=FG, selectcolor=PANEL,
+                       activebackground=PANEL, activeforeground=FG, bd=0, highlightthickness=0,
+                       font=(FONT, 9)).pack(side="left", padx=(14, 0))
+        mkbtn(hd, "Clear", self._3d_live_clear, "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "Save .txt", self._3d_live_save, "ghost", pady=2, padx=10).pack(side="right", padx=4)
+        mkbtn(hd, "Copy all", self._3d_live_copy, "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "Open log file", self._3d_live_open, "ghost", pady=2, padx=10).pack(side="right", padx=4)
+        body = tk.Frame(c, bg=LOG_BG)
+        body.pack(fill="both", expand=True, padx=14, pady=(2, 12))
+        sb = tk.Scrollbar(body, orient="vertical")
+        self.d3_live = tk.Text(body, bg=LOG_BG, fg=LOG_FG, font=(MONO, 9), relief="flat", bd=0, wrap="word",
+                               state="disabled", padx=10, pady=6, highlightthickness=0, yscrollcommand=sb.set)
+        sb.configure(command=self.d3_live.yview)
+        sb.pack(side="right", fill="y")
+        self.d3_live.pack(side="left", fill="both", expand=True)
+        for tg, col in (("info", LOG_FG), ("ok", OK), ("warn", WARN), ("err", BAD)):
+            self.d3_live.tag_configure(tg, foreground=col)
+
+    def _3d_live_add(self, t, m, lv):
+        w = getattr(self, "d3_live", None)
+        if w is None:
+            return
+        try:
+            w.configure(state="normal")
+            w.insert("end", f"[{t}] {m}\n", lv)
+            n = int(w.index("end-1c").split(".")[0])
+            if n > self.D3_LIVE_MAX:
+                w.delete("1.0", f"{n - self.D3_LIVE_MAX + 1}.0")
+            if self.d3_live_auto.get():
+                w.see("end")
+            w.configure(state="disabled")
+        except Exception:
+            pass
+        try:
+            os.makedirs(ANIM3D_BASE, exist_ok=True)
+            with open(self.D3_LIVE_FILE, "a", encoding="utf-8") as fh:
+                fh.write(f"[{time.strftime('%Y-%m-%d')} {t}] [{lv}] {m}\n")
+        except Exception:
+            pass
+
+    def _3d_live_clear(self):
+        try:
+            self.d3_live.configure(state="normal")
+            self.d3_live.delete("1.0", "end")
+            self.d3_live.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _3d_live_copy(self):
+        try:
+            txt = self.d3_live.get("1.0", "end-1c")
+            self.clipboard_clear()
+            self.clipboard_append(txt)
+            self._3d_note("Live log clipboard e copy hoyeche", "ok")
+        except Exception:
+            pass
+
+    def _3d_live_save(self):
+        try:
+            p = filedialog.asksaveasfilename(defaultextension=".txt", initialfile="live_log.txt",
+                                             filetypes=[("Text", "*.txt")])
+            if p:
+                atomic_write(p, self.d3_live.get("1.0", "end-1c"))
+        except Exception:
+            pass
+
+    def _3d_live_open(self):
+        try:
+            if os.path.exists(self.D3_LIVE_FILE):
+                open_path(self.D3_LIVE_FILE)
+            else:
+                self._3d_note("Ekhono live_log.txt file toiri hoy ni", "warn")
+        except Exception:
+            pass
 
     # ── Last file ──
     def _build_3d_last(self, f):
