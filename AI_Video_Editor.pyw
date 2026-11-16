@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.1"
+APP_VERSION = "3.2.2"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -22462,6 +22462,7 @@ ANIM3D_INTRO_MSG = ("i have my script and audio ready.i 'm giving them to you.al
                     "right after your responce")
 ANIM3D_PROGRESS = os.path.join(ANIM3D_BASE, "progress.json")   # crash / PC off hole ekhan theke resume
 ANIM3D_OUT = os.path.join(ANIM3D_BASE, "output")              # 3D Animation er output files
+ANIM3D_SEG = os.path.join(ANIM3D_BASE, "seg_tmp")             # limit hole kaj bhag kore korar somoy majher temp zip (Files section e jabe na)
 ANIM_CHROME = os.path.join(ANIM_BASE, "chrome_profiles.json")   # Tab 3 er Chrome profile list
 ANIM_CHROME_DIR = os.path.join(ANIM_BASE, "chrome_profiles")      # prottek profile er nijosso user-data folder
 ANIM_CHROME_CFG = os.path.join(ANIM_BASE, "chrome_settings.json")   # notun profile kon folder/drive e toiri hobe
@@ -22538,13 +22539,13 @@ ANIM_LEGACY_TEMPLATE = (
 ANIM_DEFAULT_PROMPT = "coding deye animation baneye diba,ami prompt dibo,best try krba jate onek shundor hoy"
 ANIM_LIMIT_RE = re.compile(
     r"(reached (your|the|our) (usage |message |daily )?limit|usage limit|limit (will )?reset|"
-    r"free usage returns|out of free messages|"
+    r"free usage returns|out of free messages|free messages return|keep chatting with claude|"
     r"you.?ve hit your|out of messages|too many messages)", re.I)
 ANIM_LIMIT_STRICT_RE = re.compile(
-    r"(free usage returns|out of free messages|Upgrade to keep chatting|hit your \d+-hour (message )?limit)", re.I)
+    r"(free usage returns|out of free messages|free messages return|Keep chatting with Claude|Upgrade to keep chatting|hit your \d+-hour (message )?limit)", re.I)
 # Prompt submit korar por limit popup ashle: Chrome bondho korar age popup er X e click kore eto second dekhbe HTML toiri hocche kina
 ANIM_LIMIT_RECHECK_SECS = 45
-_ANIM_RESET_RE = re.compile(r"(?:(?:resets|returns)\s+at|until)\s+(\d{1,2}):(\d{2})\s*([AaPp])\.?[Mm]")
+_ANIM_RESET_RE = re.compile(r"(?:(?:resets?|returns?)\s+at|until)\s+(\d{1,2}):(\d{2})\s*([AaPp])\.?[Mm]")
 _ANIM_LIM_LOCK = threading.Lock()
 _ANIM_DONE_RE = re.compile(r"^0*(\d+)(?:_code\.txt|\.(?!txt$)[A-Za-z0-9]+)$", re.I)
 _ANIM_NUM_RE = re.compile(r"^\s*(\d{1,4})\s*[.)]\s*(.*)$")
@@ -23208,7 +23209,7 @@ class AnimWorker:
     def _limit_texts(self):
         """Popup ('resets at 7:20 AM') ar textbox er upor er banner ('out of free messages until 7:20 AM') er text gulo."""
         res = []
-        for rx in (r"(?:resets|returns)\s+at\s+\d", r"until\s+\d{1,2}:\d{2}\s*[AaPp]"):
+        for rx in (r"(?:resets?|returns?)\s+at\s+\d", r"until\s+\d{1,2}:\d{2}\s*[AaPp]"):
             try:
                 loc = self.page.get_by_text(re.compile(rx, re.I))
                 for i in range(min(loc.count(), 4)):
@@ -23226,7 +23227,7 @@ class AnimWorker:
 
         def shown():
             try:
-                return page.get_by_text(re.compile(r"Upgrade to keep chatting", re.I)).first.is_visible()
+                return page.get_by_text(re.compile(r"Upgrade to keep chatting|Keep chatting with Claude|free messages return", re.I)).first.is_visible()
             except Exception:
                 return False
         if not shown():
@@ -24629,15 +24630,50 @@ class Anim3DWorker(AnimWorker):
         return files
 
     # ── generated file cards (Download icon) ──
+    # Download icon onekshomoy shudhu mouse hover korle dekha jay (DOM e thakbe na-o pare), tai button na khuje
+    # age FILE CARD (naam + ZIP/TXT label) ta khuje [data-aiv-card] mark kori, tarpor card e hover kore icon e click kori.
+    _CARD_JS = r"""() => {
+        document.querySelectorAll('[data-aiv-card]').forEach(e => e.removeAttribute('data-aiv-card'));
+        const vis = e => { const s = getComputedStyle(e); return s.visibility !== 'hidden' && s.display !== 'none'; };
+        const ok = e => {
+            const r = e.getBoundingClientRect();
+            if (r.width < 160 || r.width > 1400 || r.height < 36 || r.height > 150) return false;
+            if (!vis(e)) return false;
+            if (e.closest('nav, pre, textarea, [contenteditable="true"], [role="dialog"], [aria-modal="true"]')) return false;
+            const lines = (e.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+            if (lines.length !== 2 || lines[0].length < 2) return false;
+            if (!/^(?:[^\n]*[\u00b7\u2022]\s*)?[A-Z0-9]{2,5}$/.test(lines[1])) return false;
+            return !!e.querySelector('svg, img, button, [role="button"]');
+        };
+        const cand = [];
+        for (const e of document.body.querySelectorAll('div, li, a, article, section')) { if (ok(e)) cand.push(e); }
+        const set = new Set(cand);
+        const top = cand.filter(e => { let p = e.parentElement; while (p) { if (set.has(p)) return false; p = p.parentElement; } return true; });
+        top.forEach((e, i) => e.setAttribute('data-aiv-card', String(i)));
+        return top.length;
+    }"""
+
+    def _mark_cards(self):
+        try:
+            return int(self.page.evaluate(self._CARD_JS) or 0)
+        except Exception:
+            return 0
+
     def _dl_buttons(self):
         page = self.page
-        out = []
+        n = self._mark_cards()
+        if n:      # file card paoa gelo -> card locator gulo (hover-only icon er jonno)
+            return [page.locator(f'[data-aiv-card="{i}"]') for i in range(n)]
+        out = []   # card paoa jayni -> ager moto Download button khuji
         try:
-            loc = page.locator('button[aria-label="Download" i]')
+            loc = page.locator('button[aria-label*="Download" i]')
             for i in range(min(loc.count(), 60)):
                 b = loc.nth(i)
                 try:
                     if b.is_visible():
+                        lab = (b.get_attribute("aria-label") or "")
+                        if re.search(r"\ball\b", lab, re.I):
+                            continue
                         out.append(b)
                 except Exception:
                     pass
@@ -24649,6 +24685,7 @@ class Anim3DWorker(AnimWorker):
     def _card_text(btn):
         try:
             return btn.evaluate("""el => {
+                if (el.hasAttribute && el.hasAttribute('data-aiv-card')) return (el.innerText || '');
                 let n = el;
                 for (let k = 0; k < 6 && n.parentElement; k++) {
                     n = n.parentElement;
@@ -24778,9 +24815,10 @@ class Anim3DWorker(AnimWorker):
             self._scroll_chat_bottom()          # panel bondho hole chat nijer theke niche jay na — ami niche nichhi
         return closed
 
-    def _collect_files(self, dl0):
+    def _collect_files(self, dl0, zip_only=False):
         """Response shesh howar por notun file card (dl0 tar por) khuje, shudhu dorkari 2 ta (zip + txt/md) nibe."""
         cards = []
+        need = 1 if zip_only else 2
         stable, last_n = 0, -1
         for _ in range(12):                       # card ashte ektu somoy lagte pare
             self._close_file_panel()              # panel khola thakle scroll chat e jay na
@@ -24789,7 +24827,7 @@ class Anim3DWorker(AnimWorker):
             self._dismiss_popups()
             btns = self._dl_buttons()
             n = len(btns) - dl0
-            if n >= 2 and n == last_n:
+            if n >= need and n == last_n:
                 stable += 1
                 if stable >= 2:
                     break
@@ -24803,6 +24841,11 @@ class Anim3DWorker(AnimWorker):
             return []
         for _b, t in cards:
             self.log("  file card: " + " | ".join(x.strip() for x in t.splitlines() if x.strip())[:90])
+        if zip_only:                              # bhag kore kaj: shudhu zip lagbe (txt dewar kotha na)
+            zc = [c for c in cards if re.search(r"\bZIP\b", c[1], re.I) and not re.search(r"download all", c[1], re.I)]
+            if not zc:
+                zc = [c for c in cards if not re.search(r"\b(JPG|JPEG|PNG|WEBP|GIF|TXT|MD)\b|Image", c[1], re.I)]
+            return zc[:1]
         if len(cards) > 2:
             pick = [c for c in cards if re.search(r"\bZIP\b|\bTXT\b", c[1], re.I)
                     and not re.search(r"download all", c[1], re.I)]
@@ -24811,32 +24854,100 @@ class Anim3DWorker(AnimWorker):
             cards = pick[:2] if len(pick) >= 2 else cards[:2]
         return cards
 
+    def _is_card(self, btn):
+        try:
+            return bool(btn.evaluate("el => el.hasAttribute('data-aiv-card')"))
+        except Exception:
+            return False
+
+    def _card_try(self, btn, how):
+        """Ekta upay e card er Download icon e click. Kaj na korle exception."""
+        page = self.page
+        try:
+            btn.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        if not self._is_card(btn):                       # purono style: shorashori Download button
+            try:
+                btn.locator("xpath=ancestor::*[2]").hover(timeout=2000)
+            except Exception:
+                pass
+            try:
+                btn.hover(timeout=2000)
+            except Exception:
+                pass
+            if how == "click":
+                btn.click(timeout=4000)
+            elif how == "force":
+                btn.click(timeout=4000, force=True)
+            else:
+                btn.evaluate("el => el.click()")
+            return
+        bb = btn.bounding_box()
+        if not bb:
+            raise RuntimeError("card er position paoa jayni")
+        cx, cy = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+        # real mouse hover — card er upor mouse niye jai, tarpor dan dike (icon er jaygay)
+        page.mouse.move(cx, cy)
+        self._wait(300)
+        page.mouse.move(bb["x"] + bb["width"] - 40, cy, steps=6)
+        self._wait(400)
+        sel = ('button[aria-label*="download" i], [role="button"][aria-label*="download" i], '
+               'a[download], [title*="download" i], [data-testid*="download" i]')
+        if how == "click":                               # 1) 'Download' label wala control
+            c = btn.locator(sel)
+            for i in range(min(c.count(), 4)):
+                if c.nth(i).is_visible():
+                    c.nth(i).click(timeout=3000)
+                    return
+            raise RuntimeError("card e Download control nai")
+        if how == "any":                                 # 2) card er shesh button / icon
+            c = btn.locator('button, [role="button"]')
+            if c.count() == 0:
+                raise RuntimeError("card e button nai")
+            c.last.click(timeout=3000, force=True)
+            return
+        if how == "mouse":                               # 3) icon er jaygay shorashori mouse click (screenshot e dan dike)
+            page.mouse.click(bb["x"] + bb["width"] - 40, cy)
+            return
+        if how == "js":                                  # 4) JS click
+            ok = btn.evaluate("""el => {
+                const c = el.querySelector('button[aria-label*="download" i], [role="button"][aria-label*="download" i], a[download]')
+                       || [...el.querySelectorAll('button, [role="button"]')].pop();
+                if (c) { c.click(); return true; } return false; }""")
+            if not ok:
+                raise RuntimeError("JS click er jonno control nai")
+            return
+        # 5) card e click -> preview panel khole -> panel er Download button
+        page.mouse.click(bb["x"] + bb["width"] * 0.3, cy)
+        self._wait(1500)
+        for loc in (page.get_by_role("button", name=re.compile(r"^\s*download\s*$", re.I)),
+                    page.get_by_role("menuitem", name=re.compile(r"^\s*download", re.I)),
+                    page.locator('button[aria-label*="download" i]')):
+            for i in range(min(loc.count(), 4)):
+                x = loc.nth(i)
+                try:
+                    lab = (x.get_attribute("aria-label") or x.inner_text() or "")
+                    if x.is_visible() and not re.search(r"\ball\b", lab, re.I):
+                        x.click(timeout=3000)
+                        return
+                except (AnimStop, AnimClosed):
+                    raise
+                except Exception:
+                    pass
+        raise RuntimeError("preview panel e Download paoa jayni")
+
     def _save_card(self, btn, folder):
-        """Card e hover -> Download icon e click -> file folder e save."""
+        """Card e hover -> Download icon e click -> file folder e save (5 ta upay, ekta na hole porerta)."""
         n0 = len(self._dls)
         last = None
         self._close_file_panel()
-        for how in ("click", "force", "js"):
+        for how in ("click", "any", "mouse", "js", "panel"):
             try:
-                try:
-                    btn.scroll_into_view_if_needed(timeout=3000)
-                except Exception:
-                    pass
-                try:
-                    btn.locator("xpath=ancestor::*[2]").hover(timeout=2000)
-                except Exception:
-                    pass
-                try:
-                    btn.hover(timeout=2000)
-                except Exception:
-                    pass
-                if how == "click":
-                    btn.click(timeout=4000)
-                elif how == "force":
-                    btn.click(timeout=4000, force=True)
-                else:
-                    btn.evaluate("el => el.click()")
-                end = time.time() + 30
+                if self._is_card(btn) is False and btn.count() == 0:
+                    self._mark_cards()                     # React re-render e mark hariye gele abar mark
+                self._card_try(btn, how)
+                end = time.time() + 15
                 while time.time() < end and len(self._dls) <= n0:
                     self._wait(300)
                 if len(self._dls) > n0:
@@ -24849,8 +24960,11 @@ class Anim3DWorker(AnimWorker):
                         dest = os.path.join(folder, f"{b0}_{k}{e0}")
                         k += 1
                     dl.save_as(dest)
+                    self.log(f"  file download hoyeche ({how})", "info")
+                    if how == "panel":
+                        self._close_file_panel()
                     return dest
-                last = "download event ashe ni"
+                last = f"download event ashe ni ({how})"
             except (AnimStop, AnimClosed):
                 raise
             except Exception as e:
@@ -24859,16 +24973,17 @@ class Anim3DWorker(AnimWorker):
                     raise AnimClosed()
         raise RuntimeError(f"file download hoyni ({last})")
 
-    def _get_part(self, n):
+    def _get_part(self, n, final=None, zip_only=False):
+        """zip_only=True: bhag kore kaj er majher dhap — shudhu zip nibe, 'final' (temp folder) e rakhbe."""
         dl0 = getattr(self, "_dl0", 0)
-        final = os.path.join(ANIM3D_OUT, f"part {n}")
+        final = final or os.path.join(ANIM3D_OUT, f"part {n}")
         folder = final + ".tmp"
         shutil.rmtree(folder, ignore_errors=True)
         os.makedirs(folder, exist_ok=True)
-        cards = self._collect_files(dl0)
+        cards = self._collect_files(dl0, zip_only)
         if not cards:
             raise RuntimeError("Response e kono generated file (Download button) paoa jayni")
-        if len(cards) < 2:
+        if len(cards) < 2 and not zip_only:
             self.log(f"Part {n}: shudhu {len(cards)} ta file paoa gelo (2 ta asha korechilam)", "warn")
         saved = []
         for b, _t in cards:
@@ -24877,7 +24992,10 @@ class Anim3DWorker(AnimWorker):
             shutil.rmtree(final, ignore_errors=True)
         os.replace(folder, final)
         saved = [os.path.join(final, os.path.basename(x)) for x in saved]
-        self.log(f"Part {n}: {len(saved)} ta file download hoye 'part {n}' folder e gechhe", "ok")
+        if zip_only:
+            self.log(f"Part {n}: majher zip download hoye temp e rakha holo (Files section e jabe na)", "ok")
+        else:
+            self.log(f"Part {n}: {len(saved)} ta file download hoye 'part {n}' folder e gechhe", "ok")
         return saved
 
     # ── Chrome rotation ──
@@ -24907,16 +25025,52 @@ class Anim3DWorker(AnimWorker):
                 self._calc_until()
                 self.log(f"{pr['name']}: limit — onno profile nichhi", "warn")
 
+    # ── limit hole kaj bhag kore korar plan (maximum 4 bhag) ──
+    _PLAN_HALF = ("the first half", "the remaining frames")
+    _PLAN_THIRDS = ("the first third (1/3)", "the second third (the next 1/3)", "the remaining frames (the last 1/3)")
+    _PLAN_HALF_Q = ("the first half", "the next quarter (1/4)", "the remaining frames (the last 1/4)")
+    # 4 bhager plan — jekhane porjonto kaj hoye geche oi ongsho same thake, shudhu je bhag e limit lagche seta aro bhag hoy
+    _PLAN_FOURTHS = ("the first quarter (1/4)", "the second quarter (the next 1/4)",
+                     "the third quarter (the next 1/4)", "the remaining frames (the last 1/4)")
+    _PLAN_THIRDS_S1 = ("the first third (1/3)", "the next sixth (1/6)", "the next sixth (1/6)",
+                       "the remaining frames (the last 1/3)")
+    _PLAN_THIRDS_S2 = ("the first third (1/3)", "the second third (the next 1/3)", "the next sixth (1/6)",
+                       "the remaining frames (the last 1/6)")
+    _PLAN_HALFQ_S1 = ("the first half", "the next eighth (1/8)", "the next eighth (1/8)",
+                      "the remaining frames (the last 1/4)")
+    _PLAN_HALFQ_S2 = ("the first half", "the next quarter (1/4)", "the next eighth (1/8)",
+                      "the remaining frames (the last 1/8)")
+    _PLAN_BY_KEY = {"half": _PLAN_HALF, "thirds": _PLAN_THIRDS, "halfq": _PLAN_HALF_Q,
+                    "fourths": _PLAN_FOURTHS, "thirds_s1": _PLAN_THIRDS_S1, "thirds_s2": _PLAN_THIRDS_S2,
+                    "halfq_s1": _PLAN_HALFQ_S1, "halfq_s2": _PLAN_HALFQ_S2}
+
+    @staticmethod
+    def _seg_msg(plan, i):
+        what, last = plan[i], i == len(plan) - 1
+        if i == 0:
+            body = f"Do the work for only {what} of the total frames mentioned in the prompt"
+        elif last:
+            body = ("The uploaded zip already has the frames finished so far. "
+                    "Do the work for the remaining frames of the total frames mentioned in the prompt")
+        else:
+            body = ("The uploaded zip already has the frames finished so far. "
+                    f"Continue and do the work for {what} of the total frames mentioned in the prompt")
+        if last:
+            return body + ", and give me the complete zip file and the next prompt txt file."
+        return body + ", and give me the zip file. Do NOT give the txt file."
+
     # ── progress (resume) ──
-    def _save_progress(self, total, nxt, saved):
+    def _save_progress(self, total, nxt, saved, seg=None):
+        """seg = bhag kore kaj er obostha (part, plan, kon bhag porjonto shesh, majher zip) — app bondho hole-o resume hobe."""
         try:
-            atomic_write(ANIM3D_PROGRESS, json.dumps({"total": total, "next": nxt, "saved": saved},
+            atomic_write(ANIM3D_PROGRESS, json.dumps({"total": total, "next": nxt, "saved": saved, "seg": seg},
                                                      ensure_ascii=False, indent=2))
         except Exception:
             pass
 
-    def _first_chat(self):
-        """Part 1 er chat: skill folder -> skill select -> intro message -> input files + prompt."""
+    def _first_chat(self, extra=None, suffix=""):
+        """Part 1 er chat: skill folder -> skill select -> intro message -> input files + prompt.
+        extra = majher temp zip (bhag kore kaj), suffix = prompt er pore jora instruction."""
         job = self.job
         kit = self._kit_files(job["skill_dir"])
         if not kit:
@@ -24936,9 +25090,13 @@ class Anim3DWorker(AnimWorker):
         self._send_msg()
         self._send_msg(ANIM3D_INTRO_MSG)
         files = [f for f in (job["script_file"], job["srt_file"], job["audio"]) if f and os.path.isfile(f)]
+        files += [f for f in (extra or []) if f and os.path.isfile(f)]
         if files:
             self._attach_many(files, "Input")
-        self._send_msg(job["prompt"] or None, final=True)
+        ptxt = job["prompt"] or ""
+        if suffix:
+            ptxt = (ptxt + "\n\n" + suffix).strip()
+        self._send_msg(ptxt or None, final=True)
 
     # ── main flow ──
     def _flow(self):
@@ -24957,32 +25115,104 @@ class Anim3DWorker(AnimWorker):
         if res:
             self.log(f"Ager kaj resume: Part {n} theke shuru (Part {n - 1} er {len(saved)} ta file upload hobe)", "ok")
         fails = lim_fails = 0
-        self._save_progress(total, n, saved)
+        plan, idx, seg_zip = None, 0, None      # plan = None: pura Part ekshathe; nahole bhag kore kaj
+        segdir = os.path.join(ANIM3D_SEG, "cur")
+        try:                                    # ager run bhag kore kaj er majhe bondho hoye thakle ekhan theke chalabe
+            with open(ANIM3D_PROGRESS, "r", encoding="utf-8") as _pf:
+                sg = (json.load(_pf) or {}).get("seg")
+            if sg and int(sg.get("n", 0)) == n:
+                pl = self._PLAN_BY_KEY.get(sg.get("plan"))
+                ix, zp = int(sg.get("idx", 0)), (sg.get("zip") or "")
+                if pl and 0 <= ix < len(pl) and (ix == 0 or os.path.isfile(zp)):
+                    plan, idx, seg_zip = pl, ix, (zp if ix > 0 else None)
+                    self.log(f"Part {n}: ager bhag kore kaj resume — bhag {idx + 1}/{len(plan)} theke shuru", "ok")
+        except Exception:
+            pass
+
+        def sv():
+            seg = None
+            if plan:
+                key = next((k for k, v in self._PLAN_BY_KEY.items() if v is plan), None)
+                seg = {"n": n, "plan": key, "idx": idx, "zip": seg_zip or ""}
+            self._save_progress(total, n, saved, seg)
+        sv()
         while n <= total:
             try:
                 self._open_fresh()
+                msg = self._seg_msg(plan, idx) if plan else None
+                last_piece = plan is None or idx == len(plan) - 1
+                cont = bool(plan) and idx > 0 and bool(seg_zip) and os.path.isfile(seg_zip)
+                if plan:
+                    self.log(f"Part {n}: bhag {idx + 1}/{len(plan)} — {plan[idx]}", "info")
                 if n == 1:
-                    self._first_chat()
+                    self._first_chat(extra=[seg_zip] if cont else None, suffix=msg or "")
                 else:
-                    self._attach_many(saved, f"Part {n - 1} file")
-                    self._send_msg(final=True)
-                saved = self._get_part(n)
-                n += 1
-                self._save_progress(total, n, saved)
-                fails = lim_fails = 0
-                if n <= total:
-                    self.log(f"Part {n - 1} shesh — Chrome bondho kore notun Chrome khulchhi ({n}/{total})", "info")
+                    files = list(saved)
+                    if cont:      # majher zip + ager part er txt (zip bade)
+                        files = [seg_zip] + [f for f in saved if not f.lower().endswith(".zip")]
+                    self._attach_many(files, f"Part {n - 1} file")
+                    self._send_msg(msg, final=True)
+                if last_piece:
+                    saved = self._get_part(n)
+                    plan, idx, seg_zip = None, 0, None
+                    shutil.rmtree(ANIM3D_SEG, ignore_errors=True)
+                    n += 1
+                    sv()
+                    fails = lim_fails = 0
+                    if n <= total:
+                        self.log(f"Part {n - 1} shesh — Chrome bondho kore notun Chrome khulchhi ({n}/{total})", "info")
+                else:
+                    got = self._get_part(n, final=segdir, zip_only=True)
+                    seg_zip = got[0]
+                    idx += 1
+                    fails = 0
+                    sv()
+                    self.log(f"Part {n}: bhag {idx}/{len(plan)} shesh — porer account e baki kaj", "info")
             except AnimStop:
                 raise
             except AnimLimit:
-                lim_fails += 1
                 try:
                     self._calc_until()
                 except Exception:
                     pass
-                self.log(f"Part {n}: limit, file toiri hoyni — ei file next Chrome e abar submit hobe ({lim_fails}/3)", "warn")
-                if lim_fails >= 3:
-                    raise RuntimeError(f"Part {n}: 3 ta Chrome-ei limit — kaj thamlo. Pore Start dile Part {n} theke resume hobe")
+                if plan is None:
+                    lim_fails += 1
+                    if lim_fails >= 2:
+                        plan, idx, seg_zip, fails = self._PLAN_HALF, 0, None, 0
+                        sv()
+                        self.log(f"Part {n}: 2 ta account-e limit — ebar kaj 2 bhag kore korbo (prothom adhek, tarpor baki)", "warn")
+                    else:
+                        self.log(f"Part {n}: limit, file toiri hoyni — onno account e abar submit hobe ({lim_fails}/2)", "warn")
+                elif plan is self._PLAN_HALF and idx == 0:
+                    plan, seg_zip, fails = self._PLAN_THIRDS, None, 0
+                    sv()
+                    self.log(f"Part {n}: prothom adheke-o limit — kaj 3 bhag kore 3 ta alada account e korbo", "warn")
+                elif plan is self._PLAN_HALF:
+                    plan, fails = self._PLAN_HALF_Q, 0
+                    sv()
+                    self.log(f"Part {n}: shesh adheke limit — shesh adhek 2 bhag kore (1/4 + 1/4) korbo", "warn")
+                elif plan is self._PLAN_THIRDS:
+                    if idx == 0:
+                        plan, seg_zip = self._PLAN_FOURTHS, None
+                    elif idx == 1:
+                        plan = self._PLAN_THIRDS_S1
+                    else:
+                        plan = self._PLAN_THIRDS_S2
+                    fails = 0
+                    sv()
+                    self.log(f"Part {n}: 3 bhag-e limit — je bhag e limit lagche seta bhege kaj 4 bhag kore korbo", "warn")
+                elif plan is self._PLAN_HALF_Q:
+                    if idx == 0:
+                        plan, seg_zip = self._PLAN_FOURTHS, None
+                    elif idx == 1:
+                        plan = self._PLAN_HALFQ_S1
+                    else:
+                        plan = self._PLAN_HALFQ_S2
+                    fails = 0
+                    sv()
+                    self.log(f"Part {n}: 3 bhag-e limit — je bhag e limit lagche seta bhege kaj 4 bhag kore korbo", "warn")
+                else:
+                    raise RuntimeError(f"Part {n}: 4 bhag kore-o limit — kaj thamlo. Pore Start dile Part {n} theke resume hobe")
             except (AnimClosed, AnimLogin) as e:
                 fails += 1
                 self.log(f"Part {n}: {type(e).__name__} — abar chesta ({fails}/4)", "warn")
