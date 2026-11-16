@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.2.1"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -22456,6 +22456,12 @@ class Tab2Editor(tk.Frame):
 
 ANIM_BASE = os.path.join(WORKSPACE, "Anim2D")
 ANIM_PROMPTS = os.path.join(ANIM_BASE, "prompts.json")     # 2D Animation section er shob prompt box
+ANIM3D_BASE = os.path.join(WORKSPACE, "Anim3D")
+ANIM3D_CFG = os.path.join(ANIM3D_BASE, "settings.json")       # 3D Animation section er shob input/prompt
+ANIM3D_INTRO_MSG = ("i have my script and audio ready.i 'm giving them to you.also i'm giving srt file also "
+                    "right after your responce")
+ANIM3D_PROGRESS = os.path.join(ANIM3D_BASE, "progress.json")   # crash / PC off hole ekhan theke resume
+ANIM3D_OUT = os.path.join(ANIM3D_BASE, "output")              # 3D Animation er output files
 ANIM_CHROME = os.path.join(ANIM_BASE, "chrome_profiles.json")   # Tab 3 er Chrome profile list
 ANIM_CHROME_DIR = os.path.join(ANIM_BASE, "chrome_profiles")      # prottek profile er nijosso user-data folder
 ANIM_CHROME_CFG = os.path.join(ANIM_BASE, "chrome_settings.json")   # notun profile kon folder/drive e toiri hobe
@@ -24424,9 +24430,582 @@ class AnimWorker:
             return dest
         raise RuntimeError("Artifact / download button / code kichui paoa jayni")
 
+class Anim3DWorker(AnimWorker):
+    """3D Animation: Chrome e claude.ai khule skill folder + script/srt/audio + prompt serially pathay."""
+
+    PLUS_SELS = ('button[data-testid="input-menu-plus"]', 'button[aria-label*="Add files" i]',
+                 'button[aria-label*="attach" i]', 'button[aria-label*="upload" i]',
+                 'button[aria-label="Add"]', 'button[aria-label*="Add" i]')
+
+    def __init__(self, hub, job):
+        super().__init__(0, hub)
+        self.job = job
+        self.tag = "3D"
+
+    # ── entry ──
+    def run(self):
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                self.pw = pw
+                try:
+                    self._flow()
+                finally:
+                    self._retire()
+        except AnimStop:
+            self.log("Stop hoyeche", "warn")
+        except AnimLogin:
+            self.log("Claude e login nei — Chrome section theke ei profile khule claude.ai te login koro", "err")
+        except AnimLimit:
+            self.log("Account er limit shesh — onno Chrome profile diye abar Start koro", "err")
+        except AnimClosed:
+            self.log("Chrome window bondho hoye geche", "err")
+        except Exception as e:
+            self.log(f"Error: {e}", "err")
+
+    # ── helpers ──
+    def _plus_btn(self):
+        page = self.page
+        for sel in self.PLUS_SELS:
+            try:
+                loc = page.locator(sel)
+                for i in range(min(loc.count(), 4)):
+                    b = loc.nth(i)
+                    if b.is_visible():
+                        return b
+            except Exception:
+                pass
+        try:
+            comp = self._composer()
+            b = comp.locator("xpath=ancestor::fieldset[1]//button").first
+            if b.is_visible():
+                return b
+        except Exception:
+            pass
+        return None
+
+    def _attach_many(self, paths, label):
+        """Onek file ekshathe attach (+ -> Upload or add files). Chat e file nam dekha porjonto opekkha."""
+        page = self.page
+        done = False
+        try:
+            page.locator("input[type=file]").first.set_input_files(paths, timeout=8000)
+            done = True
+        except Exception:
+            pass
+        if not done:
+            for _ in range(2):
+                btn = self._plus_btn()
+                if btn is None:
+                    break
+                try:
+                    with page.expect_file_chooser(timeout=7000) as fc:
+                        btn.click(timeout=3000)
+                        self._wait(700)
+                        try:
+                            page.get_by_text(re.compile(r"^\s*Upload (a )?(or add )?files?", re.I)).first.click(timeout=3000)
+                        except Exception:
+                            pass
+                    fc.value.set_files(paths)
+                    done = True
+                    break
+                except Exception:
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+        if not done:
+            raise RuntimeError("file upload korar + / Upload button paoa jayni")
+        first = os.path.basename(paths[0])
+        for _ in range(60):
+            self._wait(1000)
+            try:
+                if page.get_by_text(first).first.is_visible():
+                    break
+            except Exception:
+                pass
+        self._wait(2000 + 400 * min(len(paths), 20))
+        self.log(f"{label}: {len(paths)} ta file upload hoyeche", "ok")
+
+    def _has_limit_output(self):
+        """Limit popup er por: file (final step) / response (onno step) toiri hoyeche kina."""
+        try:
+            if getattr(self, "_final_step", False):
+                return len(self._dl_buttons()) > getattr(self, "_dl0", 0)
+            return self._resp_count() > getattr(self, "_say_prev", 0) and bool(self._last_text())
+        except Exception:
+            return False
+
+    def _send_msg(self, text=None, final=False):
+        """(Optional text lekhe) submit kore, response shuru howa porjonto opekkha kore; response shesh howa porjonto 10s por por check."""
+        self._dismiss_popups()
+        comp = self._composer()
+        if comp is None:
+            raise RuntimeError("Prompt likhar box paoa jayni")
+        self._mark_window()
+        prev = self._resp_count()
+        self._lim_ok, self._lim_texts = False, []
+        self._say_prev, self._say_cards0 = prev, self._card_count()
+        self._final_step = bool(final)
+        self._dl0 = len(self._dl_buttons())
+        if text:
+            self._fill(comp, text)
+        self._send(comp, prev == 0 and "/chat/" not in (self.page.url or ""))
+        self._nmsg += 1
+        self._wait_start(prev)
+        return self._wait_reply()
+
+    def _wait_reply(self):
+        t0, last, stable = time.time(), None, 0
+        self.log("Claude er response cholche — 10s por por check korchi…")
+        while True:
+            self._wait(10000)
+            if not getattr(self, "_lim_ok", False) and self._limit_strict():
+                self._limit_gate()
+            self._dismiss_popups()
+            if self._is_streaming():
+                stable, last = 0, None
+                continue
+            self._close_file_panel()
+            txt = self._last_text()
+            stable = stable + 1 if (txt and txt == last) else 0
+            last = txt
+            if stable >= 1:
+                self.log("Claude er response shesh", "ok")
+                return txt
+            if time.time() - t0 > 6 * 3600:
+                raise RuntimeError("Response 6 ghontay-o shesh hoyni")
+
+    def _pick_skill(self, name):
+        """+ -> Skills (ba Plugins) e hover -> skill name e click."""
+        page = self.page
+        for attempt in range(3):
+            btn = self._plus_btn()
+            if btn is None:
+                self._wait(1000)
+                continue
+            try:
+                btn.click(timeout=3000)
+            except Exception:
+                continue
+            self._wait(900)
+            for lab in ("Skills", "Plugins"):
+                try:
+                    item = page.get_by_role("menuitem", name=re.compile(rf"^\s*{lab}\b", re.I)).first
+                    if not item.is_visible():
+                        item = page.get_by_text(re.compile(rf"^\s*{lab}\s*$")).first
+                    if not item.is_visible():
+                        continue
+                    item.hover(timeout=2500)
+                    self._wait(900)
+                    opt = page.get_by_role("menuitem", name=name).first
+                    if not opt.is_visible():
+                        opt = page.get_by_text(name, exact=True).first
+                    if not opt.is_visible():
+                        item.click(timeout=2000)          # hover e submenu na khulle click
+                        self._wait(900)
+                        opt = page.get_by_role("menuitem", name=name).first
+                        if not opt.is_visible():
+                            opt = page.get_by_text(name, exact=True).first
+                    if opt.is_visible():
+                        opt.click(timeout=3000)
+                        self._wait(1200)
+                        self.log(f"Skill select hoyeche: {name} ({lab} menu)", "ok")
+                        return True
+                except Exception:
+                    continue
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            self._wait(800)
+        return False
+
+    def _kit_files(self, d):
+        files = []
+        for root, _dirs, fs in os.walk(d):
+            for fn in sorted(fs):
+                files.append(os.path.join(root, fn))
+        return files
+
+    # ── generated file cards (Download icon) ──
+    def _dl_buttons(self):
+        page = self.page
+        out = []
+        try:
+            loc = page.locator('button[aria-label="Download" i]')
+            for i in range(min(loc.count(), 60)):
+                b = loc.nth(i)
+                try:
+                    if b.is_visible():
+                        out.append(b)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return out
+
+    @staticmethod
+    def _card_text(btn):
+        try:
+            return btn.evaluate("""el => {
+                let n = el;
+                for (let k = 0; k < 6 && n.parentElement; k++) {
+                    n = n.parentElement;
+                    const c = n.querySelectorAll('button[aria-label="Download" i]').length;
+                    if (c > 1) break;
+                    const t = (n.innerText || '').trim();
+                    if (c === 1 && t.length > 2 && n.parentElement.querySelectorAll('button[aria-label="Download" i]').length > 1) return t;
+                    if (c === 1 && t.length > 2) var last = t;
+                }
+                return (typeof last === 'string') ? last : (el.parentElement.innerText || '');
+            }""") or ""
+        except Exception:
+            return ""
+
+    def _scroll_chat_bottom(self):
+        """Chat ke ekdom niche scroll kore, jate file card + Download button dekha jay.
+        Panel er X chaple mouse X button er jaygay (chat er baire) thake, tai shudhu mouse.wheel kaj kore na.
+        Tai 3 ta upay: (1) 'scroll to bottom' arrow button (2) JS diye boro scroll container (3) chat er upor mouse niye wheel."""
+        page = self.page
+        # 1) chat er niche er arrow button (screenshot e dekha jay) — thakle click
+        try:
+            for sel in ('button[aria-label*="bottom" i]', 'button[aria-label*="latest" i]'):
+                loc = page.locator(sel)
+                done = False
+                for i in range(min(loc.count(), 3)):
+                    b = loc.nth(i)
+                    try:
+                        if b.is_visible():
+                            try:
+                                b.click(timeout=1500)
+                            except (AnimStop, AnimClosed):
+                                raise
+                            except Exception:
+                                b.evaluate("el => el.click()")
+                            done = True
+                            break
+                    except (AnimStop, AnimClosed):
+                        raise
+                    except Exception:
+                        pass
+                if done:
+                    break
+        except (AnimStop, AnimClosed):
+            raise
+        except Exception:
+            pass
+        # 2) sobcheye boro scroll hoy emon container (chat) ke ekdom niche pathai (2 bar — lazy content barle)
+        js = """() => {
+            let best = null, bestA = 0;
+            for (const el of document.querySelectorAll('*')) {
+                if (el.scrollHeight <= el.clientHeight + 40) continue;
+                if (!/(auto|scroll)/.test(getComputedStyle(el).overflowY)) continue;
+                if (el.closest('nav, pre, textarea, [contenteditable="true"], [role="dialog"], [aria-modal="true"]')) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 250 || r.height < 150) continue;
+                const a = r.width * r.height;
+                if (a > bestA) { bestA = a; best = el; }
+            }
+            if (best) { best.scrollTop = best.scrollHeight; return true; }
+            window.scrollTo(0, document.body.scrollHeight);
+            return false;
+        }"""
+        for _ in range(2):
+            try:
+                page.evaluate(js)
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception:
+                pass
+            self._wait(350)
+        # 3) mouse ke chat column er majhe (composer er upore) niye wheel — X button er jaygay thakle wheel kaj kore na
+        try:
+            x = y = None
+            comp = self._composer()
+            bb = comp.bounding_box() if comp is not None else None
+            if bb:
+                x = bb["x"] + bb["width"] / 2
+                y = max(150.0, bb["y"] - 220)
+            else:
+                vw, vh = page.evaluate("() => [window.innerWidth, window.innerHeight]")
+                x, y = vw * 0.4, vh * 0.5
+            page.mouse.move(x, y)
+            page.mouse.wheel(0, 6000)
+        except (AnimStop, AnimClosed):
+            raise
+        except Exception:
+            pass
+
+    def _close_file_panel(self):
+        """Generate howa txt/file ta side panel e auto khule gele (chat scroll hoy na, Download button hariye jay)
+        panel er cross (X / Close) e click kore bondho kore. True = kono panel bondho kora holo."""
+        page = self.page
+        closed = False
+        for _ in range(3):
+            btn = None
+            try:
+                loc = page.locator('button[aria-label="Close" i]')
+                for i in range(loc.count() - 1, -1, -1):
+                    b = loc.nth(i)
+                    if b.is_visible():
+                        # modal/dialog er Close ke ei function chhunbe na (popup alada handle hoy)
+                        try:
+                            if b.evaluate("el => !!el.closest('[role=dialog],[aria-modal=true]')"):
+                                continue
+                        except Exception:
+                            pass
+                        btn = b
+                        break
+            except Exception:
+                btn = None
+            if btn is None:
+                break
+            try:
+                btn.click(timeout=2000)
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception:
+                try:
+                    btn.evaluate("el => el.click()")
+                except Exception:
+                    break
+            self._wait(700)
+            closed = True
+        if closed:
+            self.log("File panel khola chilo — cross e click kore bondho kora holo, chat niche scroll kora hocche", "info")
+            self._wait(500)
+            self._scroll_chat_bottom()          # panel bondho hole chat nijer theke niche jay na — ami niche nichhi
+        return closed
+
+    def _collect_files(self, dl0):
+        """Response shesh howar por notun file card (dl0 tar por) khuje, shudhu dorkari 2 ta (zip + txt/md) nibe."""
+        cards = []
+        stable, last_n = 0, -1
+        for _ in range(12):                       # card ashte ektu somoy lagte pare
+            self._close_file_panel()              # panel khola thakle scroll chat e jay na
+            self._scroll_chat_bottom()            # chat er majhe mouse + JS scroll + arrow button
+            self._wait(2000)
+            self._dismiss_popups()
+            btns = self._dl_buttons()
+            n = len(btns) - dl0
+            if n >= 2 and n == last_n:
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
+            last_n = n
+        btns = self._dl_buttons()[dl0:]
+        for b in btns:
+            cards.append((b, self._card_text(b)))
+        if not cards:
+            return []
+        for _b, t in cards:
+            self.log("  file card: " + " | ".join(x.strip() for x in t.splitlines() if x.strip())[:90])
+        if len(cards) > 2:
+            pick = [c for c in cards if re.search(r"\bZIP\b|\bTXT\b", c[1], re.I)
+                    and not re.search(r"download all", c[1], re.I)]
+            if len(pick) < 2:
+                pick = [c for c in cards if not re.search(r"\b(JPG|JPEG|PNG|WEBP|GIF)\b|Image", c[1], re.I)]
+            cards = pick[:2] if len(pick) >= 2 else cards[:2]
+        return cards
+
+    def _save_card(self, btn, folder):
+        """Card e hover -> Download icon e click -> file folder e save."""
+        n0 = len(self._dls)
+        last = None
+        self._close_file_panel()
+        for how in ("click", "force", "js"):
+            try:
+                try:
+                    btn.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass
+                try:
+                    btn.locator("xpath=ancestor::*[2]").hover(timeout=2000)
+                except Exception:
+                    pass
+                try:
+                    btn.hover(timeout=2000)
+                except Exception:
+                    pass
+                if how == "click":
+                    btn.click(timeout=4000)
+                elif how == "force":
+                    btn.click(timeout=4000, force=True)
+                else:
+                    btn.evaluate("el => el.click()")
+                end = time.time() + 30
+                while time.time() < end and len(self._dls) <= n0:
+                    self._wait(300)
+                if len(self._dls) > n0:
+                    dl = self._dls[-1]
+                    name = re.sub(r'[\\/:*?"<>|]+', "_", dl.suggested_filename or "file")
+                    dest = os.path.join(folder, name)
+                    k = 1
+                    while os.path.exists(dest):
+                        b0, e0 = os.path.splitext(name)
+                        dest = os.path.join(folder, f"{b0}_{k}{e0}")
+                        k += 1
+                    dl.save_as(dest)
+                    return dest
+                last = "download event ashe ni"
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception as e:
+                last = (str(e).splitlines() or [""])[0][:80]
+                if self.page.is_closed():
+                    raise AnimClosed()
+        raise RuntimeError(f"file download hoyni ({last})")
+
+    def _get_part(self, n):
+        dl0 = getattr(self, "_dl0", 0)
+        final = os.path.join(ANIM3D_OUT, f"part {n}")
+        folder = final + ".tmp"
+        shutil.rmtree(folder, ignore_errors=True)
+        os.makedirs(folder, exist_ok=True)
+        cards = self._collect_files(dl0)
+        if not cards:
+            raise RuntimeError("Response e kono generated file (Download button) paoa jayni")
+        if len(cards) < 2:
+            self.log(f"Part {n}: shudhu {len(cards)} ta file paoa gelo (2 ta asha korechilam)", "warn")
+        saved = []
+        for b, _t in cards:
+            saved.append(self._save_card(b, folder))
+        if os.path.isdir(final):
+            shutil.rmtree(final, ignore_errors=True)
+        os.replace(folder, final)
+        saved = [os.path.join(final, os.path.basename(x)) for x in saved]
+        self.log(f"Part {n}: {len(saved)} ta file download hoye 'part {n}' folder e gechhe", "ok")
+        return saved
+
+    # ── Chrome rotation ──
+    def _open_fresh(self):
+        """Ager Chrome bondho, porer profile e notun Chrome khule claude.ai/new e dhuke."""
+        hub = self.hub
+        while True:
+            old = self.prof
+            self._retire()
+            if old is not None and old in hub.profs:        # porer bar onno profile age
+                hub.profs.remove(old)
+                hub.profs.append(old)
+            pr, _h = hub.pick_profile()
+            if pr is None:
+                raise RuntimeError("Free Chrome profile nei (sobgulo limit / byasto / login nei)")
+            self.prof = pr
+            self.tag = f"3D {pr['name']}"
+            try:
+                self._launch()
+                self._goto_new()
+                self.log("claude.ai/new khulechhe", "ok")
+                return
+            except AnimLogin:
+                self.log(f"{pr['name']}: Claude e login nei — onno profile nichhi", "err")
+                self._retire(bad=True)
+            except AnimLimit:
+                self._calc_until()
+                self.log(f"{pr['name']}: limit — onno profile nichhi", "warn")
+
+    # ── progress (resume) ──
+    def _save_progress(self, total, nxt, saved):
+        try:
+            atomic_write(ANIM3D_PROGRESS, json.dumps({"total": total, "next": nxt, "saved": saved},
+                                                     ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+
+    def _first_chat(self):
+        """Part 1 er chat: skill folder -> skill select -> intro message -> input files + prompt."""
+        job = self.job
+        kit = self._kit_files(job["skill_dir"])
+        if not kit:
+            raise RuntimeError("Skill folder khali")
+        names = [os.path.basename(f) for f in kit]
+        if len(kit) > 20 or len(set(names)) != len(names):
+            zp = os.path.join(job["work_dir"], os.path.basename(job["skill_dir"].rstrip("/\\")) + ".zip")
+            with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
+                for f in kit:
+                    z.write(f, os.path.relpath(f, job["skill_dir"]))
+            self.log(f"Skill folder e {len(kit)} ta file (limit 20 / nam milche) — zip kore upload hocche", "info")
+            kit = [zp]
+        self._attach_many(kit, "Skill folder")
+        self._send_msg()
+        if not self._pick_skill(job["skill_name"]):
+            raise RuntimeError(f"'{job['skill_name']}' skill menu te paoa jayni")
+        self._send_msg()
+        self._send_msg(ANIM3D_INTRO_MSG)
+        files = [f for f in (job["script_file"], job["srt_file"], job["audio"]) if f and os.path.isfile(f)]
+        if files:
+            self._attach_many(files, "Input")
+        self._send_msg(job["prompt"] or None, final=True)
+
+    # ── main flow ──
+    def _flow(self):
+        job = self.job
+        ok, err = _ensure_playwright()
+        if not ok:
+            self.log(f"Playwright install hoyni: {err}", "err")
+            return
+        if not _voice_chrome_exe():
+            self.log("Google Chrome paoa jayni — Chrome install koro", "err")
+            return
+        total = max(1, int(job.get("parts") or 1))
+        res = job.get("resume")
+        n = int(res["next"]) if res else 1
+        saved = list(res["saved"]) if res else []
+        if res:
+            self.log(f"Ager kaj resume: Part {n} theke shuru (Part {n - 1} er {len(saved)} ta file upload hobe)", "ok")
+        fails = lim_fails = 0
+        self._save_progress(total, n, saved)
+        while n <= total:
+            try:
+                self._open_fresh()
+                if n == 1:
+                    self._first_chat()
+                else:
+                    self._attach_many(saved, f"Part {n - 1} file")
+                    self._send_msg(final=True)
+                saved = self._get_part(n)
+                n += 1
+                self._save_progress(total, n, saved)
+                fails = lim_fails = 0
+                if n <= total:
+                    self.log(f"Part {n - 1} shesh — Chrome bondho kore notun Chrome khulchhi ({n}/{total})", "info")
+            except AnimStop:
+                raise
+            except AnimLimit:
+                lim_fails += 1
+                try:
+                    self._calc_until()
+                except Exception:
+                    pass
+                self.log(f"Part {n}: limit, file toiri hoyni — ei file next Chrome e abar submit hobe ({lim_fails}/3)", "warn")
+                if lim_fails >= 3:
+                    raise RuntimeError(f"Part {n}: 3 ta Chrome-ei limit — kaj thamlo. Pore Start dile Part {n} theke resume hobe")
+            except (AnimClosed, AnimLogin) as e:
+                fails += 1
+                self.log(f"Part {n}: {type(e).__name__} — abar chesta ({fails}/4)", "warn")
+                if fails >= 4:
+                    raise RuntimeError(f"Part {n} 4 bar fail")
+            except Exception as e:
+                fails += 1
+                self.log(f"Part {n} error: {e} — abar chesta ({fails}/4)", "warn")
+                if fails >= 4:
+                    raise
+        self._retire()
+        try:
+            os.remove(ANIM3D_PROGRESS)
+        except Exception:
+            pass
+        self.finished_ok = True
+        self.log(f"Shob {total} ta part shesh ✓ (Files section e dekho)", "ok")
+
+
 class Tab3Anim(tk.Frame):
     SECTIONS = [("start", "\u25b6", "Start"), ("anim", "\U0001f3ac", "2D Animation"),
-                ("chrome", "\U0001f310", "Chrome"), ("prompt", "\u270d", "Prompt")]
+                ("chrome", "\U0001f310", "Chrome"), ("prompt", "\u270d", "Prompt"),
+                ("anim3d", "\U0001f9ca", "3D Animation")]
 
     def __init__(self, app):
         super().__init__(app, bg=BG)
@@ -24460,6 +25039,7 @@ class Tab3Anim(tk.Frame):
         self._build_anim(self.pages["anim"])
         self._build_chrome(self.pages["chrome"])
         self._build_prompt(self.pages["prompt"])
+        self._build_3d(self.pages["anim3d"])
         self._build_start(self.pages["start"])
         self.side.bind("<Configure>", lambda e: self._move_ind())
         self.show("start")
@@ -24519,6 +25099,10 @@ class Tab3Anim(tk.Frame):
             self._save_prompts()
             atomic_write(ANIM_PROMPT, self.prompt_txt.get("1.0", "end-1c"))
             atomic_write(ANIM_FIX_PROMPT, self.fix_txt.get("1.0", "end-1c"))
+        except Exception:
+            pass
+        try:
+            self._save_3d()
         except Exception:
             pass
 
@@ -25078,6 +25662,8 @@ class Tab3Anim(tk.Frame):
 
     def on_drop(self, event):
         """App._on_drop (Tab 3 khola thakle) ekhane pathay."""
+        if self.cur == "anim3d":
+            return self._drop_3d(event)
         if self.cur != "anim":
             self.app.note(".txt drop korte '2D Animation' section e jao", WARN)
             return event.action
@@ -25189,6 +25775,7 @@ class Tab3Anim(tk.Frame):
         """Chrome profile er pashe: limit hole 'koi reset', kaj korle 'kaj korche'."""
         now = time.time()
         hub = self._hub
+        hub3 = getattr(self, "_3d_hub", None)          # 3D Animation er hub — oi profile gulo 'kaj korche' dekhabe
         lims = getattr(self, "_lim_lbls", {})
         n = 0
         for pr in self.chrome_profiles:
@@ -25202,7 +25789,8 @@ class Tab3Anim(tk.Frame):
                 rem = f"{h}h {m}m" if h else f"{max(1, m)}m"
                 txt = (f"\u26d4 Limit hoyeche \u00b7 reset: {time.strftime('%I:%M %p', time.localtime(u))} "
                        f"({rem} baki)")
-            elif hub is not None and pr["dir"] in hub.claimed:
+            elif ((hub is not None and pr["dir"] in hub.claimed)
+                  or (hub3 is not None and pr["dir"] in hub3.claimed)):
                 txt, col = "\u25b6 kaj korche", OK
             if lb is not None:
                 try:
@@ -25947,10 +26535,861 @@ class Tab3Anim(tk.Frame):
             return box_text.strip()
         return t.replace("{script}", box_text.strip()) if "{script}" in t else t + "\n\n" + box_text.strip()
 
+    # ───── 3D Animation ─────
+    _3D_TABS = (("input", "Input"), ("skill", "Skill file"), ("prompt", "Prompt"),
+                ("files", "Files"), ("last", "Last file"))
+
+    def _load_3d_cfg(self):
+        try:
+            d = json.loads(self._rd(ANIM3D_CFG) or "{}")
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_3d(self):
+        if not hasattr(self, "d3_prompt"):
+            return
+        cfg = {"script_path": self.d3["script"], "srt_path": self.d3["srt"], "audio_path": self.d3["audio"],
+               "skill_dir": self.d3["skill"], "skill_name": self.d3_skill_name.get().strip(), "parts": self.d3_parts.get().strip(),
+               "after": next((a for a, l in VOICE_AFTER_LABELS.items() if l == self.d3_after.get()), "none"),
+               "script_text": self.d3_script_txt.get("1.0", "end-1c"),
+               "srt_text": self.d3_srt_txt.get("1.0", "end-1c"),
+               "prompt": self.d3_prompt.get("1.0", "end-1c")}
+        os.makedirs(ANIM3D_BASE, exist_ok=True)
+        atomic_write(ANIM3D_CFG, json.dumps(cfg, ensure_ascii=False, indent=2))
+
+    def _3d_changed(self, *_):
+        self._sched("d3save", self._save_3d)
+
+    def _build_3d(self, f):
+        cfg = self._load_3d_cfg()
+        self._3d_cfg0 = cfg
+        self.d3 = {"script": cfg.get("script_path", ""), "srt": cfg.get("srt_path", ""),
+                   "audio": cfg.get("audio_path", ""), "skill": cfg.get("skill_dir", "")}
+        self.d3_skill_name = tk.StringVar(value=cfg.get("skill_name") or "cartoon-audio-short")
+        self.d3_parts = tk.StringVar(value=str(cfg.get("parts") or "1"))
+        self._3d_hub = None
+        self._3d_busy = False
+        self._3d_stop = threading.Event()
+        self._3d_q = queue.Queue()
+        self.d3_zones = {}
+        self.app.header(f, "3D Animation", "Input, skill file ar prompt diye 3D animation toiri kora hobe")
+
+        # ── upore: Start / Stop ──
+        top = tk.Frame(f, bg=BG)
+        top.pack(fill="x", padx=22, pady=(0, 8))
+        self.d3_start_btn = mkbtn(top, "▶  START", self._3d_start, "primary", padx=22)
+        self.d3_start_btn.pack(side="left")
+        self.d3_stop_btn = mkbtn(top, "■  STOP", self._3d_stop_click, "danger", padx=18)
+        self.d3_stop_btn.pack(side="left", padx=8)
+        self.d3_stop_btn.configure(state="disabled")
+        mklabel(top, "Part", 10, MUTED, bg=BG).pack(side="left", padx=(18, 6))
+        mkentry(top, self.d3_parts, width=5).pack(side="left")
+        self.d3_parts.trace_add("write", self._3d_changed)
+        mkbtn(top, "Reset progress", self._3d_reset_progress, "ghost", pady=3, padx=10).pack(side="left", padx=(10, 0))
+        self.d3_after = tk.StringVar(value=VOICE_AFTER_LABELS.get(str(self._3d_cfg0.get("after") or "none"), "Kichu na"))
+        self.d3_after.trace_add("write", self._3d_changed)
+        ab = ttk.Combobox(top, textvariable=self.d3_after, values=list(VOICE_AFTER_LABELS.values()),
+                          state="readonly", width=12)
+        ab.pack(side="left", padx=(16, 0))
+        mklabel(top, "\u2190 sob part shesh hole", 9, MUTED, bg=BG).pack(side="left", padx=6)
+        self.d3_state = mklabel(top, "Ready", 10, MUTED, bg=BG)
+        self.d3_state.pack(side="right", padx=8)
+
+        # ── option bar ──
+        self.d3_tab = tk.StringVar(value="input")
+        Segmented(f, self.d3_tab, self._3D_TABS, bg=BG).pack(fill="x", padx=22, pady=(0, 8))
+        self.d3_tab.trace_add("write", lambda *a: self._3d_show())
+        self.d3_body = tk.Frame(f, bg=BG)
+        self.d3_body.pack(fill="both", expand=True, padx=22, pady=(0, 6))
+        self.d3_pages = {k: tk.Frame(self.d3_body, bg=BG) for k, _ in self._3D_TABS}
+
+        self._build_3d_input(self.d3_pages["input"], cfg)
+        self._build_3d_skill(self.d3_pages["skill"])
+        self._build_3d_prompt(self.d3_pages["prompt"], cfg)
+        self._build_3d_files(self.d3_pages["files"])
+        self._build_3d_last(self.d3_pages["last"])
+
+        # ── niche: log ──
+        lg = tk.Frame(f, bg=LOG_BG)
+        lg.pack(fill="x", padx=22, pady=(0, 14))
+        self.d3_log = tk.Text(lg, bg=LOG_BG, fg=LOG_FG, font=(MONO, 9), relief="flat", bd=0, height=5,
+                              wrap="word", state="disabled", padx=10, pady=6, highlightthickness=0)
+        self.d3_log.pack(fill="x")
+        for tg, col in (("info", LOG_FG), ("ok", OK), ("warn", WARN), ("err", BAD)):
+            self.d3_log.tag_configure(tg, foreground=col)
+        self.after(500, self._3d_pump)
+        self._3d_show()
+        for k in ("script", "srt", "audio"):
+            self._3d_refresh_path(k)
+        self._3d_refresh_skill()
+
+    def _3d_show(self):
+        cur = self.d3_tab.get()
+        for k, fr in self.d3_pages.items():
+            if k == cur:
+                fr.pack(fill="both", expand=True)
+            else:
+                fr.pack_forget()
+        if cur == "files":
+            self._3d_refresh_files()
+        elif cur == "last":
+            self._3d_refresh_last()
+
+    def _3d_note(self, msg, lv="info"):
+        self._3d_q.put((time.strftime("%H:%M:%S"), msg, lv))
+
+    def _3d_pump(self):
+        self._3d_drain()
+        try:
+            if self.cur == "anim3d" and self.d3_tab.get() == "files":
+                self._3d_pump_n = getattr(self, "_3d_pump_n", 0) + 1
+                if self._3d_pump_n % 6 == 0:          # ~3s por por notun part dekhate
+                    self._3d_refresh_files()
+        except Exception:
+            pass
+        try:
+            self.after(500, self._3d_pump)
+        except Exception:
+            pass
+
+    def _3d_drain(self):
+        try:
+            while True:
+                t, m, lv = self._3d_q.get_nowait()
+                self.d3_log.configure(state="normal")
+                self.d3_log.insert("end", f"[{t}] {m}\n", lv)
+                self.d3_log.see("end")
+                self.d3_log.configure(state="disabled")
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+
+    # ── Input (script / srt / audio) ──
+    def _3d_card(self, parent, key, title, hint):
+        card = tk.Frame(parent, bg=PANEL)
+        col = ("script", "srt", "audio").index(key)
+        card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 5, 0 if col == 2 else 5))
+        parent.grid_columnconfigure(col, weight=1, uniform="d3in")
+        parent.grid_rowconfigure(0, weight=1)
+        self.d3_zones[key] = card
+        hd = tk.Frame(card, bg=PANEL)
+        hd.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Frame(hd, bg=ACCENT, width=3, height=15).pack(side="left", padx=(0, 9))
+        mklabel(hd, title, 11, FG, True, bg=PANEL).pack(side="left")
+        mkbtn(hd, "Clear", lambda k=key: self._3d_clear(k), "ghost", pady=2, padx=8).pack(side="right")
+        mkbtn(hd, "Browse", lambda k=key: self._3d_browse(k), "ghost", pady=2, padx=8).pack(side="right", padx=4)
+        mklabel(card, hint, 9, MUTED, bg=PANEL, anchor="w", justify="left", wraplength=260).pack(fill="x", padx=14, pady=(0, 4))
+        return card
+
+    def _build_3d_input(self, f, cfg):
+        c = self._3d_card(f, "script", "Script", "text likho / paste koro, ba .txt file drop koro")
+        self.d3_script_txt = mktext(c, height=6, width=10)
+        self.d3_script_txt.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        self.d3_script_txt.insert("1.0", cfg.get("script_text", ""))
+        self.d3_script_txt.edit_reset()
+        self.d3_script_txt.bind("<<Modified>>", lambda e: self._3d_txt_mod(self.d3_script_txt))
+        self.d3_script_lbl = mklabel(c, "", 9, MUTED, bg=PANEL, anchor="w", justify="left", wraplength=260)
+        self.d3_script_lbl.pack(fill="x", padx=14, pady=(0, 8))
+
+        c = self._3d_card(f, "srt", "SRT", ".srt ba .txt file drop koro / paste koro")
+        self.d3_srt_txt = mktext(c, height=6, width=10)
+        self.d3_srt_txt.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        self.d3_srt_txt.insert("1.0", cfg.get("srt_text", ""))
+        self.d3_srt_txt.edit_reset()
+        self.d3_srt_txt.bind("<<Modified>>", lambda e: self._3d_txt_mod(self.d3_srt_txt))
+        self.d3_srt_lbl = mklabel(c, "", 9, MUTED, bg=PANEL, anchor="w", justify="left", wraplength=260)
+        self.d3_srt_lbl.pack(fill="x", padx=14, pady=(0, 8))
+
+        c = self._3d_card(f, "audio", "Audio", "audio file drop koro (mp3, wav, m4a ...)")
+        self.d3_audio_lbl = mklabel(c, "", 10, MUTED, bg=PANEL, anchor="nw", justify="left", wraplength=260)
+        self.d3_audio_lbl.pack(fill="both", expand=True, padx=14, pady=(8, 12))
+
+    def _3d_txt_mod(self, t):
+        if t.edit_modified():
+            t.edit_modified(False)
+            self._3d_changed()
+
+    def _3d_refresh_path(self, k):
+        p = self.d3.get(k, "")
+        if k == "audio":
+            lb = self.d3_audio_lbl
+            lb.configure(text=("♫  " + p) if p else "Kono audio file deya hoy ni", fg=FG if p else MUTED)
+        else:
+            lb = self.d3_script_lbl if k == "script" else self.d3_srt_lbl
+            lb.configure(text=("\U0001f4c4  " + p) if p else "", fg=MUTED)
+
+    def _3d_set(self, k, path):
+        """Ekta file ke input hishebe boshay."""
+        ext = os.path.splitext(path)[1].lower()
+        if k in ("script", "srt"):
+            if ext not in (".txt", ".srt") or (k == "script" and ext == ".srt"):
+                self._3d_note(f"{k.upper()} er jonno {'.txt' if k == 'script' else '.srt / .txt'} file dao", "warn")
+                return False
+            if k == "srt" and ext not in (".srt", ".txt"):
+                return False
+            box = self.d3_script_txt if k == "script" else self.d3_srt_txt
+            box.delete("1.0", "end")
+            box.insert("1.0", read_text(path))
+        elif k == "audio":
+            if ext not in AUDIO_EXTS:
+                self._3d_note("Audio file dao (mp3, wav, m4a, aac, ogg, flac)", "warn")
+                return False
+        self.d3[k] = path
+        self._3d_refresh_path(k)
+        self._3d_changed()
+        return True
+
+    def _3d_clear(self, k):
+        self.d3[k] = ""
+        if k == "script":
+            self.d3_script_txt.delete("1.0", "end")
+        elif k == "srt":
+            self.d3_srt_txt.delete("1.0", "end")
+        self._3d_refresh_path(k)
+        self._3d_changed()
+
+    def _3d_browse(self, k):
+        if k == "audio":
+            ft = [("Audio", " ".join("*" + e for e in sorted(AUDIO_EXTS))), ("All", "*.*")]
+        elif k == "srt":
+            ft = [("SRT / Text", "*.srt *.txt"), ("All", "*.*")]
+        else:
+            ft = [("Text", "*.txt"), ("All", "*.*")]
+        p = filedialog.askopenfilename(title=f"Select {k}", filetypes=ft)
+        if p:
+            self._3d_set(k, p)
+
+    # ── Skill file (folder) ──
+    def _build_3d_skill(self, f):
+        c = tk.Frame(f, bg=PANEL)
+        c.pack(fill="both", expand=True)
+        self.d3_zones["skill"] = c
+        hd = tk.Frame(c, bg=PANEL)
+        hd.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Frame(hd, bg=ACCENT, width=3, height=15).pack(side="left", padx=(0, 9))
+        mklabel(hd, "Skill file", 11, FG, True, bg=PANEL).pack(side="left")
+        mklabel(hd, "ekta folder ekhane drop koro", 9, MUTED, bg=PANEL).pack(side="left", padx=10)
+        mkbtn(hd, "Clear", self._3d_clear_skill, "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "Browse folder", self._3d_browse_skill, "ghost", pady=2, padx=10).pack(side="right", padx=6)
+        nr = tk.Frame(c, bg=PANEL)
+        nr.pack(fill="x", padx=14, pady=(2, 4))
+        mklabel(nr, "Claude skill nam", 10, MUTED, bg=PANEL).pack(side="left")
+        mkentry(nr, self.d3_skill_name, width=30).pack(side="left", padx=8)
+        mklabel(nr, "(+ menu theke ei nam er skill select hobe)", 9, MUTED, bg=PANEL).pack(side="left")
+        self.d3_skill_name.trace_add("write", self._3d_changed)
+        self.d3_skill_lbl = mklabel(c, "", 10, MUTED, bg=PANEL, anchor="w", justify="left", wraplength=800)
+        self.d3_skill_lbl.pack(fill="x", padx=14, pady=(2, 6))
+        body = tk.Frame(c, bg=LOG_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        sb = ttk.Scrollbar(body, orient="vertical")
+        self.d3_skill_list = tk.Listbox(body, bg=LOG_BG, fg=LOG_FG, font=(MONO, 10), relief="flat", bd=0,
+                                        highlightthickness=0, activestyle="none", selectbackground=ACCENT,
+                                        selectforeground=ACCENT_FG, yscrollcommand=sb.set)
+        sb.configure(command=self.d3_skill_list.yview)
+        sb.pack(side="right", fill="y")
+        self.d3_skill_list.pack(side="left", fill="both", expand=True)
+
+    def _3d_set_skill(self, d):
+        if not os.path.isdir(d):
+            self._3d_note("Skill file er jonno folder dao", "warn")
+            return False
+        self.d3["skill"] = d
+        self._3d_refresh_skill()
+        self._3d_changed()
+        return True
+
+    def _3d_clear_skill(self):
+        self.d3["skill"] = ""
+        self._3d_refresh_skill()
+        self._3d_changed()
+
+    def _3d_browse_skill(self):
+        d = filedialog.askdirectory(title="Skill folder")
+        if d:
+            self._3d_set_skill(d)
+
+    def _3d_refresh_skill(self):
+        d = self.d3.get("skill", "")
+        self.d3_skill_list.delete(0, "end")
+        if d and os.path.isdir(d):
+            n = 0
+            for root, _dirs, files in os.walk(d):
+                for fn in sorted(files):
+                    n += 1
+                    if n <= 500:
+                        self.d3_skill_list.insert("end", os.path.relpath(os.path.join(root, fn), d))
+            self.d3_skill_lbl.configure(text=f"\U0001f4c1  {d}   ·   {n} file", fg=FG)
+        else:
+            self.d3_skill_lbl.configure(text="Kono skill folder deya hoy ni", fg=MUTED)
+
+    # ── Prompt ──
+    def _build_3d_prompt(self, f, cfg):
+        c = tk.Frame(f, bg=PANEL)
+        c.pack(fill="both", expand=True)
+        self.d3_zones["prompt"] = c
+        self.d3_prompt = mktext(c)
+        self.d3_prompt.pack(fill="both", expand=True)
+        self.d3_prompt.insert("1.0", cfg.get("prompt", ""))
+        self.d3_prompt.edit_reset()
+        self.d3_prompt.bind("<<Modified>>", lambda e: self._3d_txt_mod(self.d3_prompt))
+
+    # ── Files ──
+    def _build_3d_files(self, f):
+        c = tk.Frame(f, bg=PANEL)
+        c.pack(fill="both", expand=True)
+        self.d3_zones["files"] = c
+        hd = tk.Frame(c, bg=PANEL)
+        hd.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Frame(hd, bg=ACCENT, width=3, height=15).pack(side="left", padx=(0, 9))
+        mklabel(hd, "Files", 11, FG, True, bg=PANEL).pack(side="left")
+        self.d3_files_cnt = mklabel(hd, "", 9, MUTED, bg=PANEL)
+        self.d3_files_cnt.pack(side="left", padx=10)
+        mklabel(c, "Nijer banano part folder (1, 2, 3 ... nam e) ekhane drop korte paro — start dile sob theke shesh folder theke kaj shuru hobe",
+                9, MUTED, bg=PANEL, anchor="w").pack(fill="x", padx=14, pady=(0, 4))
+        mkbtn(hd, "\U0001f4c2 Open folder", self._3d_open_out, "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "Refresh", self._3d_refresh_files, "ghost", pady=2, padx=10).pack(side="right", padx=6)
+        mkbtn(hd, "Clear all", self._3d_clear_all_folders, "danger", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "Delete folder", self._3d_delete_sel_folder, "ghost", pady=2, padx=10).pack(side="right", padx=6)
+        body = tk.Frame(c, bg=LOG_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        sb = ttk.Scrollbar(body, orient="vertical")
+        self.d3_files_list = tk.Listbox(body, bg=LOG_BG, fg=LOG_FG, font=(MONO, 10), relief="flat", bd=0,
+                                        highlightthickness=0, activestyle="none", selectbackground=ACCENT,
+                                        selectforeground=ACCENT_FG, yscrollcommand=sb.set)
+        sb.configure(command=self.d3_files_list.yview)
+        sb.pack(side="right", fill="y")
+        self.d3_files_list.pack(side="left", fill="both", expand=True)
+        self.d3_files_list.bind("<Double-Button-1>", self._3d_open_sel)
+        self.d3_files_list.bind("<Delete>", lambda e: self._3d_delete_sel_folder())
+        self.d3_files_list.bind("<Button-3>", self._3d_files_menu)
+        self._3d_files = []
+
+    def _3d_out_files(self):
+        out = []
+        if os.path.isdir(ANIM3D_OUT):
+            for root, _d, fs in os.walk(ANIM3D_OUT):
+                for fn in fs:
+                    p = os.path.join(root, fn)
+                    try:
+                        out.append((os.path.getmtime(p), p))
+                    except OSError:
+                        pass
+        out.sort(reverse=True)
+        return out
+
+    def _3d_refresh_files(self):
+        """Part folder gulo serial e (1,2,3...), prottek folder er niche tar file gulo."""
+        rows, paths = [], []
+        nparts = nfiles = 0
+        try:
+            sel_path = None
+            cs = self.d3_files_list.curselection()
+            if cs and cs[0] < len(self._3d_files):
+                sel_path = self._3d_files[cs[0]]
+            top = self.d3_files_list.yview()[0]
+        except Exception:
+            sel_path, top = None, 0.0
+        if os.path.isdir(ANIM3D_OUT):
+            parts, others = [], []
+            for d in os.listdir(ANIM3D_OUT):
+                fp = os.path.join(ANIM3D_OUT, d)
+                m = re.fullmatch(r"part (\d+)", d)
+                if m and os.path.isdir(fp):
+                    parts.append((int(m.group(1)), fp))
+                elif os.path.isdir(fp) and d.startswith("old_"):
+                    others.append(fp)
+            for num, fp in sorted(parts):
+                fl = sorted(f for f in os.listdir(fp) if os.path.isfile(os.path.join(fp, f)))
+                nparts += 1
+                nfiles += len(fl)
+                rows.append(f"\U0001f4c1  part {num}   ({len(fl)} file)")
+                paths.append(fp)
+                for fn in fl:
+                    rows.append(f"        \u2022 {fn}")
+                    paths.append(os.path.join(fp, fn))
+            for fp in sorted(others):
+                rows.append(f"\U0001f4e6  {os.path.basename(fp)}   (ager run, soriye rakha)")
+                paths.append(fp)
+        self._3d_files = paths
+        self.d3_files_list.delete(0, "end")
+        for r in rows:
+            self.d3_files_list.insert("end", r)
+        for i, pth in enumerate(paths):
+            if pth == sel_path:
+                self.d3_files_list.selection_set(i)
+                break
+        try:
+            self.d3_files_list.yview_moveto(top)
+        except Exception:
+            pass
+        self.d3_files_cnt.configure(text=f"{nparts} part  \u00b7  {nfiles} file  \u00b7  double-click korle khulbe")
+
+    def _3d_open_sel(self, e=None):
+        sel = self.d3_files_list.curselection()
+        if sel and sel[0] < len(self._3d_files):
+            open_path(self._3d_files[sel[0]])
+
+    # ── folder delete / clear all ──
+    def _3d_in_out(self, p):
+        """Shudhu ANIM3D_OUT er bhitorer folder delete kora jabe (safety)."""
+        try:
+            base = os.path.normcase(os.path.realpath(ANIM3D_OUT))
+            tgt = os.path.normcase(os.path.realpath(p))
+            return tgt != base and os.path.commonpath([base, tgt]) == base
+        except Exception:
+            return False
+
+    def _3d_rm_folder(self, p):
+        """Folder muche. Kono file lock thakle (player e khola) fail list return kore."""
+        fails = []
+
+        def _onerr(func, path, exc):
+            try:
+                os.chmod(path, 0o700)
+                func(path)
+            except Exception:
+                fails.append(path)
+        shutil.rmtree(p, onerror=_onerr)
+        return fails
+
+    def _3d_files_menu(self, e):
+        try:
+            i = self.d3_files_list.nearest(e.y)
+            if i < 0 or i >= len(self._3d_files):
+                return
+            self.d3_files_list.selection_clear(0, "end")
+            self.d3_files_list.selection_set(i)
+            self.d3_files_list.activate(i)
+            m = tk.Menu(self.d3_files_list, tearoff=0)
+            pth = self._3d_files[i]
+            m.add_command(label="Open", command=lambda: open_path(pth))
+            if os.path.isdir(pth):
+                m.add_separator()
+                m.add_command(label="Delete this folder", command=self._3d_delete_sel_folder)
+            m.add_separator()
+            m.add_command(label="Clear all folders", command=self._3d_clear_all_folders)
+            m.tk_popup(e.x_root, e.y_root)
+            m.grab_release()
+        except Exception:
+            pass
+
+    def _3d_delete_sel_folder(self):
+        if self._3d_busy:
+            self._3d_note("Start cholche — age STOP koro, tarpor folder delete koro", "warn")
+            return
+        sel = self.d3_files_list.curselection()
+        if not sel or sel[0] >= len(self._3d_files):
+            self._3d_note("Age list theke ekta folder select koro", "warn")
+            return
+        pth = self._3d_files[sel[0]]
+        if not os.path.isdir(pth):
+            self._3d_note("Eta file — folder select koro (\U0001f4c1 / \U0001f4e6 wala row)", "warn")
+            return
+        if not self._3d_in_out(pth):
+            self._3d_note("Ei folder delete kora jabe na", "err")
+            return
+        name = os.path.basename(pth)
+        nf = sum(len(fs) for _r, _d, fs in os.walk(pth))
+        if not messagebox.askyesno("Delete folder", f"'{name}' folder ar tar {nf} ta file muche felbo?\n"
+                                   "Eta ar ferot ashbe na.", parent=self.app):
+            return
+        try:
+            fails = self._3d_rm_folder(pth)
+            if fails or os.path.exists(pth):
+                self._3d_note(f"'{name}' purapuri muchha jayni — kono file onno program e khola ache", "err")
+            else:
+                self._3d_note(f"'{name}' delete hoyeche", "ok")
+        except Exception as ex:
+            self._3d_note(f"Delete error: {ex}", "err")
+        self._3d_refresh_files()
+        self._3d_refresh_last()
+
+    def _3d_clear_all_folders(self):
+        if self._3d_busy:
+            self._3d_note("Start cholche — age STOP koro, tarpor Clear all koro", "warn")
+            return
+        dirs = []
+        if os.path.isdir(ANIM3D_OUT):
+            for d in os.listdir(ANIM3D_OUT):
+                fp = os.path.join(ANIM3D_OUT, d)
+                if os.path.isdir(fp) and self._3d_in_out(fp):
+                    dirs.append(fp)
+        if not dirs:
+            self._3d_note("Muchhar moto kono folder nei", "info")
+            return
+        nf = sum(len(fs) for fp in dirs for _r, _d, fs in os.walk(fp))
+        if not messagebox.askyesno("Clear all", f"Sob {len(dirs)} ta folder ({nf} ta file) muche felbo?\n"
+                                   "Eta ar ferot ashbe na.", parent=self.app):
+            return
+        ok = bad = 0
+        for fp in dirs:
+            try:
+                fails = self._3d_rm_folder(fp)
+                if fails or os.path.exists(fp):
+                    bad += 1
+                else:
+                    ok += 1
+            except Exception:
+                bad += 1
+        try:
+            os.remove(ANIM3D_PROGRESS)
+        except Exception:
+            pass
+        if bad:
+            self._3d_note(f"{ok} ta folder muchha gelo, {bad} ta purapuri muchha jayni (file onno program e khola)", "warn")
+        else:
+            self._3d_note(f"Sob {ok} ta folder muchha gelo — porer Start Part 1 theke hobe", "ok")
+        self._3d_refresh_files()
+        self._3d_refresh_last()
+
+    def _3d_open_out(self):
+        os.makedirs(ANIM3D_OUT, exist_ok=True)
+        open_path(ANIM3D_OUT)
+
+    # ── Last file ──
+    def _build_3d_last(self, f):
+        c = tk.Frame(f, bg=PANEL)
+        c.pack(fill="both", expand=True)
+        hd = tk.Frame(c, bg=PANEL)
+        hd.pack(fill="x", padx=14, pady=(10, 4))
+        tk.Frame(hd, bg=ACCENT, width=3, height=15).pack(side="left", padx=(0, 9))
+        mklabel(hd, "Last file", 11, FG, True, bg=PANEL).pack(side="left")
+        mkbtn(hd, "Refresh", self._3d_refresh_last, "ghost", pady=2, padx=10).pack(side="right")
+        self.d3_last_lbl = mklabel(c, "", 11, FG, bg=PANEL, anchor="w", justify="left", wraplength=800)
+        self.d3_last_lbl.pack(fill="x", padx=16, pady=(14, 8))
+        row = tk.Frame(c, bg=PANEL)
+        row.pack(fill="x", padx=14)
+        self.d3_last_open = mkbtn(row, "Open file", lambda: self._3d_last_act(False), "primary", padx=16)
+        self.d3_last_open.pack(side="left")
+        self.d3_last_dir = mkbtn(row, "Show folder", lambda: self._3d_last_act(True), "ghost", padx=16)
+        self.d3_last_dir.pack(side="left", padx=8)
+        self._3d_last_path = ""
+
+    def _3d_refresh_last(self):
+        items = self._3d_out_files()
+        if items:
+            t, p = items[0]
+            self._3d_last_path = p
+            self.d3_last_lbl.configure(text=f"{os.path.basename(p)}\n{p}\n"
+                                            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))}  ·  "
+                                            f"{os.path.getsize(p) / 1048576:.2f} MB", fg=FG)
+        else:
+            self._3d_last_path = ""
+            self.d3_last_lbl.configure(text="Ekhono kono file toiri hoy ni", fg=MUTED)
+
+    def _3d_last_act(self, folder):
+        p = self._3d_last_path
+        if not p or not os.path.exists(p):
+            self._3d_refresh_last()
+            return
+        open_path(os.path.dirname(p) if folder else p)
+
+    # ── drop ──
+    def _3d_zone_at(self, event):
+        try:
+            w = self.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        while w is not None:
+            for k, z in self.d3_zones.items():
+                if w is z:
+                    return k
+            w = getattr(w, "master", None)
+        return None
+
+    def _drop_3d(self, event):
+        try:
+            paths = [p.strip() for p in self.tk.splitlist(event.data) if p.strip()]
+            zone = self._3d_zone_at(event)
+            if zone is None:
+                self.app.note("Input e drop korte hole Script / SRT / Audio / Skill file er box er upor chharo", WARN)
+                return event.action
+            if zone == "skill":
+                d = next((p for p in paths if os.path.isdir(p)), None)
+                if d is None:
+                    d = os.path.dirname(paths[0]) if paths else None
+                if d and self._3d_set_skill(d):
+                    self.app.note("Skill folder set ✓", OK)
+                return event.action
+            if zone == "files":
+                n = self._3d_import_parts(paths)
+                if n:
+                    self.app.note(f"{n} ta part folder add hoyeche \u2713", OK)
+                return event.action
+            if zone in ("script", "srt", "audio"):
+                files = [p for p in paths if os.path.isfile(p)]
+                if files and self._3d_set(zone, files[0]):
+                    self.app.note(f"{zone.upper()} set ✓", OK)
+                else:
+                    self.app.note("Shothik file drop koro", WARN)
+                return event.action
+            self.app.note("Ei box e drop kora jay na", WARN)
+        except Exception as e:
+            self.app.note(f"Drop error: {e}", BAD)
+        return event.action
+
+    # ── Start / Stop ──
+    def _3d_set_busy(self, on):
+        self._3d_busy = on
+        self.d3_start_btn.configure(state="disabled" if on else "normal")
+        self.d3_stop_btn.configure(state="normal" if on else "disabled")
+        self.d3_state.configure(text="Running..." if on else "Ready", fg=OK if on else MUTED)
+
+    @staticmethod
+    def _3d_part_num(name):
+        m = re.fullmatch(r"\s*(?:part\s*[-_ ]?)?(\d+)\s*", name, re.I)
+        return int(m.group(1)) if m else None
+
+    def _3d_import_parts(self, paths):
+        """Drop kora folder (nam 1,2,3 ba 'part 1') ke output e 'part N' hishebe copy kore."""
+        if self._3d_busy:
+            self._3d_note("Kaj cholar somoy part add kora jabe na", "warn")
+            return 0
+        cands = []
+
+        def scan(dp, stem):
+            """dp folder ta nijei part (stem e number) na hole tar bhitorer 1,2,3 folder gulo part."""
+            num = self._3d_part_num(stem)
+            if num is not None:
+                cands.append((num, dp))
+                return
+            for d in sorted(os.listdir(dp)):
+                sub = os.path.join(dp, d)
+                nn = self._3d_part_num(d)
+                if os.path.isdir(sub) and nn is not None:
+                    cands.append((nn, sub))
+
+        def unwrap(dp):
+            """Zip er bhitore shudhu ekta folder thakle (jemon 1.zip -> 1/) tar bhitore dhuko."""
+            ents = [e for e in os.listdir(dp) if not e.startswith("__MACOSX")]
+            if len(ents) == 1 and os.path.isdir(os.path.join(dp, ents[0])):
+                return os.path.join(dp, ents[0])
+            return dp
+
+        for k, p in enumerate(paths):
+            p = p.rstrip("/\\")
+            if os.path.isdir(p):
+                scan(p, os.path.basename(p))
+            elif p.lower().endswith(".zip") and os.path.isfile(p):
+                tmp = os.path.join(ANIM3D_BASE, "work", time.strftime("unzip_%Y%m%d_%H%M%S") + f"_{k}")
+                try:
+                    os.makedirs(tmp, exist_ok=True)
+                    with zipfile.ZipFile(p) as z:
+                        z.extractall(tmp)
+                    self._3d_note(f"{os.path.basename(p)} unzip hoyeche", "info")
+                    scan(unwrap(tmp), os.path.splitext(os.path.basename(p))[0])
+                except Exception as e:
+                    self._3d_note(f"{os.path.basename(p)} unzip error: {e}", "err")
+        if not cands:
+            self._3d_note("Folder / zip er nam number hote hobe (1, 2, 3 ... ba 'part 1')", "warn")
+            return 0
+        os.makedirs(ANIM3D_OUT, exist_ok=True)
+        cnt = 0
+        for num, src in sorted(cands):
+            dst = os.path.join(ANIM3D_OUT, f"part {num}")
+            try:
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst)
+                nf = sum(len(fs) for _r, _d, fs in os.walk(dst))
+                self._3d_note(f"part {num}: {nf} ta file add hoyeche", "ok")
+                cnt += 1
+            except Exception as e:
+                self._3d_note(f"part {num} add error: {e}", "err")
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        self._3d_refresh_files()
+        return cnt
+
+    def _3d_part_files(self, n):
+        d = os.path.join(ANIM3D_OUT, f"part {n}")
+        out = []
+        if os.path.isdir(d):
+            for fn in sorted(os.listdir(d)):
+                fp = os.path.join(d, fn)
+                if os.path.isfile(fp):
+                    out.append(fp)
+        return out
+
+    def _3d_last_part(self):
+        best = 0
+        if os.path.isdir(ANIM3D_OUT):
+            for d in os.listdir(ANIM3D_OUT):
+                m = re.fullmatch(r"part (\d+)", d)
+                if m and self._3d_part_files(int(m.group(1))):
+                    best = max(best, int(m.group(1)))
+        return best
+
+    def _3d_reset_progress(self):
+        """Ager shob 'part N' folder old_... e soriye rakhe — porer Start notun kore Part 1 theke hobe."""
+        if self._3d_busy:
+            return
+        try:
+            olds = [d for d in os.listdir(ANIM3D_OUT) if re.fullmatch(r"part \d+", d)] if os.path.isdir(ANIM3D_OUT) else []
+            if not olds:
+                self._3d_note("Kono part folder nei", "info")
+                return
+            if not messagebox.askyesno("Reset", f"{len(olds)} ta part folder 'old_...' folder e soriye rakhbo. Notun run hobe. Thik ache?"):
+                return
+            arch = os.path.join(ANIM3D_OUT, time.strftime("old_%Y%m%d_%H%M%S"))
+            os.makedirs(arch, exist_ok=True)
+            for d in olds:
+                shutil.move(os.path.join(ANIM3D_OUT, d), os.path.join(arch, d))
+            try:
+                os.remove(ANIM3D_PROGRESS)
+            except Exception:
+                pass
+            self._3d_note("Reset hoyeche — porer Start Part 1 theke hobe", "ok")
+            self._3d_refresh_files()
+        except Exception as e:
+            self._3d_note(f"Reset error: {e}", "err")
+
+    def _3d_resume_info(self, total):
+        k = self._3d_last_part()
+        if 1 <= k < total:
+            return {"next": k + 1, "saved": self._3d_part_files(k)}
+        return None
+
+    def _3d_start(self):
+        if self._3d_busy:
+            return
+        self._save_3d()
+        job = {"script": self.d3_script_txt.get("1.0", "end-1c").strip(),
+               "srt": self.d3_srt_txt.get("1.0", "end-1c").strip(),
+               "audio": self.d3["audio"], "skill_dir": self.d3["skill"],
+               "skill_name": self.d3_skill_name.get().strip() or "cartoon-audio-short",
+               "prompt": self.d3_prompt.get("1.0", "end-1c").strip()}
+        try:
+            job["parts"] = int(self.d3_parts.get().strip())
+            if job["parts"] < 1:
+                raise ValueError
+        except Exception:
+            self._3d_note("Part box e 1 ba tar beshi ekta number dao", "warn")
+            return
+        res = self._3d_resume_info(job["parts"])
+        job["resume"] = res
+        k = self._3d_last_part()
+        if res is None and k >= job["parts"]:
+            self._3d_note(f"Part {k} age-i ache (Part box = {job['parts']}). Notun run korte 'Reset progress' chapo, "
+                          f"ba Part box e {k + 1} ba tar beshi dao", "warn")
+            return
+        if res is None:
+            if not job["skill_dir"] or not os.path.isdir(job["skill_dir"]):
+                self._3d_note("Skill file section e folder dao", "warn")
+                return
+            if not (job["script"] or job["srt"] or job["audio"]):
+                self._3d_note("Input e kothao kichu nei (script / srt / audio)", "warn")
+                return
+            if job["audio"] and not os.path.isfile(job["audio"]):
+                self._3d_note("Audio file pawa jacche na", "err")
+                return
+        profs = [p for p in self.chrome_profiles if os.path.isdir(p["dir"])]
+        if not profs:
+            self._3d_note("Chrome section e kono usable profile nei — age ekta Chrome profile add kore claude.ai te login koro", "err")
+            return
+        wd = os.path.join(ANIM3D_BASE, "work", time.strftime("run_%Y%m%d_%H%M%S"))
+        os.makedirs(wd, exist_ok=True)
+        job["work_dir"] = wd
+        job["script_file"] = job["srt_file"] = ""
+        if res is None:
+            if job["script"]:
+                job["script_file"] = os.path.join(wd, "script.txt")
+                atomic_write(job["script_file"], job["script"])
+            if job["srt"]:
+                job["srt_file"] = os.path.join(wd, "srt.srt")
+                atomic_write(job["srt_file"], job["srt"])
+        hidden = bool(getattr(self.app, "_voice_chrome_hidden", False))
+        hub = AnimHub([], "", hidden, self._3d_q)
+        hub.profs = profs
+        self._3d_hub = hub
+        self._3d_set_busy(True)
+        self._3d_note("Start hoyeche" + (f" (resume: Part {res['next']} theke)" if res else ""), "ok")
+        threading.Thread(target=self._3d_worker, args=(hub, job), daemon=True).start()
+
+    def _3d_stop_click(self):
+        if self._3d_busy and self._3d_hub is not None:
+            self._3d_hub.stop.set()
+            self._3d_note("Stop kora hocche...", "warn")
+
+    def _3d_worker(self, hub, job):
+        w = None
+        try:
+            w = Anim3DWorker(hub, job)
+            w.run()
+        except Exception as e:
+            self._3d_note(f"Error: {e}", "err")
+        finally:
+            ok = bool(w is not None and getattr(w, "finished_ok", False) and not hub.stop.is_set())
+            self._3d_note("Shesh (Chrome bondho)", "info")
+            self._3d_hub = None
+            self.after(0, lambda: self._3d_set_busy(False))
+            if ok:
+                self.after(0, self._3d_after_finish)
+
+    def _3d_after_finish(self):
+        act = next((a for a, l in VOICE_AFTER_LABELS.items() if l == self.d3_after.get()), "none")
+        if act not in ("shutdown", "sleep"):
+            return
+        name = VOICE_AFTER_LABELS[act]
+        state = {"left": 60, "job": None, "dead": False}
+        self._3d_note(f"Sob kaj shesh — 60s por {name} hobe (Cancel korte window e chapun)", "warn")
+        win = tk.Toplevel(self)
+        win.title(name)
+        win.configure(bg=PANEL)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        lbl = mklabel(win, "", 12, FG, True, bg=PANEL)
+        lbl.pack(padx=30, pady=(22, 8))
+        mklabel(win, "Cancel chaple PC bondho hobe na.", 9, MUTED, bg=PANEL).pack(padx=30)
+        brow = tk.Frame(win, bg=PANEL)
+        brow.pack(pady=18)
+
+        def close():
+            state["dead"] = True
+            if state["job"]:
+                try:
+                    win.after_cancel(state["job"])
+                except Exception:
+                    pass
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        def cancel():
+            close()
+            self._3d_note(f"{name} cancel kora hoyeche", "info")
+
+        def go():
+            close()
+            self.after(500, lambda: self.app._voice_power(act))
+
+        def tick():
+            if state["dead"]:
+                return
+            m, sec = divmod(state["left"], 60)
+            lbl.configure(text=f"{name} hobe  {m:02d}:{sec:02d}  por")
+            if state["left"] <= 0:
+                go()
+                return
+            state["left"] -= 1
+            state["job"] = win.after(1000, tick)
+
+        mkbtn(brow, "Cancel", cancel, "danger", padx=18).pack(side="left", padx=6)
+        mkbtn(brow, "Ekhoni koro", go, "ghost", padx=14).pack(side="left", padx=6)
+        win.protocol("WM_DELETE_WINDOW", cancel)
+        tick()
+
     def is_running(self):
-        return self._hub is not None
+        return self._hub is not None or self._3d_busy
 
     def shutdown(self):
+        try:
+            if self._3d_hub is not None:
+                self._3d_hub.stop.set()
+        except Exception:
+            pass
         hub = self._hub
         if hub is not None:
             hub.stop.set()
