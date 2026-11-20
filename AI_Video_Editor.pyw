@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.3"
+APP_VERSION = "3.2.4"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -25087,7 +25087,55 @@ class Anim3DWorker(AnimWorker):
                 self._calc_until()
                 self.log(f"{pr['name']}: limit — onno profile nichhi", "warn")
 
-    # ── limit hole kaj bhag kore korar plan (maximum 4 bhag) ──
+    # ── limit hole kaj bhag kore korar plan (maximum 6 bhag) ──
+    MAX_PIECES = 6          # ekta Part maximum koto bhag porjonto bhagbe
+
+    @staticmethod
+    def _fr_name(fr):
+        names = {2: "half", 3: "third", 4: "quarter", 5: "fifth", 6: "sixth", 7: "seventh", 8: "eighth",
+                 9: "ninth", 10: "tenth", 12: "twelfth", 16: "sixteenth", 32: "thirty-second"}
+        return names.get(fr.denominator if fr.numerator == 1 else 0, "part")
+
+    @classmethod
+    def _plan_labels(cls, fracs):
+        """fracs = [Fraction, ...] (sum = 1)  ->  prompt e boshanor bhag-er nam gulo."""
+        out, last = [], len(fracs) - 1
+        for i, f in enumerate(fracs):
+            nm, ft = cls._fr_name(f), f"{f.numerator}/{f.denominator}"
+            if i == last:
+                out.append(f"the remaining frames (the last {ft})")
+            elif i == 0:
+                out.append("the first half" if f.denominator == 2 else f"the first {nm} ({ft})")
+            else:
+                out.append(f"the next {nm} ({ft})")
+        return tuple(out)
+
+    @staticmethod
+    def _old_plan_fracs(pl):
+        from fractions import Fraction as F
+        m = {id(Anim3DWorker._PLAN_THIRDS): [F(1, 3)] * 3,
+             id(Anim3DWorker._PLAN_HALF_Q): [F(1, 2), F(1, 4), F(1, 4)],
+             id(Anim3DWorker._PLAN_FOURTHS): [F(1, 4)] * 4,
+             id(Anim3DWorker._PLAN_THIRDS_S1): [F(1, 3), F(1, 6), F(1, 6), F(1, 3)],
+             id(Anim3DWorker._PLAN_THIRDS_S2): [F(1, 3), F(1, 3), F(1, 6), F(1, 6)],
+             id(Anim3DWorker._PLAN_HALFQ_S1): [F(1, 2), F(1, 8), F(1, 8), F(1, 4)],
+             id(Anim3DWorker._PLAN_HALFQ_S2): [F(1, 2), F(1, 4), F(1, 8), F(1, 8)]}
+        return m.get(id(pl))
+
+    @staticmethod
+    def _split_more(fracs, idx):
+        """Limit lagle ekta bhag bariye notun fraction list dey (None = ar bhaga jay na).
+        idx == 0 : kono bhag ekhono hoyni -> shob gulo soman soman (n+1) bhag.
+        idx  > 0 : ager bhag gulo jemon ache temon; je bhag e limit lagche seta 2 bhag."""
+        from fractions import Fraction
+        if len(fracs) >= Anim3DWorker.MAX_PIECES:
+            return None
+        if idx == 0:
+            k = len(fracs) + 1
+            return [Fraction(1, k)] * k
+        half = fracs[idx] / 2
+        return list(fracs[:idx]) + [half, half] + list(fracs[idx + 1:])
+
     _PLAN_HALF = ("the first half", "the remaining frames")
     _PLAN_THIRDS = ("the first third (1/3)", "the second third (the next 1/3)", "the remaining frames (the last 1/3)")
     _PLAN_HALF_Q = ("the first half", "the next quarter (1/4)", "the remaining frames (the last 1/4)")
@@ -25177,16 +25225,25 @@ class Anim3DWorker(AnimWorker):
         if res:
             self.log(f"Ager kaj resume: Part {n} theke shuru (Part {n - 1} er {len(saved)} ta file upload hobe)", "ok")
         fails = lim_fails = 0
-        plan, idx, seg_zip = None, 0, None      # plan = None: pura Part ekshathe; nahole bhag kore kaj
+        plan, fracs, idx, seg_zip = None, None, 0, None   # plan = None: pura Part ekshathe; nahole bhag kore kaj
         segdir = os.path.join(ANIM3D_SEG, "cur")
         try:                                    # ager run bhag kore kaj er majhe bondho hoye thakle ekhan theke chalabe
             with open(ANIM3D_PROGRESS, "r", encoding="utf-8") as _pf:
                 sg = (json.load(_pf) or {}).get("seg")
             if sg and int(sg.get("n", 0)) == n:
-                pl = self._PLAN_BY_KEY.get(sg.get("plan"))
+                from fractions import Fraction
+                pl, fr = None, None
+                if sg.get("fr"):
+                    fr = [Fraction(x) for x in sg["fr"]]
+                    pl = self._plan_labels(fr)
+                else:                                   # purono (4 bhager) progress file
+                    pl = self._PLAN_BY_KEY.get(sg.get("plan"))
+                    if pl:
+                        fr = [Fraction(1, 2), Fraction(1, 2)] if pl is self._PLAN_HALF else None
+                        fr = fr or self._old_plan_fracs(pl)
                 ix, zp = int(sg.get("idx", 0)), (sg.get("zip") or "")
-                if pl and 0 <= ix < len(pl) and (ix == 0 or os.path.isfile(zp)):
-                    plan, idx, seg_zip = pl, ix, (zp if ix > 0 else None)
+                if pl and fr and 0 <= ix < len(pl) and (ix == 0 or os.path.isfile(zp)):
+                    plan, fracs, idx, seg_zip = pl, fr, ix, (zp if ix > 0 else None)
                     self.log(f"Part {n}: ager bhag kore kaj resume — bhag {idx + 1}/{len(plan)} theke shuru", "ok")
         except Exception:
             pass
@@ -25194,8 +25251,8 @@ class Anim3DWorker(AnimWorker):
         def sv():
             seg = None
             if plan:
-                key = next((k for k, v in self._PLAN_BY_KEY.items() if v is plan), None)
-                seg = {"n": n, "plan": key, "idx": idx, "zip": seg_zip or ""}
+                seg = {"n": n, "plan": None, "fr": [f"{f.numerator}/{f.denominator}" for f in fracs],
+                       "idx": idx, "zip": seg_zip or ""}
             self._save_progress(total, n, saved, seg)
         sv()
         while n <= total:
@@ -25216,7 +25273,7 @@ class Anim3DWorker(AnimWorker):
                     self._send_msg(msg, final=True)
                 if last_piece:
                     saved = self._get_part(n)
-                    plan, idx, seg_zip = None, 0, None
+                    plan, fracs, idx, seg_zip = None, None, 0, None
                     shutil.rmtree(ANIM3D_SEG, ignore_errors=True)
                     n += 1
                     sv()
@@ -25240,41 +25297,27 @@ class Anim3DWorker(AnimWorker):
                 if plan is None:
                     lim_fails += 1
                     if lim_fails >= 2:
-                        plan, idx, seg_zip, fails = self._PLAN_HALF, 0, None, 0
+                        from fractions import Fraction
+                        fracs = [Fraction(1, 2), Fraction(1, 2)]
+                        plan, idx, seg_zip, fails = self._plan_labels(fracs), 0, None, 0
                         sv()
                         self.log(f"Part {n}: 2 ta account-e limit — ebar kaj 2 bhag kore korbo (prothom adhek, tarpor baki)", "warn")
                     else:
                         self.log(f"Part {n}: limit, file toiri hoyni — onno account e abar submit hobe ({lim_fails}/2)", "warn")
-                elif plan is self._PLAN_HALF and idx == 0:
-                    plan, seg_zip, fails = self._PLAN_THIRDS, None, 0
-                    sv()
-                    self.log(f"Part {n}: prothom adheke-o limit — kaj 3 bhag kore 3 ta alada account e korbo", "warn")
-                elif plan is self._PLAN_HALF:
-                    plan, fails = self._PLAN_HALF_Q, 0
-                    sv()
-                    self.log(f"Part {n}: shesh adheke limit — shesh adhek 2 bhag kore (1/4 + 1/4) korbo", "warn")
-                elif plan is self._PLAN_THIRDS:
-                    if idx == 0:
-                        plan, seg_zip = self._PLAN_FOURTHS, None
-                    elif idx == 1:
-                        plan = self._PLAN_THIRDS_S1
-                    else:
-                        plan = self._PLAN_THIRDS_S2
-                    fails = 0
-                    sv()
-                    self.log(f"Part {n}: 3 bhag-e limit — je bhag e limit lagche seta bhege kaj 4 bhag kore korbo", "warn")
-                elif plan is self._PLAN_HALF_Q:
-                    if idx == 0:
-                        plan, seg_zip = self._PLAN_FOURTHS, None
-                    elif idx == 1:
-                        plan = self._PLAN_HALFQ_S1
-                    else:
-                        plan = self._PLAN_HALFQ_S2
-                    fails = 0
-                    sv()
-                    self.log(f"Part {n}: 3 bhag-e limit — je bhag e limit lagche seta bhege kaj 4 bhag kore korbo", "warn")
                 else:
-                    raise RuntimeError(f"Part {n}: 4 bhag kore-o limit — kaj thamlo. Pore Start dile Part {n} theke resume hobe")
+                    nf = self._split_more(fracs, idx)
+                    if nf is None:
+                        raise RuntimeError(f"Part {n}: {self.MAX_PIECES} bhag kore-o limit — kaj thamlo. Pore Start dile Part {n} theke resume hobe")
+                    old_len = len(fracs)
+                    fracs, plan, fails = nf, self._plan_labels(nf), 0
+                    if idx == 0:
+                        seg_zip = None
+                    sv()
+                    if old_len == 2 and idx == 0:
+                        self.log(f"Part {n}: prothom adheke-o limit — kaj {len(nf)} bhag kore {len(nf)} ta alada account e korbo", "warn")
+                    else:
+                        self.log(f"Part {n}: {old_len} bhag-e limit — je bhag e limit lagche seta bhege kaj {len(nf)} bhag kore korbo "
+                                 f"(max {self.MAX_PIECES})", "warn")
             except (AnimClosed, AnimLogin) as e:
                 fails += 1
                 self.log(f"Part {n}: {type(e).__name__} — abar chesta ({fails}/4)", "warn")
