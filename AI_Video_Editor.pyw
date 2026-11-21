@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.5"
+APP_VERSION = "3.2.6"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -22460,6 +22460,25 @@ ANIM3D_BASE = os.path.join(WORKSPACE, "Anim3D")
 ANIM3D_CFG = os.path.join(ANIM3D_BASE, "settings.json")       # 3D Animation section er shob input/prompt
 ANIM3D_INTRO_MSG = ("i have my script and audio ready.i 'm giving them to you.also i'm giving srt file also "
                     "right after your responce")
+ANIM3D_DEFAULT_PROMPT = (
+    "a ta amr voice over audio and script and srt..tumi akn video banano suru koro.akta important command seta holo tumi 3 second "
+    "er video file ready kore deo,video te convert korar dorker nai/video render koiro na,r akta prompt diba,ami oi 3s er video file "
+    "r prompt ta onno akta claude AI account k dibo,oi account oi 3s er por theke next 3s er kaj korbe,prompt ta amn vabe diba jate oi "
+    "account bujhte pare j amake next 3s er kaj krte hbe and 6s er file ta baneye dite hbe and r akta prompt banye dite hbe,jate ami oi "
+    "5s er file r prompt ta next account k deite pari,next account porer 3s er kaj korbe,amne cholte thakbe.protita account next 3s er "
+    "kaj krbe and akta kore prompt dibe sathe.karon akta account theke jdi ami beshi smy er banaite jai tahole limit chole asbe.")
+ANIM3D_DELIVER_MSG = (
+    "FILE DELIVERY RULE: when you finish, you MUST present every output file as a real downloadable file card in the chat "
+    "(call the present_files tool on the files in /mnt/user-data/outputs). Do NOT just write a path like "
+    "'Files are in /mnt/user-data/outputs' or the file name as text - I cannot download that. "
+    "I must see each file as a card with a Download button. After presenting the files, reply with only a short one-line summary.")
+ANIM3D_NO_RENDER_MSG = (
+    "IMPORTANT: Do NOT render any frames, do NOT create or include a frames/ folder (no JPG/PNG frames, no mp4, do not run finish.sh) "
+    "and do not spend time on QA renders. I will render the video myself from the web/ folder with another tool. "
+    "Only write/update the source files: the web/ folder (index.html, main.js, story.js, toon.js and the other scripts), voice.mp3, "
+    "script.txt, srt.srt, audio.py, timing.py and every other project file needed to continue in the next part. "
+    "The web/ code must keep window.renderFrame(f) and window.ready working, with the canvas id 'c' at 1080x1920 and 30 fps, "
+    "and story.js TOTAL must match the full animation length. The zip must NOT contain a frames/ folder.")
 ANIM3D_PROGRESS = os.path.join(ANIM3D_BASE, "progress.json")   # crash / PC off hole ekhan theke resume
 ANIM3D_OUT = os.path.join(ANIM3D_BASE, "output")              # 3D Animation er output files
 ANIM3D_SEG = os.path.join(ANIM3D_BASE, "seg_tmp")             # limit hole kaj bhag kore korar somoy majher temp zip (Files section e jabe na)
@@ -25184,6 +25203,8 @@ class Anim3DWorker(AnimWorker):
                     self.log(f"  {k} card download hoyni: {str(e)[:80]}", "warn")
                     continue
                 if self._file_ok(f, k):
+                    if k == "zip" and self.job.get("no_render"):
+                        self._strip_frames(f)
                     saved.append(f)
                     break
                 self.log(f"  {k} file download hoyeche kintu thik na ({os.path.basename(f)}) — bad dilam", "warn")
@@ -25191,6 +25212,115 @@ class Anim3DWorker(AnimWorker):
                     os.remove(f)
                 except Exception:
                     pass
+
+    def _strip_frames(self, path):
+        """no_render mode: Claude tobuo frames/ dhukale zip theke frames/ bad dey (porer part e upload chhoto hoy)."""
+        try:
+            with zipfile.ZipFile(path) as zi:
+                names = zi.namelist()
+                if not any(x.startswith("frames/") and not x.endswith("/") for x in names):
+                    return
+                tmp = path + ".nf.tmp"
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zo:
+                    for it in zi.infolist():
+                        if it.filename.startswith("frames/"):
+                            continue
+                        zo.writestr(it, zi.read(it.filename))
+            old = os.path.getsize(path) / 1048576
+            os.replace(tmp, path)
+            self.log(f"  {os.path.basename(path)} theke frames/ bad dilam ({old:.1f} MB -> {os.path.getsize(path) / 1048576:.1f} MB)", "ok")
+        except Exception as e:
+            self.log(f"  frames/ bad dewa gelo na: {str(e)[:80]}", "warn")
+
+    def _download_all(self, folder):
+        """Chat er 'Download all' button e click -> ekta bundle zip nambe (bhitore zip + txt). Seta khule folder e file gulo rakhe.
+        Return: extract howa file path er list ([] = hoyni, tokhon alada alada card theke nambe)."""
+        page = self.page
+        btn = None
+        try:
+            self._close_file_panel()
+            self._scroll_chat_bottom()
+            self._wait(800)
+            for loc in (page.get_by_role("button", name=re.compile(r"download all", re.I)),
+                        page.locator('button:has-text("Download all"), [role="button"]:has-text("Download all"), '
+                                     'a:has-text("Download all"), button[aria-label*="Download all" i]')):
+                for i in range(loc.count() - 1, -1, -1):        # shesh (notun) message er button
+                    if loc.nth(i).is_visible():
+                        btn = loc.nth(i)
+                        break
+                if btn is not None:
+                    break
+        except (AnimStop, AnimClosed):
+            raise
+        except Exception:
+            btn = None
+        if btn is None:
+            self.log("  'Download all' button paoa jayni — alada alada card theke nambo", "info")
+            return []
+        for how in ("click", "force", "js"):
+            n0 = len(self._dls)
+            try:
+                try:
+                    btn.scroll_into_view_if_needed(timeout=3000)
+                except Exception:
+                    pass
+                if how == "click":
+                    btn.click(timeout=4000)
+                elif how == "force":
+                    btn.click(timeout=4000, force=True)
+                else:
+                    btn.evaluate("el => el.click()")
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception as e:
+                self.log(f"  [dl-all] '{how}' error: {str(e).splitlines()[0][:70] if str(e) else ''}", "warn")
+                if page.is_closed():
+                    raise AnimClosed()
+                continue
+            self.log(f"  [dl-all] 'Download all' e click hoyeche ({how}) — download event er opekkha (max 30s)")
+            end = time.time() + 30
+            while time.time() < end and len(self._dls) <= n0:
+                self._wait(300)
+            if len(self._dls) <= n0:
+                continue
+            dl = self._dls[-1]
+            bundle = os.path.join(folder, "_download_all.zip")
+            out = []
+            try:
+                dl.save_as(bundle)
+                if not zipfile.is_zipfile(bundle):
+                    self.log("  [dl-all] download howa file zip na — alada card theke nambo", "warn")
+                    return []
+                with zipfile.ZipFile(bundle) as z:
+                    items = [it for it in z.infolist() if not it.is_dir() and os.path.basename(it.filename)]
+                    if not items or len(items) > 6:
+                        self.log(f"  [dl-all] bundle e {len(items)} ta file — asha korechilam zip + txt — alada card theke nambo", "warn")
+                        return []
+                    for it in items:
+                        name = re.sub(r'[\\/:*?"<>|]+', "_", os.path.basename(it.filename))
+                        dest = os.path.join(folder, name)
+                        k = 1
+                        while os.path.exists(dest):
+                            b0, e0 = os.path.splitext(name)
+                            dest = os.path.join(folder, f"{b0}_{k}{e0}")
+                            k += 1
+                        with z.open(it) as src, open(dest, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        out.append(dest)
+                self.log(f"  [dl-all] bundle khule {len(out)} ta file paoa gelo: " + ", ".join(os.path.basename(x) for x in out), "ok")
+                return out
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception as e:
+                self.log(f"  [dl-all] bundle error: {str(e)[:80]}", "warn")
+                return []
+            finally:
+                try:
+                    os.remove(bundle)
+                except Exception:
+                    pass
+        self.log("  'Download all' diye download hoyni — alada alada card theke nambo", "warn")
+        return []
 
     def _get_part(self, n, final=None, zip_only=False):
         """zip_only=True: bhag kore kaj er majher dhap — shudhu zip nibe, 'final' (temp folder) e rakhbe.
@@ -25210,14 +25340,31 @@ class Anim3DWorker(AnimWorker):
             need = ["zip", "doc"]         # majher part: zip + NEXT_PROMPT txt dutoi lagbe
         cards = self._collect_files(dl0, zip_only)
         if not cards:
-            raise RuntimeError("Response e kono generated file (Download button) paoa jayni")
-        if len(cards) < 2 and not zip_only:
+            self.log(f"Part {n}: response e kono download card nai (Claude shudhu path likhe diyeche?) — Claude ke chat e file card dite bolchi", "warn")
+        if cards and len(cards) < 2 and not zip_only:
             self.log(f"Part {n}: shudhu {len(cards)} ta file paoa gelo (2 ta asha korechilam)", "warn")
         saved = []
-        for b, t in cards:
+        if cards and not zip_only:                 # 1) age 'Download all' (ekta bundle zip, bhitore zip + txt)
+            for f in self._download_all(folder):
+                k = "zip" if f.lower().endswith(".zip") else "doc"
+                if self._file_ok(f, k):
+                    if k == "zip" and self.job.get("no_render"):
+                        self._strip_frames(f)
+                    saved.append(f)
+                else:
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+        have_k = {("zip" if x.lower().endswith(".zip") else "doc") for x in saved}
+        for b, t in cards:                         # 2) je file Download all e paini segulo alada card theke
             k = self._card_kind(t)
+            if k in have_k:
+                continue
             f = self._save_card(b, folder)
             if self._file_ok(f, "zip" if k == "zip" else "doc"):
+                if k == "zip" and self.job.get("no_render"):
+                    self._strip_frames(f)
                 saved.append(f)
             else:
                 self.log(f"  {os.path.basename(f)} download hoyeche kintu khali/kharap — bad dilam", "warn")
@@ -25249,9 +25396,11 @@ class Anim3DWorker(AnimWorker):
             nm = {"zip": "the ZIP file (complete zip with all the files)", "doc": "the NEXT_PROMPT .txt file"}
             ask = (" and ".join(nm[k] for k in miss))
             self.log(f"Part {n}: {', '.join(miss)} ekhono nai — Claude ke chat e chaichhi ({tries}/2)", "warn")
-            self._send_msg("You did not provide " + ask + " as a downloadable file card in your last reply. "
-                           "Please create/present it again now as a downloadable file (do not just describe it or paste it as text). "
-                           "Provide BOTH the ZIP file and the NEXT_PROMPT .txt file as downloadable files in this reply.", final=True)
+            what = " and ".join({"zip": "the ZIP file", "doc": "the NEXT_PROMPT .txt file"}[k] for k in miss)
+            self._send_msg("Your last reply did not give me " + what + " as a downloadable file card - I cannot download a file path "
+                           "or file name written as text. Please call the present_files tool NOW on the real file(s) in /mnt/user-data/outputs "
+                           "(re-create them first if they are missing) so each one appears as a card with a Download button. "
+                           "Do not write the path as text. Present only " + what + " in this reply.", final=True)
             self._fetch_missing(getattr(self, "_dl0", 0), miss, folder, saved)
             miss = missing()
         if miss:
@@ -25466,6 +25615,9 @@ class Anim3DWorker(AnimWorker):
             try:
                 self._open_fresh()
                 msg = self._seg_msg(plan, idx) if plan else None
+                if self.job.get("no_render"):
+                    msg = ((msg or "") + "\n\n" + ANIM3D_NO_RENDER_MSG).strip()
+                msg = ((msg or "") + "\n\n" + ANIM3D_DELIVER_MSG).strip()
                 last_piece = plan is None or idx == len(plan) - 1
                 cont = bool(plan) and idx > 0 and bool(seg_zip) and os.path.isfile(seg_zip)
                 if plan:
@@ -27093,6 +27245,7 @@ class Tab3Anim(tk.Frame):
             return
         cfg = {"script_path": self.d3["script"], "srt_path": self.d3["srt"], "audio_path": self.d3["audio"],
                "skill_dir": self.d3["skill"], "skill_name": self.d3_skill_name.get().strip(), "parts": self.d3_parts.get().strip(),
+               "no_render": bool(self.d3_norender.get()),
                "after": next((a for a, l in VOICE_AFTER_LABELS.items() if l == self.d3_after.get()), "none"),
                "script_text": self.d3_script_txt.get("1.0", "end-1c"),
                "srt_text": self.d3_srt_txt.get("1.0", "end-1c"),
@@ -27110,6 +27263,8 @@ class Tab3Anim(tk.Frame):
                    "audio": cfg.get("audio_path", ""), "skill": cfg.get("skill_dir", "")}
         self.d3_skill_name = tk.StringVar(value=cfg.get("skill_name") or "cartoon-audio-short")
         self.d3_parts = tk.StringVar(value=str(cfg.get("parts") or "1"))
+        self.d3_norender = tk.BooleanVar(value=bool(cfg.get("no_render", True)))
+        self.d3_norender.trace_add("write", self._3d_changed)
         self._3d_hub = None
         self._3d_busy = False
         self._3d_stop = threading.Event()
@@ -27129,6 +27284,8 @@ class Tab3Anim(tk.Frame):
         mkentry(top, self.d3_parts, width=5).pack(side="left")
         self.d3_parts.trace_add("write", self._3d_changed)
         mkbtn(top, "Reset progress", self._3d_reset_progress, "ghost", pady=3, padx=10).pack(side="left", padx=(10, 0))
+        tk.Checkbutton(top, text="Claude frames render korbe na", variable=self.d3_norender, bg=BG, fg=FG,
+                       selectcolor=PANEL2, activebackground=BG, activeforeground=FG).pack(side="left", padx=(14, 0))
         self.d3_after = tk.StringVar(value=VOICE_AFTER_LABELS.get(str(self._3d_cfg0.get("after") or "none"), "Kichu na"))
         self.d3_after.trace_add("write", self._3d_changed)
         ab = ttk.Combobox(top, textvariable=self.d3_after, values=list(VOICE_AFTER_LABELS.values()),
@@ -27378,9 +27535,14 @@ class Tab3Anim(tk.Frame):
         c = tk.Frame(f, bg=PANEL)
         c.pack(fill="both", expand=True)
         self.d3_zones["prompt"] = c
+        def _set_default_prompt():
+            self.d3_prompt.delete("1.0", "end")
+            self.d3_prompt.insert("1.0", ANIM3D_DEFAULT_PROMPT)
+            self._3d_changed()
+        mkbtn(c, "Default prompt boshao", _set_default_prompt, "ghost", pady=3, padx=10).pack(side="bottom", anchor="e", pady=(6, 0))
         self.d3_prompt = mktext(c)
         self.d3_prompt.pack(fill="both", expand=True)
-        self.d3_prompt.insert("1.0", cfg.get("prompt", ""))
+        self.d3_prompt.insert("1.0", (cfg.get("prompt") or "").strip() and cfg.get("prompt") or ANIM3D_DEFAULT_PROMPT)
         self.d3_prompt.edit_reset()
         self.d3_prompt.bind("<<Modified>>", lambda e: self._3d_txt_mod(self.d3_prompt))
 
@@ -27926,7 +28088,8 @@ class Tab3Anim(tk.Frame):
                "srt": self.d3_srt_txt.get("1.0", "end-1c").strip(),
                "audio": self.d3["audio"], "skill_dir": self.d3["skill"],
                "skill_name": self.d3_skill_name.get().strip() or "cartoon-audio-short",
-               "prompt": self.d3_prompt.get("1.0", "end-1c").strip()}
+               "prompt": self.d3_prompt.get("1.0", "end-1c").strip() or ANIM3D_DEFAULT_PROMPT,
+               "no_render": bool(self.d3_norender.get())}
         try:
             job["parts"] = int(self.d3_parts.get().strip())
             if job["parts"] < 1:
