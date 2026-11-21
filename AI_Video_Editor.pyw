@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.6"
+APP_VERSION = "3.2.7"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -22479,6 +22479,30 @@ ANIM3D_NO_RENDER_MSG = (
     "script.txt, srt.srt, audio.py, timing.py and every other project file needed to continue in the next part. "
     "The web/ code must keep window.renderFrame(f) and window.ready working, with the canvas id 'c' at 1080x1920 and 30 fps, "
     "and story.js TOTAL must match the full animation length. The zip must NOT contain a frames/ folder.")
+ANIM3D_FPS = 30                 # animation er fps (per second 30 frame)
+ANIM3D_CHUNK_SEC = 3            # protita Claude account koto second er kaj korbe (default prompt e 3s)
+
+
+def anim3d_audio_dur(path):
+    """Audio file er dorghyo (second) — ffprobe diye. Na pele None."""
+    try:
+        if not path or not os.path.isfile(path):
+            return None
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path],
+            stderr=subprocess.DEVNULL, creationflags=NOWIN, timeout=25)
+        d = float(out.decode("utf-8", "ignore").strip().splitlines()[0])
+        return d if d > 0 else None
+    except Exception:
+        return None
+
+
+def anim3d_plan(dur, chunk=ANIM3D_CHUNK_SEC, fps=ANIM3D_FPS):
+    """dur second er audio -> (total_frames, parts). Jemon 60s, 3s/part, 30fps -> (1800, 20)."""
+    chunk = max(0.5, float(chunk or ANIM3D_CHUNK_SEC))
+    return int(round(dur * fps)), max(1, int(math.ceil(dur / chunk - 1e-9)))
+
+
 ANIM3D_PROGRESS = os.path.join(ANIM3D_BASE, "progress.json")   # crash / PC off hole ekhan theke resume
 ANIM3D_OUT = os.path.join(ANIM3D_BASE, "output")              # 3D Animation er output files
 ANIM3D_SEG = os.path.join(ANIM3D_BASE, "seg_tmp")             # limit hole kaj bhag kore korar somoy majher temp zip (Files section e jabe na)
@@ -24980,6 +25004,40 @@ class Anim3DWorker(AnimWorker):
             self._scroll_chat_bottom()          # panel bondho hole chat nijer theke niche jay na — ami niche nichhi
         return closed
 
+    _ANCHOR_JS = r"""() => {
+        const vis = e => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
+            return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 4 && r.height > 4; };
+        const bs = [...document.querySelectorAll('button, [role="button"], a')].filter(b =>
+            vis(b) && /^\s*download all\s*$/i.test((b.innerText || b.getAttribute('aria-label') || '')));
+        if (!bs.length) return null;
+        let p = bs[bs.length - 1].parentElement;
+        while (p && p !== document.body) {
+            const cs = [...p.querySelectorAll('[data-aiv-card]')];
+            if (cs.length) return cs.map(e => parseInt(e.getAttribute('data-aiv-card')));
+            p = p.parentElement;
+        }
+        return null;
+    }"""
+
+    def _new_cards(self, dl0):
+        """Claude er shesh response er file card gulo. Age 'Download all' button er kache thaka card (dl0 er upor nirbhor kore na),
+        na pele ager moto dl0 er por theke."""
+        btns = self._dl_buttons()
+        try:
+            if btns and self._is_card(btns[0]):
+                idx = self.page.evaluate(self._ANCHOR_JS)
+                if idx:
+                    got = [btns[i] for i in sorted(set(idx)) if 0 <= i < len(btns)]
+                    if got:
+                        self._card_src = "download-all er kache"
+                        return got
+        except (AnimStop, AnimClosed):
+            raise
+        except Exception:
+            pass
+        self._card_src = f"dl0={dl0} er por"
+        return btns[dl0:]
+
     def _collect_files(self, dl0, zip_only=False):
         """Response shesh howar por notun file card (dl0 tar por) khuje, shudhu dorkari 2 ta (zip + txt/md) nibe."""
         cards = []
@@ -24990,8 +25048,7 @@ class Anim3DWorker(AnimWorker):
             self._scroll_chat_bottom()            # chat er majhe mouse + JS scroll + arrow button
             self._wait(2000)
             self._dismiss_popups()
-            btns = self._dl_buttons()
-            n = len(btns) - dl0
+            n = len(self._new_cards(dl0))
             if n >= need and n == last_n:
                 stable += 1
                 if stable >= 2:
@@ -24999,11 +25056,18 @@ class Anim3DWorker(AnimWorker):
             else:
                 stable = 0
             last_n = n
-        btns = self._dl_buttons()[dl0:]
+        btns = self._new_cards(dl0)
         for b in btns:
             cards.append((b, self._card_text(b)))
         if not cards:
+            try:
+                allc = self._dl_buttons()
+                self.log(f"  [diag] response e card paoa jayni: page e mot {len(allc)} ta card, dl0={dl0}: "
+                         + " || ".join(" | ".join(x.strip() for x in self._card_text(b).splitlines() if x.strip())[:40] for b in allc[-6:]), "warn")
+            except Exception:
+                pass
             return []
+        self.log(f"  [cards] {len(cards)} ta card ({getattr(self, '_card_src', '?')})")
         for _b, t in cards:
             self.log("  file card: " + " | ".join(x.strip() for x in t.splitlines() if x.strip())[:90])
         if zip_only:                              # bhag kore kaj: shudhu zip lagbe (txt dewar kotha na)
@@ -25181,7 +25245,7 @@ class Anim3DWorker(AnimWorker):
             self._scroll_chat_bottom()
             self._wait(2500)
             self._dismiss_popups()
-            cards = [(b, self._card_text(b)) for b in self._dl_buttons()[dl0:]]
+            cards = [(b, self._card_text(b)) for b in self._new_cards(dl0)]
             have = {self._card_kind(t) for _b, t in cards}
             if all(k in have for k in kinds):
                 break
@@ -25190,7 +25254,11 @@ class Anim3DWorker(AnimWorker):
             last_n = n
             if stable >= 6:           # onek ber dekhlam, notun card ashche na
                 break
-        cards = [(b, self._card_text(b)) for b in self._dl_buttons()[dl0:]]
+        cards = [(b, self._card_text(b)) for b in self._new_cards(dl0)]
+        if len(cards) >= 2 or len(kinds) >= 2:      # age 'Download all' (ekta bundle, bhitore zip + txt)
+            self._ingest(self._download_all(folder), saved, only=set(kinds))
+            kinds = [k for k in kinds
+                     if not any((x.lower().endswith(".zip")) == (k == "zip") for x in saved)]
         for k in list(kinds):
             for b, t in cards:
                 if self._card_kind(t) != k:
@@ -25232,6 +25300,21 @@ class Anim3DWorker(AnimWorker):
         except Exception as e:
             self.log(f"  frames/ bad dewa gelo na: {str(e)[:80]}", "warn")
 
+    def _ingest(self, files, saved, only=None):
+        """_download_all theke ashe file gulo check kore saved e rakhe. only = shudhu ei kind (zip/doc) rakhbe, baki mule felbe."""
+        for f in files:
+            k = "zip" if f.lower().endswith(".zip") else "doc"
+            ok = self._file_ok(f, k) and (only is None or k in only)
+            if ok and k == "zip" and self.job.get("no_render"):
+                self._strip_frames(f)
+            if ok:
+                saved.append(f)
+            else:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
     def _download_all(self, folder):
         """Chat er 'Download all' button e click -> ekta bundle zip nambe (bhitore zip + txt). Seta khule folder e file gulo rakhe.
         Return: extract howa file path er list ([] = hoyni, tokhon alada alada card theke nambe)."""
@@ -25241,15 +25324,21 @@ class Anim3DWorker(AnimWorker):
             self._close_file_panel()
             self._scroll_chat_bottom()
             self._wait(800)
+            tot = 0
             for loc in (page.get_by_role("button", name=re.compile(r"download all", re.I)),
                         page.locator('button:has-text("Download all"), [role="button"]:has-text("Download all"), '
-                                     'a:has-text("Download all"), button[aria-label*="Download all" i]')):
-                for i in range(loc.count() - 1, -1, -1):        # shesh (notun) message er button
+                                     'a:has-text("Download all"), button[aria-label*="Download all" i]'),
+                        page.get_by_text(re.compile(r"^\s*Download all\s*$", re.I))):
+                c = loc.count()
+                tot += c
+                for i in range(c - 1, -1, -1):        # shesh (notun) message er button
                     if loc.nth(i).is_visible():
                         btn = loc.nth(i)
                         break
                 if btn is not None:
                     break
+            if btn is None:
+                self.log(f"  'Download all' khujlam: {tot} ta element mile, kintu visible na", "warn")
         except (AnimStop, AnimClosed):
             raise
         except Exception:
@@ -25344,18 +25433,8 @@ class Anim3DWorker(AnimWorker):
         if cards and len(cards) < 2 and not zip_only:
             self.log(f"Part {n}: shudhu {len(cards)} ta file paoa gelo (2 ta asha korechilam)", "warn")
         saved = []
-        if cards and not zip_only:                 # 1) age 'Download all' (ekta bundle zip, bhitore zip + txt)
-            for f in self._download_all(folder):
-                k = "zip" if f.lower().endswith(".zip") else "doc"
-                if self._file_ok(f, k):
-                    if k == "zip" and self.job.get("no_render"):
-                        self._strip_frames(f)
-                    saved.append(f)
-                else:
-                    try:
-                        os.remove(f)
-                    except Exception:
-                        pass
+        if not zip_only:                           # 1) age 'Download all' (ekta bundle zip, bhitore zip + txt)
+            self._ingest(self._download_all(folder), saved)
         have_k = {("zip" if x.lower().endswith(".zip") else "doc") for x in saved}
         for b, t in cards:                         # 2) je file Download all e paini segulo alada card theke
             k = self._card_kind(t)
@@ -25525,6 +25604,42 @@ class Anim3DWorker(AnimWorker):
             return body + ", and give me the complete zip file and the next prompt txt file."
         return body + ", and give me the zip file. Do NOT give the txt file."
 
+    # ── Claude ke bole dewa: ei part koto nombor, kon second/frame, ar shesh part hole kaj COMPLETE kore thamte hobe ──
+    def _progress_msg(self, n, total, last_piece=True):
+        job = self.job
+        fps = int(job.get("fps") or ANIM3D_FPS)
+        chunk = float(job.get("chunk") or ANIM3D_CHUNK_SEC)
+        dur = job.get("audio_dur")
+        is_final = (n >= total)
+        L = ["PROJECT PROGRESS (follow exactly):"]
+        if dur:
+            F = int(round(dur * fps))
+            a, b = (n - 1) * chunk, min(n * chunk, dur)
+            if is_final:
+                b = dur
+            fa, fb = int(round(a * fps)), (F if is_final else int(round(b * fps)))
+            L.append(f"- The full voice-over audio is {dur:.2f} seconds = {F} frames at {fps} fps. "
+                     f"The whole video is split into {total} parts of about {chunk:g} seconds each.")
+            L.append(f"- This is PART {n} of {total}. Your range in this part: {a:.2f}s to {b:.2f}s "
+                     f"(frames {fa} to {fb}). Work ONLY on this range; do not animate past frame {fb}.")
+            if n > 1:
+                L.append(f"- Frames 0 to {fa} (0s to {a:.2f}s) are already finished in the attached zip. Keep them and keep "
+                         "the same characters, style, theme, colors and camera language so the video flows smoothly.")
+        else:
+            L.append(f"- This is PART {n} of {total} (about {chunk:g} seconds each). Use the audio/srt timing to find "
+                     f"the seconds that belong to this part.")
+        if is_final:
+            if last_piece:
+                L.append("- THIS IS THE FINAL PART. After this part the animation must be COMPLETE and FINISHED: the story "
+                         "must end exactly where the real audio ends (use the actual audio length, it may not be a round "
+                         "number), no unfinished scene. Do NOT write any NEXT_PROMPT file and do NOT plan another part - "
+                         "nothing comes after this. Deliver the complete project zip.")
+        else:
+            if last_piece:
+                L.append(f"- After this part there are {total - n} more part(s). Also give me the NEXT_PROMPT .txt file for "
+                         f"PART {n + 1} of {total} (it must say its seconds/frame range and that the last part is part {total}).")
+        return "\n".join(L)
+
     # ── progress (resume) ──
     def _save_progress(self, total, nxt, saved, seg=None):
         """seg = bhag kore kaj er obostha (part, plan, kon bhag porjonto shesh, majher zip) — app bondho hole-o resume hobe."""
@@ -25619,6 +25734,7 @@ class Anim3DWorker(AnimWorker):
                     msg = ((msg or "") + "\n\n" + ANIM3D_NO_RENDER_MSG).strip()
                 msg = ((msg or "") + "\n\n" + ANIM3D_DELIVER_MSG).strip()
                 last_piece = plan is None or idx == len(plan) - 1
+                msg = (self._progress_msg(n, total, last_piece) + "\n\n" + (msg or "")).strip()
                 cont = bool(plan) and idx > 0 and bool(seg_zip) and os.path.isfile(seg_zip)
                 if plan:
                     self.log(f"Part {n}: bhag {idx + 1}/{len(plan)} — {plan[idx]}", "info")
@@ -25692,8 +25808,33 @@ class Anim3DWorker(AnimWorker):
             os.remove(ANIM3D_PROGRESS)
         except Exception:
             pass
+        try:
+            self._verify_total(saved)
+        except Exception:
+            pass
         self.finished_ok = True
-        self.log(f"Shob {total} ta part shesh ✓ (Files section e dekho)", "ok")
+        self.log(f"Shob {total} ta part shesh ✓ — audio er shesh porjonto kaj complete, app nijei thamlo (Files section e dekho)", "ok")
+
+    def _verify_total(self, saved):
+        """Shesh zip er story.js er TOTAL ta audio er frame er shathe milche kina dekhe (shudhu log)."""
+        dur = self.job.get("audio_dur")
+        if not dur:
+            return
+        want = int(round(dur * int(self.job.get("fps") or ANIM3D_FPS)))
+        for f in saved or []:
+            if not str(f).lower().endswith(".zip") or not os.path.isfile(f):
+                continue
+            with zipfile.ZipFile(f) as z:
+                for nm in z.namelist():
+                    if nm.lower().endswith("story.js"):
+                        m = re.search(r"TOTAL\s*[:=]\s*(\d+)", z.read(nm).decode("utf-8", "ignore"))
+                        fps = int(self.job.get("fps") or ANIM3D_FPS)
+                        if m and abs(int(m.group(1)) - want) <= fps:          # +-1 second porjonto thik
+                            self.log(f"Check ✓ story.js TOTAL = {m.group(1)} frame, audio {dur:.2f}s er shathe milche", "ok")
+                        elif m:
+                            self.log(f"Check ⚠ story.js TOTAL = {m.group(1)} frame, audio {dur:.2f}s (~{want} frame) er theke onek alada — "
+                                     f"shesh part ta check koro", "warn")
+                        return
 
 
 class Tab3Anim(tk.Frame):
@@ -27245,6 +27386,7 @@ class Tab3Anim(tk.Frame):
             return
         cfg = {"script_path": self.d3["script"], "srt_path": self.d3["srt"], "audio_path": self.d3["audio"],
                "skill_dir": self.d3["skill"], "skill_name": self.d3_skill_name.get().strip(), "parts": self.d3_parts.get().strip(),
+               "chunk": self.d3_chunk.get().strip(), "auto_parts": bool(self.d3_auto.get()),
                "no_render": bool(self.d3_norender.get()),
                "after": next((a for a, l in VOICE_AFTER_LABELS.items() if l == self.d3_after.get()), "none"),
                "script_text": self.d3_script_txt.get("1.0", "end-1c"),
@@ -27256,6 +27398,29 @@ class Tab3Anim(tk.Frame):
     def _3d_changed(self, *_):
         self._sched("d3save", self._save_3d)
 
+    def _3d_chunk_sec(self):
+        try:
+            c = float(self.d3_chunk.get().strip())
+            return c if c > 0 else ANIM3D_CHUNK_SEC
+        except Exception:
+            return ANIM3D_CHUNK_SEC
+
+    def _3d_auto_parts(self):
+        """Audio duration theke frame + part ber kore. 'Auto' on thakle Part box nijei set hoy. Return: audio dur (ba None)."""
+        if not hasattr(self, "d3_info"):
+            return None
+        dur = anim3d_audio_dur(self.d3.get("audio"))
+        if not dur:
+            self.d3_info.configure(text="Audio dile app nijei bujhbe koto frame / koto part lagbe" if self.d3.get("audio") in ("", None)
+                                   else "Audio er duration pawa jayni (ffprobe lagbe) — Part box nije dao")
+            return None
+        frames, parts = anim3d_plan(dur, self._3d_chunk_sec())
+        if self.d3_auto.get():
+            self.d3_parts.set(str(parts))
+        self.d3_info.configure(text=f"Audio {dur:.1f}s  =  {frames} frame ({ANIM3D_FPS} fps)  =  {parts} part "
+                                    f"(protita {self._3d_chunk_sec():g}s)  —  shesh part e Claude nijei kaj complete kore dibe, app thame jabe")
+        return dur
+
     def _build_3d(self, f):
         cfg = self._load_3d_cfg()
         self._3d_cfg0 = cfg
@@ -27263,6 +27428,8 @@ class Tab3Anim(tk.Frame):
                    "audio": cfg.get("audio_path", ""), "skill": cfg.get("skill_dir", "")}
         self.d3_skill_name = tk.StringVar(value=cfg.get("skill_name") or "cartoon-audio-short")
         self.d3_parts = tk.StringVar(value=str(cfg.get("parts") or "1"))
+        self.d3_chunk = tk.StringVar(value=str(cfg.get("chunk") or ANIM3D_CHUNK_SEC))
+        self.d3_auto = tk.BooleanVar(value=bool(cfg.get("auto_parts", True)))
         self.d3_norender = tk.BooleanVar(value=bool(cfg.get("no_render", True)))
         self.d3_norender.trace_add("write", self._3d_changed)
         self._3d_hub = None
@@ -27283,6 +27450,12 @@ class Tab3Anim(tk.Frame):
         mklabel(top, "Part", 10, MUTED, bg=BG).pack(side="left", padx=(18, 6))
         mkentry(top, self.d3_parts, width=5).pack(side="left")
         self.d3_parts.trace_add("write", self._3d_changed)
+        mklabel(top, "Sec/part", 10, MUTED, bg=BG).pack(side="left", padx=(12, 4))
+        mkentry(top, self.d3_chunk, width=4).pack(side="left")
+        self.d3_chunk.trace_add("write", lambda *a: (self._3d_changed(), self._3d_auto_parts()))
+        tk.Checkbutton(top, text="Auto part (audio theke)", variable=self.d3_auto, bg=BG, fg=FG,
+                       selectcolor=PANEL2, activebackground=BG, activeforeground=FG,
+                       command=lambda: (self._3d_changed(), self._3d_auto_parts())).pack(side="left", padx=(8, 0))
         mkbtn(top, "Reset progress", self._3d_reset_progress, "ghost", pady=3, padx=10).pack(side="left", padx=(10, 0))
         tk.Checkbutton(top, text="Claude frames render korbe na", variable=self.d3_norender, bg=BG, fg=FG,
                        selectcolor=PANEL2, activebackground=BG, activeforeground=FG).pack(side="left", padx=(14, 0))
@@ -27294,6 +27467,8 @@ class Tab3Anim(tk.Frame):
         mklabel(top, "\u2190 sob part shesh hole", 9, MUTED, bg=BG).pack(side="left", padx=6)
         self.d3_state = mklabel(top, "Ready", 10, MUTED, bg=BG)
         self.d3_state.pack(side="right", padx=8)
+        self.d3_info = mklabel(f, "", 9, MUTED, bg=BG, anchor="w")
+        self.d3_info.pack(fill="x", padx=24, pady=(0, 4))
 
         # ── option bar ──
         self.d3_tab = tk.StringVar(value="input")
@@ -27445,6 +27620,8 @@ class Tab3Anim(tk.Frame):
         self.d3[k] = path
         self._3d_refresh_path(k)
         self._3d_changed()
+        if k == "audio":
+            self._3d_auto_parts()
         return True
 
     def _3d_clear(self, k):
@@ -28090,6 +28267,8 @@ class Tab3Anim(tk.Frame):
                "skill_name": self.d3_skill_name.get().strip() or "cartoon-audio-short",
                "prompt": self.d3_prompt.get("1.0", "end-1c").strip() or ANIM3D_DEFAULT_PROMPT,
                "no_render": bool(self.d3_norender.get())}
+        job["fps"], job["chunk"] = ANIM3D_FPS, self._3d_chunk_sec()
+        job["audio_dur"] = self._3d_auto_parts() or anim3d_audio_dur(job["audio"])   # Auto on hole Part box nijei set hoy
         try:
             job["parts"] = int(self.d3_parts.get().strip())
             if job["parts"] < 1:
