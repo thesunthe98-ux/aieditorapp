@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.7"
+APP_VERSION = "3.2.8"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -22479,6 +22479,19 @@ ANIM3D_NO_RENDER_MSG = (
     "script.txt, srt.srt, audio.py, timing.py and every other project file needed to continue in the next part. "
     "The web/ code must keep window.renderFrame(f) and window.ready working, with the canvas id 'c' at 1080x1920 and 30 fps, "
     "and story.js TOTAL must match the full animation length. The zip must NOT contain a frames/ folder.")
+ANIM3D_CALM_MSG = (
+    "ANTI-SHAKE RULES (very important, the video must feel calm and smooth, never shaky): "
+    "1) NEVER add frame-by-frame alternating jitter (no `f % 2 ? 1 : -1`, no +/- flip every frame, no random per-frame offsets) "
+    "to the camera or to characters. "
+    "2) Camera kicks/impacts: use ONE small eased nudge that decays smoothly over about 10 frames in a single direction "
+    "(roll at most about 0.5 degree, look offset tiny); no back-and-forth buzzing, and do not add a kick at every shot start. "
+    "3) Shiver/cold/tremble/idle: only slow soft sine motion (period at least 15 frames, very small amplitude), never a 15 Hz flicker. "
+    "4) Camera moves must be smooth: use easing (smootherstep) and long gentle glides, keep camera roll nearly constant inside a shot, "
+    "no sudden roll or look jumps inside a shot (only at real cuts). "
+    "5) If motion.js already has CALM / alt() helpers, keep and use them and do NOT remove or raise the CALM values; "
+    "never reintroduce the old per-frame shake from earlier code. "
+    "6) Impact shakes (BONK, slam) must be short (under 8 frames), soft and eased out, and used only on the one real impact frame. "
+    "Smooth, readable, cinematic motion is more important than energetic shaking.")
 ANIM3D_FPS = 30                 # animation er fps (per second 30 frame)
 ANIM3D_CHUNK_SEC = 3            # protita Claude account koto second er kaj korbe (default prompt e 3s)
 
@@ -25732,6 +25745,8 @@ class Anim3DWorker(AnimWorker):
                 msg = self._seg_msg(plan, idx) if plan else None
                 if self.job.get("no_render"):
                     msg = ((msg or "") + "\n\n" + ANIM3D_NO_RENDER_MSG).strip()
+                if self.job.get("calm"):
+                    msg = ((msg or "") + "\n\n" + ANIM3D_CALM_MSG).strip()
                 msg = ((msg or "") + "\n\n" + ANIM3D_DELIVER_MSG).strip()
                 last_piece = plan is None or idx == len(plan) - 1
                 msg = (self._progress_msg(n, total, last_piece) + "\n\n" + (msg or "")).strip()
@@ -27387,7 +27402,7 @@ class Tab3Anim(tk.Frame):
         cfg = {"script_path": self.d3["script"], "srt_path": self.d3["srt"], "audio_path": self.d3["audio"],
                "skill_dir": self.d3["skill"], "skill_name": self.d3_skill_name.get().strip(), "parts": self.d3_parts.get().strip(),
                "chunk": self.d3_chunk.get().strip(), "auto_parts": bool(self.d3_auto.get()),
-               "no_render": bool(self.d3_norender.get()),
+               "no_render": bool(self.d3_norender.get()), "calm": bool(self.d3_calm.get()),
                "after": next((a for a, l in VOICE_AFTER_LABELS.items() if l == self.d3_after.get()), "none"),
                "script_text": self.d3_script_txt.get("1.0", "end-1c"),
                "srt_text": self.d3_srt_txt.get("1.0", "end-1c"),
@@ -27431,6 +27446,8 @@ class Tab3Anim(tk.Frame):
         self.d3_chunk = tk.StringVar(value=str(cfg.get("chunk") or ANIM3D_CHUNK_SEC))
         self.d3_auto = tk.BooleanVar(value=bool(cfg.get("auto_parts", True)))
         self.d3_norender = tk.BooleanVar(value=bool(cfg.get("no_render", True)))
+        self.d3_calm = tk.BooleanVar(value=bool(cfg.get("calm", True)))
+        self.d3_calm.trace_add("write", self._3d_changed)
         self.d3_norender.trace_add("write", self._3d_changed)
         self._3d_hub = None
         self._3d_busy = False
@@ -27458,6 +27475,8 @@ class Tab3Anim(tk.Frame):
                        command=lambda: (self._3d_changed(), self._3d_auto_parts())).pack(side="left", padx=(8, 0))
         mkbtn(top, "Reset progress", self._3d_reset_progress, "ghost", pady=3, padx=10).pack(side="left", padx=(10, 0))
         tk.Checkbutton(top, text="Claude frames render korbe na", variable=self.d3_norender, bg=BG, fg=FG,
+                       selectcolor=PANEL2, activebackground=BG, activeforeground=FG).pack(side="left", padx=(14, 0))
+        tk.Checkbutton(top, text="Shake kom (calm)", variable=self.d3_calm, bg=BG, fg=FG,
                        selectcolor=PANEL2, activebackground=BG, activeforeground=FG).pack(side="left", padx=(14, 0))
         self.d3_after = tk.StringVar(value=VOICE_AFTER_LABELS.get(str(self._3d_cfg0.get("after") or "none"), "Kichu na"))
         self.d3_after.trace_add("write", self._3d_changed)
@@ -28266,7 +28285,7 @@ class Tab3Anim(tk.Frame):
                "audio": self.d3["audio"], "skill_dir": self.d3["skill"],
                "skill_name": self.d3_skill_name.get().strip() or "cartoon-audio-short",
                "prompt": self.d3_prompt.get("1.0", "end-1c").strip() or ANIM3D_DEFAULT_PROMPT,
-               "no_render": bool(self.d3_norender.get())}
+               "no_render": bool(self.d3_norender.get()), "calm": bool(self.d3_calm.get())}
         job["fps"], job["chunk"] = ANIM3D_FPS, self._3d_chunk_sec()
         job["audio_dur"] = self._3d_auto_parts() or anim3d_audio_dur(job["audio"])   # Auto on hole Part box nijei set hoy
         try:
