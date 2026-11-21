@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.4"
+APP_VERSION = "3.2.5"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -23330,6 +23330,76 @@ class AnimWorker:
                 break
             closed = True
             self.log("Popup cross button e click kore bondho kora holo", "ok")
+        try:
+            if self._dismiss_overlays():
+                closed = True
+        except (AnimStop, AnimClosed):
+            raise
+        except Exception:
+            pass
+        return closed
+
+    _POP_JS = r"""() => {
+        document.querySelectorAll('[data-aiv-pop]').forEach(e => e.removeAttribute('data-aiv-pop'));
+        const vis = e => { const s = getComputedStyle(e), r = e.getBoundingClientRect();
+            return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 4 && r.height > 4; };
+        const okLabel = /^(got it|dismiss|not now|maybe later|no,? thanks|skip|skip for now|close|okay|ok|later|remind me later|continue without|i understand|never mind)\b/i;
+        const badLabel = /sidebar|menu|panel|artifact|preview|download|upgrade|allow|deny|send|stop/i;
+        const badText = /Claude wants to|Allow once|Upgrade to keep chatting|resets? at|out of free messages|free messages return/i;
+        const cand = [];
+        for (const el of document.querySelectorAll('button, [role="button"]')) {
+            if (!vis(el)) continue;
+            if (el.closest('nav, form, fieldset, pre, [contenteditable="true"], [data-aiv-card]')) continue;
+            const label = (el.getAttribute('aria-label') || el.innerText || '').trim();
+            if (!label || label.length > 40 || !okLabel.test(label) || badLabel.test(label)) continue;
+            let p = el, ov = null;
+            while (p && p !== document.body) {
+                const cs = getComputedStyle(p);
+                const z = parseInt(cs.zIndex || '0', 10) || 0;
+                if (cs.position === 'fixed' || (cs.position === 'absolute' && z >= 50) ||
+                    p.matches('[role="dialog"],[role="alertdialog"],[role="alert"],[role="status"],[data-sonner-toast],[aria-modal="true"]')) { ov = p; break; }
+                p = p.parentElement;
+            }
+            if (!ov) continue;
+            if (ov.querySelector('[contenteditable="true"], textarea, input[type="file"]')) continue;
+            if (badText.test(ov.innerText || '')) continue;
+            cand.push(el);
+        }
+        cand.forEach((e, i) => e.setAttribute('data-aiv-pop', String(i)));
+        return cand.length;
+    }"""
+
+    def _dismiss_overlays(self):
+        """Dialog na-o hote pare emon popup / toast / banner ('Got it', 'Dismiss', 'Not now', X ...) khuje bondho kore.
+        Kono popup bondho hole True."""
+        page = self.page
+        if page is None:
+            return False
+        closed = False
+        for _ in range(3):
+            try:
+                n = int(page.evaluate(self._POP_JS) or 0)
+            except Exception:
+                return closed
+            if not n:
+                break
+            b = page.locator('[data-aiv-pop="0"]').first
+            try:
+                lab = (b.get_attribute("aria-label") or b.inner_text(timeout=1000) or "").strip()
+            except Exception:
+                lab = ""
+            try:
+                b.click(timeout=2000)
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception:
+                try:
+                    b.evaluate("el => el.click()")
+                except Exception:
+                    break
+            self._wait(700)
+            closed = True
+            self.log(f"Popup/banner bondho kora holo ('{lab[:30]}')", "ok")
         return closed
 
     def _has_limit_output(self):
@@ -23810,7 +23880,26 @@ class AnimWorker:
 
     def _fill(self, comp, prompt):
         page = self.page
-        comp.click()
+        self._dismiss_popups()
+        for _a in range(4):
+            try:
+                comp.click(timeout=5000)
+                break
+            except (AnimStop, AnimClosed):
+                raise
+            except Exception:
+                self.log("Prompt box e click hocche na (popup atkache?) — popup bondho kore abar chesta", "warn")
+                self._dismiss_popups()
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                self._wait(800)
+                c2 = self._composer()
+                if c2 is not None:
+                    comp = c2
+        else:
+            raise RuntimeError("Prompt box e click kora jachhe na (popup bondho hocche na)")
         want = max(10, min(len(prompt) // 2, 200))
         for how in (0, 1):
             try:
@@ -23834,7 +23923,9 @@ class AnimWorker:
 
     def _send(self, comp, first_msg=False):
         page = self.page
-        for _ in range(3):
+        for _att in range(6):
+            if _att:
+                self._dismiss_popups()
             btn = None
             for sel in ('button[aria-label*="Send" i]', 'button[aria-label*="send message" i]'):
                 try:
@@ -23855,6 +23946,12 @@ class AnimWorker:
             self._wait(2500)
             if len(self._ctext(comp)) < 10 or (first_msg and "/chat/" in (page.url or "")):
                 return
+            if self._is_streaming():
+                return
+            if self._limit_strict() or self._limit():      # limit popup hole _wait_start handle korbe
+                return
+            self.log(f"Message submit hoyni — popup/button atke thakte pare, abar chesta ({_att + 1}/6)", "warn")
+        raise RuntimeError("Message submit hoyni (Send e click hocche na / popup bondho hocche na)")
 
     def _resp_count(self):
         page = self.page
@@ -24527,6 +24624,7 @@ class Anim3DWorker(AnimWorker):
         """Onek file ekshathe attach (+ -> Upload or add files). Chat e file nam dekha porjonto opekkha."""
         page = self.page
         done = False
+        self._dismiss_popups()
         try:
             page.locator("input[type=file]").first.set_input_files(paths, timeout=8000)
             done = True
@@ -24553,6 +24651,8 @@ class Anim3DWorker(AnimWorker):
                         page.keyboard.press("Escape")
                     except Exception:
                         pass
+                    self._wait(500)
+                    self._dismiss_popups()                # popup er jonno click atkale bondho kore abar
         if not done:
             raise RuntimeError("file upload korar + / Upload button paoa jayni")
         first = os.path.basename(paths[0])
@@ -24626,6 +24726,7 @@ class Anim3DWorker(AnimWorker):
         """+ -> Skills (ba Plugins) e hover -> skill name e click."""
         page = self.page
         for attempt in range(3):
+            self._dismiss_popups()
             btn = self._plus_btn()
             if btn is None:
                 self._wait(1000)
@@ -25035,21 +25136,127 @@ class Anim3DWorker(AnimWorker):
                     raise AnimClosed()
         raise RuntimeError(f"file download hoyni ({last})")
 
+    @staticmethod
+    def _card_kind(text):
+        t = text or ""
+        if re.search(r"download all", t, re.I) or re.search(r"\b(JPG|JPEG|PNG|WEBP|GIF)\b|Image", t, re.I):
+            return "skip"
+        return "zip" if re.search(r"\bZIP\b", t, re.I) else "doc"
+
+    def _file_ok(self, path, kind):
+        """Download howa file thik ache kina (khali na / zip hole asol zip)."""
+        try:
+            if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                return False
+            if kind == "zip" and not zipfile.is_zipfile(path):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _fetch_missing(self, dl0, kinds, folder, saved, loops=20):
+        """dl0 er por je card gulo ache tar moddhe 'kinds' (zip/doc) er je file ekhono nai segulo download kore saved e rakhe."""
+        stable, last_n = 0, -1
+        for _ in range(loops):
+            self._close_file_panel()
+            self._scroll_chat_bottom()
+            self._wait(2500)
+            self._dismiss_popups()
+            cards = [(b, self._card_text(b)) for b in self._dl_buttons()[dl0:]]
+            have = {self._card_kind(t) for _b, t in cards}
+            if all(k in have for k in kinds):
+                break
+            n = len(cards)
+            stable = stable + 1 if n == last_n else 0
+            last_n = n
+            if stable >= 6:           # onek ber dekhlam, notun card ashche na
+                break
+        cards = [(b, self._card_text(b)) for b in self._dl_buttons()[dl0:]]
+        for k in list(kinds):
+            for b, t in cards:
+                if self._card_kind(t) != k:
+                    continue
+                try:
+                    f = self._save_card(b, folder)
+                except (AnimStop, AnimClosed, AnimLimit):
+                    raise
+                except Exception as e:
+                    self.log(f"  {k} card download hoyni: {str(e)[:80]}", "warn")
+                    continue
+                if self._file_ok(f, k):
+                    saved.append(f)
+                    break
+                self.log(f"  {k} file download hoyeche kintu thik na ({os.path.basename(f)}) — bad dilam", "warn")
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
     def _get_part(self, n, final=None, zip_only=False):
-        """zip_only=True: bhag kore kaj er majher dhap — shudhu zip nibe, 'final' (temp folder) e rakhbe."""
+        """zip_only=True: bhag kore kaj er majher dhap — shudhu zip nibe, 'final' (temp folder) e rakhbe.
+        Normal Part e zip + txt DUTOI na pele porer part e agabe na: age abar khujbe, tarpor Claude ke chat e file chaibe,
+        tarpor-o na pele error dibe (jate fresh Chrome e abar kaj hoy) — shudhu txt niye part n+1 shuru hobe na."""
         dl0 = getattr(self, "_dl0", 0)
         final = final or os.path.join(ANIM3D_OUT, f"part {n}")
         folder = final + ".tmp"
         shutil.rmtree(folder, ignore_errors=True)
         os.makedirs(folder, exist_ok=True)
+        total = max(1, int(self.job.get("parts") or 1))
+        if zip_only:
+            need = ["zip"]
+        elif n >= total:
+            need = []                     # shesh part: koyta file ashbe tar ThikThak nei — komopokkhe ekta file lagbe
+        else:
+            need = ["zip", "doc"]         # majher part: zip + NEXT_PROMPT txt dutoi lagbe
         cards = self._collect_files(dl0, zip_only)
         if not cards:
             raise RuntimeError("Response e kono generated file (Download button) paoa jayni")
         if len(cards) < 2 and not zip_only:
             self.log(f"Part {n}: shudhu {len(cards)} ta file paoa gelo (2 ta asha korechilam)", "warn")
         saved = []
-        for b, _t in cards:
-            saved.append(self._save_card(b, folder))
+        for b, t in cards:
+            k = self._card_kind(t)
+            f = self._save_card(b, folder)
+            if self._file_ok(f, "zip" if k == "zip" else "doc"):
+                saved.append(f)
+            else:
+                self.log(f"  {os.path.basename(f)} download hoyeche kintu khali/kharap — bad dilam", "warn")
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+        def missing():
+            if zip_only:
+                return [] if any(x.lower().endswith(".zip") for x in saved) else ["zip"]
+            m = []
+            if "zip" in need and not any(x.lower().endswith(".zip") for x in saved):
+                m.append("zip")
+            if "doc" in need and not any(not x.lower().endswith(".zip") for x in saved):
+                m.append("doc")
+            if not need and not saved:
+                m.append("zip")
+            return m
+
+        miss = missing()
+        if miss:                                   # 1) ekhono card ashe ni hoyto — abar onek opekkha kore khuji
+            self.log(f"Part {n}: {', '.join(miss)} file paoa jayni — abar khujchi (card ashte deri hote pare)", "warn")
+            self._fetch_missing(dl0, miss, folder, saved)
+            miss = missing()
+        tries = 0
+        while miss and tries < 2:                  # 2) Claude ke chat e boli file ta dite
+            tries += 1
+            nm = {"zip": "the ZIP file (complete zip with all the files)", "doc": "the NEXT_PROMPT .txt file"}
+            ask = (" and ".join(nm[k] for k in miss))
+            self.log(f"Part {n}: {', '.join(miss)} ekhono nai — Claude ke chat e chaichhi ({tries}/2)", "warn")
+            self._send_msg("You did not provide " + ask + " as a downloadable file card in your last reply. "
+                           "Please create/present it again now as a downloadable file (do not just describe it or paste it as text). "
+                           "Provide BOTH the ZIP file and the NEXT_PROMPT .txt file as downloadable files in this reply.", final=True)
+            self._fetch_missing(getattr(self, "_dl0", 0), miss, folder, saved)
+            miss = missing()
+        if miss:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise RuntimeError(f"Part {n}: {', '.join(miss)} file download hoyni — porer part e jabo na, abar chesta hobe")
         if os.path.isdir(final):
             shutil.rmtree(final, ignore_errors=True)
         os.replace(folder, final)
@@ -27674,8 +27881,39 @@ class Tab3Anim(tk.Frame):
         except Exception as e:
             self._3d_note(f"Reset error: {e}", "err")
 
+    def _3d_part_complete(self, n, total):
+        """Majher part e zip + txt dutoi thaka lagbe (nahole oi part complete na). Shesh part e kompokkhe ekta valid file."""
+        fl = self._3d_part_files(n)
+        zips = [f for f in fl if f.lower().endswith(".zip")]
+        docs = [f for f in fl if not f.lower().endswith(".zip")]
+        try:
+            if any(os.path.getsize(f) <= 0 for f in fl):
+                return False
+            if any(not zipfile.is_zipfile(f) for f in zips):
+                return False
+        except Exception:
+            return False
+        if n >= total:
+            return bool(fl)
+        return bool(zips) and bool(docs)
+
     def _3d_resume_info(self, total):
+        """Sobcheye shesh COMPLETE (zip + txt) part theke resume. Incomplete part (jemon shudhu txt) 'old_incomplete_part N' e soriye
+        rakhe, jate oi part abar notun kore generate hoy (porer part e na giye)."""
         k = self._3d_last_part()
+        while k >= 1 and not self._3d_part_complete(k, total):
+            src = os.path.join(ANIM3D_OUT, f"part {k}")
+            try:
+                dst = os.path.join(ANIM3D_OUT, f"old_incomplete_part {k}")
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst, ignore_errors=True)
+                shutil.move(src, dst)
+                self._3d_note(f"Part {k} incomplete (zip + txt dutoi nei) — Part {k} abar generate hobe", "warn")
+            except Exception as e:
+                self._3d_note(f"Part {k} incomplete folder soranor error: {e}", "err")
+                break
+            k = self._3d_last_part()
+        self._3d_refresh_files()
         if 1 <= k < total:
             return {"next": k + 1, "saved": self._3d_part_files(k)}
         return None
