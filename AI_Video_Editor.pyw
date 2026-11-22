@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.8"
+APP_VERSION = "3.2.9"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -19996,6 +19996,139 @@ class Tab2Editor(tk.Frame):
             last = f"v{n}"
         return ins, parts, last
 
+    def _t2_ovl_chunks_try(self, src, dst, ovs, W, H, total, venc, tmp):
+        """Many light leaks: instead of ONE giant ffmpeg graph (split x60 + 30 inputs -> can hang with 0% CPU),
+        the video is cut into small independent pieces (gap / leak window), each piece is its own tiny ffmpeg
+        (NVENC/x264, same settings), then all pieces are joined with concat -c copy.  Overlapping leaks are
+        merged into one piece (small blend chain).  Progress 77 -> 85 %.  Returns (ok, err)."""
+        F = self.FPS
+        nft = max(1, int(round(total * F)))
+        wins = []
+        for o in sorted(ovs, key=lambda x: x["t"]):
+            d = max(0.1, o["t1"] - o["t0"])
+            sf = max(0, int(round(o["t"] * F)))
+            if sf >= nft:
+                continue
+            ef = min(nft, sf + max(1, int(round(d * F))))
+            wins.append((sf, ef, o))
+        if not wins:
+            return False, "no overlay window"
+        clusters = []                                   # [start_f, end_f, [(sf, ef, o), ...]]
+        for sf, ef, o in wins:
+            if clusters and sf < clusters[-1][1]:
+                clusters[-1][1] = max(clusters[-1][1], ef)
+                clusters[-1][2].append((sf, ef, o))
+            else:
+                clusters.append([sf, ef, [(sf, ef, o)]])
+        pieces, pos = [], 0                             # (kind, start_f, end_f, members)
+        for a, b, mem in clusters:
+            if a > pos:
+                pieces.append(("g", pos, a, None))
+            pieces.append(("w", a, b, mem))
+            pos = b
+        if pos < nft:
+            pieces.append(("g", pos, nft, None))
+        hd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+        jobs = []
+        for k, (kind, a, b, mem) in enumerate(pieces):
+            n = b - a
+            out_k = os.path.join(tmp, f"ovc{k:04d}.mp4")
+            ss = ["-ss", f"{max(0.0, (a - 0.5) / F):.4f}"] if a > 0 else []      # half-frame back = frame-accurate
+            if kind == "g":
+                cmd = hd + ss + ["-i", src, "-an", "-vf", f"fps={F},format=yuv420p", "-r", str(F),
+                                 "-frames:v", str(n)] + list(venc) + ["-pix_fmt", "yuv420p", out_k]
+            else:
+                ins, parts, last = [], [f"[0:v]fps={F},format=gbrp[v0]"], "v0"
+                for j, (osf, oef, o) in enumerate(mem, 1):
+                    d = max(0.1, o["t1"] - o["t0"])
+                    ins += ["-ss", f"{o['t0']:.3f}", "-t", f"{d:.3f}", "-i", o["p"]]
+                    off = max(0.0, (osf - a) / F)
+                    pad = f",tpad=start_duration={off:.4f}:color=black" if off > 0.0005 else ""
+                    parts.append(f"[{j}:v]setpts=PTS-STARTPTS,fps={F},scale={W}:{H}:force_original_aspect_ratio=increase,"
+                                 f"crop={W}:{H}{pad},format=gbrp[l{j}]")
+                    parts.append(f"[{last}][l{j}]blend=all_mode=screen:all_opacity={o.get('op', 1.0):.3f}:"
+                                 f"eof_action=pass[v{j}]")
+                    last = f"v{j}"
+                parts.append(f"[{last}]format=yuv420p[o]")
+                cmd = hd + ss + ["-i", src] + ins + ["-filter_complex", ";".join(parts), "-map", "[o]", "-an",
+                                                      "-r", str(F), "-frames:v", str(n)] \
+                    + list(venc) + ["-pix_fmt", "yuv420p", out_k]
+            jobs.append((k, n, cmd, out_k))
+        frac = [0.0] * len(jobs)
+        nfs = [j[1] for j in jobs]
+
+        def _upd(k, f):
+            if f > frac[k]:
+                frac[k] = f
+            self._exp_prog(77.0 + 8.0 * sum(a * b for a, b in zip(frac, nfs)) / float(sum(nfs)))
+
+        def _one(job):
+            k, n, cmd, out_k = job
+            if self._exp_stop.is_set():
+                return k, False, "stopped"
+            sec = max(0.05, n / float(F))
+            _T2_TL.ctx = (0.0, 0.0, sec, lambda f, k=k: _upd(k, f))
+            try:
+                rc, err = self._run_ff(cmd, timeout=max(90.0, sec * 25.0))
+            finally:
+                _T2_TL.ctx = None
+            ok = rc == 0 and os.path.isfile(out_k) and os.path.getsize(out_k) > 0
+            if ok:
+                _upd(k, 1.0)
+            return k, ok, ("" if ok else err)
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        nw = max(1, min(2, len(jobs)))                  # 2 at a time: safe for RAM + NVENC session limit
+        self._pg_ctx = None
+        failed, done = [], 0
+        ex = ThreadPoolExecutor(max_workers=nw)
+        try:
+            futs = [ex.submit(_one, j) for j in jobs]
+            for fu in as_completed(futs):
+                k, ok, err = fu.result()
+                if self._exp_stop.is_set():
+                    for f_ in futs:
+                        f_.cancel()
+                    return False, "stopped"
+                if ok:
+                    done += 1
+                    self._exp_say(f"light leak piece {done}/{len(jobs)} \u2713")
+                else:
+                    failed.append((k, err))
+        finally:
+            ex.shutdown(wait=True)
+        if failed and not self._exp_stop.is_set():       # parallel e fail howa piece gula ekta ekta kore abar (safe)
+            still = []
+            for k, err0 in sorted(failed):
+                self._exp_say(f"light leak piece {k + 1}/{len(jobs)} abar chesta hochhe\u2026")
+                k2, ok2, err2 = _one(jobs[k])
+                if self._exp_stop.is_set():
+                    return False, "stopped"
+                if not ok2:
+                    still.append((k, err2 or err0))
+            failed = still
+        if failed:
+            return False, "piece %d: %s" % (failed[0][0] + 1, str(failed[0][1])[-250:])
+        lst = os.path.join(tmp, "ovc_list.txt")
+        with open(lst, "w", encoding="utf-8") as fh:
+            for _k, _n, _c, out_k in jobs:
+                fh.write("file '%s'\n" % out_k.replace("\\", "/").replace("'", "'\\''"))
+        rc, err = self._run_ff(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+                                "-i", lst, "-c", "copy", dst])
+        for _k, _n, _c, out_k in jobs:
+            self._rm(out_k)
+        return (rc == 0 and os.path.isfile(dst) and os.path.getsize(dst) > 0), err
+
+    def _t2_apply_ovl_chunked(self, src, dst, ovs, W, H, total, venc, tmp):
+        """Chunked light-leak overlay. GPU (NVENC) piece fail hole pura overlay CPU (libx264) diye abar kore."""
+        ok, err = self._t2_ovl_chunks_try(src, dst, ovs, W, H, total, venc, tmp)
+        if ok or self._exp_stop.is_set() or not any("nvenc" in str(a) for a in venc):
+            return ok, err
+        self._exp_say("GPU diye light leak hoyni \u2014 CPU diye korchhi\u2026")
+        cpu = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-bf", "0"]
+        ok2, err2 = self._t2_ovl_chunks_try(src, dst, ovs, W, H, total, cpu, tmp)
+        return ok2, ("" if ok2 else (err2 or err))
+
     def _t2_apply_ovl(self, src, dst, ovs, W, H, total, venc):
         """Screen-blend every overlay (light leak) onto the joined video at its timeline position."""
         F = self.FPS
@@ -20005,7 +20138,7 @@ class Tab2Editor(tk.Frame):
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + ins + \
               ["-filter_complex", ";".join(parts), "-map", "[o]", "-an", "-r", str(F)] + list(venc) + \
               ["-pix_fmt", "yuv420p", "-t", f"{total:.3f}", dst]
-        rc, err = self._run_ff(cmd)
+        rc, err = self._run_ff(cmd, timeout=max(180.0, total * 8.0))
         return (rc == 0 and os.path.isfile(dst) and os.path.getsize(dst) > 0), err
 
     # ───────── audio waveform under each clip ─────────
@@ -21505,6 +21638,12 @@ class Tab2Editor(tk.Frame):
         if out:
             self.app.note("Export shesh \u2713  " + out, OK, 12)
             self._exp_done_dialog(out)
+            ow = getattr(self, "_ovl_warn", None)
+            if ow:
+                self._ovl_warn = None
+                messagebox.showwarning("Export", "\u26a0 Light leak overlay boshano jayni \u2014 video leak chhara export hoyeche.\n\n"
+                                       "Karon:\n" + ow + "\n\n(Error ta video er pashe _leak_error.txt e save kora ache)",
+                                       parent=self.app)
         elif err:
             self.app.note("Export: " + str(err), WARN, 12)
             if "stop kora" not in str(err):
@@ -21683,6 +21822,7 @@ class Tab2Editor(tk.Frame):
                "mute": self.mute_var.get() == "1", "ovs": self._ov_export_list(),
                "sub_base": self._t2_sub_base(cum) if cfg.get("SUB_ENABLED") == "1" else []}
         self._exp_stop.clear()
+        self._ovl_warn = None
         self._exp_ui(True)
         self._exp_dlg_open(out)
         threading.Thread(target=self._exp_worker, args=(job,), daemon=True).start()
@@ -21717,7 +21857,7 @@ class Tab2Editor(tk.Frame):
         self._t2_eng = eng
         return eng
 
-    def _run_ff(self, cmd, cwd=None):
+    def _run_ff(self, cmd, cwd=None, timeout=None):
         """ffmpeg chalao; Stop (self._exp_stop) dile kill. Returns (returncode, stderr tail).
         Export cholar shomoy (self._pg_ctx = (base%, span%, seconds)) real progress % pathay."""
         ctx = getattr(_T2_TL, "ctx", None) or getattr(self, "_pg_ctx", None)
@@ -21746,11 +21886,16 @@ class Tab2Editor(tk.Frame):
                     except Exception:
                         pass
                 threading.Thread(target=rd, daemon=True).start()
+            t_begin = time.time()
             while p.poll() is None:
                 if self._exp_stop.is_set():
                     p.kill()
                     p.wait()
                     return -1, "stopped"
+                if timeout and time.time() - t_begin > timeout:        # hung ffmpeg -> kill, caller decides
+                    p.kill()
+                    p.wait()
+                    return -2, "timeout"
                 time.sleep(0.15)
             errf.seek(0)
             return p.returncode, errf.read().decode("utf-8", "replace")[-400:]
@@ -21970,7 +22115,7 @@ class Tab2Editor(tk.Frame):
         aenc = ["-c:a", "aac", "-b:a", "192k"] + (["-af", af] if af else []) + ["-t", f"{total:.3f}"]
         outp = os.path.abspath(out)
         self._rm(outp)
-        if ovs and ass:                                      # ONE encode: overlay + subtitle + audio
+        if ovs and ass and len(ovs) <= 3:                    # ONE encode: overlay + subtitle + audio (few leaks only)
             ins_o, parts_o, last_o = self._t2_ovl_graph(ovs, W, H)
             fc_o = ";".join(parts_o) + f";[{last_o}]format=yuv420p,ass=subs.ass[o]"
             cmd_o = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", vid] + ins_o + a_in \
@@ -21993,13 +22138,24 @@ class Tab2Editor(tk.Frame):
             self._exp_prog(77)
             self._exp_say("light leak overlay boshano hochhe\u2026")
             vid2 = os.path.join(tmp, "video_ov.mp4")
-            ok2, err2 = self._t2_apply_ovl(vid, vid2, ovs, W, H, total, venc)
+            if len(ovs) > 3:                                 # many leaks: small pieces (no giant graph -> no hang)
+                self._exp_say(f"light leak {len(ovs)} ta \u2014 chhoto chhoto piece e hochhe\u2026")
+                ok2, err2 = self._t2_apply_ovl_chunked(vid, vid2, ovs, W, H, total, venc, tmp)
+            else:
+                ok2, err2 = self._t2_apply_ovl(vid, vid2, ovs, W, H, total, venc)
             if self._exp_stop.is_set():
                 return False, "stopped"
             if ok2:
                 vid = vid2
             else:
                 self._exp_say("Overlay fail \u2014 overlay chhara export korchhi: " + str(err2)[-120:])
+                self._ovl_warn = str(err2 or "unknown error")[-400:]
+                try:
+                    with open(os.path.splitext(os.path.abspath(out))[0] + "_leak_error.txt", "w",
+                              encoding="utf-8") as _fh:
+                        _fh.write("Light leak overlay fail:\n" + str(err2) + "\n\nencoder: " + " ".join(map(str, venc)))
+                except Exception:
+                    pass
         base = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", vid] + a_in + ["-map", "0:v:0", "-map", "1:a:0"]
         self._exp_prog(85)
         self._pg_ctx = (85.0, 14.0, max(0.05, total))
