@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.2.9"
+APP_VERSION = "3.3.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -20041,7 +20041,7 @@ class Tab2Editor(tk.Frame):
                 ins, parts, last = [], [f"[0:v]fps={F},format=gbrp[v0]"], "v0"
                 for j, (osf, oef, o) in enumerate(mem, 1):
                     d = max(0.1, o["t1"] - o["t0"])
-                    ins += ["-ss", f"{o['t0']:.3f}", "-t", f"{d:.3f}", "-i", o["p"]]
+                    ins += ["-thread_queue_size", "512", "-ss", f"{o['t0']:.3f}", "-t", f"{d:.3f}", "-i", o["p"]]
                     off = max(0.0, (osf - a) / F)
                     pad = f",tpad=start_duration={off:.4f}:color=black" if off > 0.0005 else ""
                     parts.append(f"[{j}:v]setpts=PTS-STARTPTS,fps={F},scale={W}:{H}:force_original_aspect_ratio=increase,"
@@ -20054,6 +20054,47 @@ class Tab2Editor(tk.Frame):
                                                       "-r", str(F), "-frames:v", str(n)] \
                     + list(venc) + ["-pix_fmt", "yuv420p", out_k]
             jobs.append((k, n, cmd, out_k))
+        _cpu_venc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-bf", "0"]
+        prep_mode = [False]                              # True = overlays are pre-rendered (no -ss/-t, equal length)
+        prep_files = []
+
+        def _b_cmd(k, venc_=None):
+            """Variant B for a leak piece: each overlay is first rendered by its own tiny single-input ffmpeg to a clean
+            clip of EXACTLY the piece length (scaled, cropped, black-padded); then both streams have the same length ->
+            no EOF / seek handling inside the blend graph (that is where some ffmpeg builds hang). None = prep failed."""
+            kind, a, b, mem = pieces[k]
+            n = b - a
+            out_k = os.path.join(tmp, f"ovc{k:04d}.mp4")
+            ss = ["-ss", f"{max(0.0, (a - 0.5) / F):.4f}"] if a > 0 else []
+            ins, parts, last = [], [f"[0:v]fps={F},setpts=PTS-STARTPTS,format=gbrp[v0]"], "v0"
+            for j, (osf, oef, o) in enumerate(mem, 1):
+                d = max(0.1, o["t1"] - o["t0"])
+                off = max(0.0, (osf - a) / F)
+                pf = os.path.join(tmp, f"ovp{k:04d}_{j}.mkv")
+                vf = (f"fps={F},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                      + (f"tpad=start_duration={off:.4f}:color=black," if off > 0.0005 else "")
+                      + f"tpad=stop_duration={n / float(F) + 3:.3f}:color=black,trim=end_frame={n + 12},setpts=PTS-STARTPTS,"
+                      f"format=yuv420p")
+                pc = ["ffmpeg", "-nostdin", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{o['t0']:.3f}",
+                      "-t", f"{d:.3f}", "-i", o["p"], "-an", "-vf", vf, "-r", str(F), "-frames:v", str(n + 12),
+                      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", "-pix_fmt", "yuv420p", pf]
+                _T2_TL.ctx = (0.0, 0.0, max(0.05, n / float(F)), lambda f: None)
+                try:
+                    rc_, er_ = self._run_ff(pc, timeout=300.0, stall=45.0)
+                finally:
+                    _T2_TL.ctx = None
+                if self._exp_stop.is_set() or rc_ != 0 or not os.path.isfile(pf) or os.path.getsize(pf) == 0:
+                    return None
+                prep_files.append(pf)
+                ins += ["-i", pf]
+                parts.append(f"[{j}:v]setpts=PTS-STARTPTS,format=gbrp[l{j}]")
+                parts.append(f"[{last}][l{j}]blend=all_mode=screen:all_opacity={o.get('op', 1.0):.3f}[v{j}]")
+                last = f"v{j}"
+            parts.append(f"[{last}]format=yuv420p[o]")
+            return hd + ss + ["-i", src] + ins + ["-filter_complex", ";".join(parts), "-map", "[o]", "-an",
+                                                   "-r", str(F), "-frames:v", str(n)] \
+                + list(venc_ if venc_ is not None else venc) + ["-pix_fmt", "yuv420p", out_k]
+
         frac = [0.0] * len(jobs)
         nfs = [j[1] for j in jobs]
 
@@ -20067,18 +20108,65 @@ class Tab2Editor(tk.Frame):
             if self._exp_stop.is_set():
                 return k, False, "stopped"
             sec = max(0.05, n / float(F))
+            if prep_mode[0] and pieces[k][0] == "w" and "\\ovp" not in " ".join(map(str, cmd)) and "/ovp" not in " ".join(map(str, cmd)):
+                _bc = _b_cmd(k)
+                if _bc:
+                    cmd = _bc
             _T2_TL.ctx = (0.0, 0.0, sec, lambda f, k=k: _upd(k, f))
+            hard = max(900.0, sec * 150.0)               # very generous total limit (slow PC / heavy 4K leak)
             try:
-                rc, err = self._run_ff(cmd, timeout=max(90.0, sec * 25.0))
+                rc, err = self._run_ff(cmd, timeout=hard, stall=45.0)
             finally:
                 _T2_TL.ctx = None
             ok = rc == 0 and os.path.isfile(out_k) and os.path.getsize(out_k) > 0
             if ok:
                 _upd(k, 1.0)
+            else:
+                try:
+                    if not getattr(self, "_ffver_logged", False):
+                        self._ffver_logged = True
+                        _vv = subprocess.run(["ffmpeg", "-version"], capture_output=True, creationflags=NOWIN, timeout=10)
+                        with open(os.path.join(WORKSPACE, "leak_debug.txt"), "a", encoding="utf-8") as _dh:
+                            _dh.write(_vv.stdout.decode("utf-8", "replace").split("\n")[0] + "\n")
+                except Exception:
+                    pass
+                try:
+                    with open(os.path.join(WORKSPACE, "leak_debug.txt"), "a", encoding="utf-8") as _dh:
+                        _dh.write("---- %s  piece %d/%d  kind=%s frames %s-%s  rc=%s\n%s\nERR: %s\n\n" % (
+                            time.strftime("%H:%M:%S"), k + 1, len(jobs), pieces[k][0], pieces[k][1], pieces[k][2],
+                            rc, " ".join('"%s"' % str(c_) for c_ in cmd), str(err)[-300:]))
+                except Exception:
+                    pass
             return k, ok, ("" if ok else err)
 
+        def _cpu_cmd(cmd):
+            """Same ffmpeg command but encoded with libx264 (used when a piece hangs/fails on NVENC)."""
+            c, i = list(cmd), 0
+            out = []
+            while i < len(c):
+                if c[i] == "-c:v" and i + 1 < len(c) and "nvenc" in str(c[i + 1]):
+                    i += 2
+                    while i < len(c) and c[i] in ("-preset", "-rc", "-cq", "-b:v", "-bf", "-tune", "-profile:v",
+                                                  "-spatial-aq", "-temporal-aq", "-rc-lookahead", "-qp", "-maxrate",
+                                                  "-bufsize", "-gpu", "-level") and i + 1 < len(c):
+                        i += 2
+                    out += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-bf", "0"]
+                    continue
+                out.append(c[i])
+                i += 1
+            return out
+
+        def _plain_job(job):
+            """Last resort for ONE piece: no leak (plain copy of the video part) -> export never loses the other leaks."""
+            k, n, cmd, out_k = job
+            kind, a, b, mem = pieces[k]
+            ss = ["-ss", f"{max(0.0, (a - 0.5) / F):.4f}"] if a > 0 else []
+            c2 = hd + ss + ["-i", src, "-an", "-vf", f"fps={F},format=yuv420p", "-r", str(F),
+                            "-frames:v", str(n)] + list(venc) + ["-pix_fmt", "yuv420p", out_k]
+            return (k, n, c2, out_k)
+
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        nw = max(1, min(2, len(jobs)))                  # 2 at a time: safe for RAM + NVENC session limit
+        nw = 1 if any("nvenc" in str(a_) for a_ in venc) else max(1, min(2, len(jobs)))   # NVENC: 1 at a time (no stall)
         self._pg_ctx = None
         failed, done = [], 0
         ex = ThreadPoolExecutor(max_workers=nw)
@@ -20097,18 +20185,54 @@ class Tab2Editor(tk.Frame):
                     failed.append((k, err))
         finally:
             ex.shutdown(wait=True)
-        if failed and not self._exp_stop.is_set():       # parallel e fail howa piece gula ekta ekta kore abar (safe)
-            still = []
+        if failed and not self._exp_stop.is_set():
+            bad = []
             for k, err0 in sorted(failed):
-                self._exp_say(f"light leak piece {k + 1}/{len(jobs)} abar chesta hochhe\u2026")
-                k2, ok2, err2 = _one(jobs[k])
-                if self._exp_stop.is_set():
-                    return False, "stopped"
-                if not ok2:
-                    still.append((k, err2 or err0))
-            failed = still
-        if failed:
-            return False, "piece %d: %s" % (failed[0][0] + 1, str(failed[0][1])[-250:])
+                ok2, err2, jk = False, err0, jobs[k]
+                hung = "timeout" in str(err0)
+                if not hung:                                     # normal fail (not a hang): plain retry once
+                    self._exp_say(f"light leak piece {k + 1}/{len(jobs)} abar chesta hochhe\u2026")
+                    k2, ok2, err2 = _one(jk)
+                    if self._exp_stop.is_set():
+                        return False, "stopped"
+                if not ok2 and pieces[k][0] == "w":              # variant B: pre-rendered overlay (hang-proof graph)
+                    self._exp_say(f"light leak piece {k + 1}/{len(jobs)} \u2014 onno poddhotite korchhi\u2026")
+                    for ve in ([None] + ([_cpu_venc] if any("nvenc" in str(a_) for a_ in venc) else [])):
+                        bc = _b_cmd(k, ve)
+                        if self._exp_stop.is_set():
+                            return False, "stopped"
+                        if not bc:
+                            break
+                        pm, prep_mode[0] = prep_mode[0], False
+                        try:
+                            k2, ok2, err2 = _one((k, jk[1], bc, jk[3]))
+                        finally:
+                            prep_mode[0] = pm
+                        if self._exp_stop.is_set():
+                            return False, "stopped"
+                        if ok2:
+                            prep_mode[0] = True                  # next leak pieces go straight to variant B
+                            break
+                elif not ok2 and any("nvenc" in str(a_) for a_ in venc):
+                    k2, ok2, err2 = _one((jk[0], jk[1], _cpu_cmd(jk[2]), jk[3]))
+                    if self._exp_stop.is_set():
+                        return False, "stopped"
+                if not ok2:                                       # last resort: this piece without its leak
+                    self._exp_say(f"light leak piece {k + 1}/{len(jobs)} fail \u2014 oi piece leak chhara hochhe")
+                    pj = _plain_job(jobs[k])
+                    k2, ok2, err2 = _one(pj)
+                    if self._exp_stop.is_set():
+                        return False, "stopped"
+                    if not ok2 and any("nvenc" in str(a_) for a_ in venc):
+                        k2, ok2, err2 = _one((pj[0], pj[1], _cpu_cmd(pj[2]), pj[3]))
+                    if not ok2:
+                        return False, "piece %d: %s" % (k + 1, str(err2 or err0)[-250:])
+                    bad.append(k + 1)
+            if bad:
+                try:
+                    self._ovl_partial = "piece " + ", ".join(map(str, bad)) + " e leak boshano jayni (baki leak thik ache)"
+                except Exception:
+                    pass
         lst = os.path.join(tmp, "ovc_list.txt")
         with open(lst, "w", encoding="utf-8") as fh:
             for _k, _n, _c, out_k in jobs:
@@ -20138,7 +20262,7 @@ class Tab2Editor(tk.Frame):
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + ins + \
               ["-filter_complex", ";".join(parts), "-map", "[o]", "-an", "-r", str(F)] + list(venc) + \
               ["-pix_fmt", "yuv420p", "-t", f"{total:.3f}", dst]
-        rc, err = self._run_ff(cmd, timeout=max(180.0, total * 8.0))
+        rc, err = self._run_ff(cmd, timeout=max(900.0, total * 60.0), stall=90.0)
         return (rc == 0 and os.path.isfile(dst) and os.path.getsize(dst) > 0), err
 
     # ───────── audio waveform under each clip ─────────
@@ -21638,6 +21762,10 @@ class Tab2Editor(tk.Frame):
         if out:
             self.app.note("Export shesh \u2713  " + out, OK, 12)
             self._exp_done_dialog(out)
+            op_ = getattr(self, "_ovl_partial", None)
+            if op_:
+                self._ovl_partial = None
+                messagebox.showinfo("Export", "\u2139 Export hoyeche, kintu: " + op_, parent=self.app)
             ow = getattr(self, "_ovl_warn", None)
             if ow:
                 self._ovl_warn = None
@@ -21857,32 +21985,51 @@ class Tab2Editor(tk.Frame):
         self._t2_eng = eng
         return eng
 
-    def _run_ff(self, cmd, cwd=None, timeout=None):
+    def _run_ff(self, cmd, cwd=None, timeout=None, stall=None):
         """ffmpeg chalao; Stop (self._exp_stop) dile kill. Returns (returncode, stderr tail).
         Export cholar shomoy (self._pg_ctx = (base%, span%, seconds)) real progress % pathay."""
         ctx = getattr(_T2_TL, "ctx", None) or getattr(self, "_pg_ctx", None)
         prog = bool(ctx and ctx[2] > 0 and cmd and str(cmd[0]).lower().startswith("ffmpeg"))
+        if cmd and str(cmd[0]).lower().startswith("ffmpeg") and "-nostdin" not in cmd:
+            cmd = [cmd[0], "-nostdin"] + list(cmd[1:])
         if prog:
             cmd = [cmd[0], "-progress", "pipe:1", "-nostats"] + list(cmd[1:])
         errf = tempfile.TemporaryFile()
+        _last = [time.time()]                                   # last time ffmpeg made REAL progress (stall watchdog)
+        _seen = {}
         try:
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE if prog else subprocess.DEVNULL, stderr=errf,
-                                 creationflags=NOWIN, cwd=cwd)
+                                 stdin=subprocess.DEVNULL, creationflags=NOWIN, cwd=cwd)
             if prog:
                 def rd(pp=p, c=ctx):
                     try:
                         for ln in pp.stdout:
-                            if ln.startswith(b"out_time_us=") or ln.startswith(b"out_time_ms="):
-                                try:
+                            try:
+                                if ln.startswith(b"frame=") or ln.startswith(b"out_time_us=") \
+                                        or ln.startswith(b"out_time_ms="):
+                                    _v = ln.strip()
+                                    if _v != _seen.get(_v.split(b"=")[0]):      # value moved = real progress
+                                        _seen[_v.split(b"=")[0]] = _v
+                                        if not _v.endswith(b"N/A") and not _v.endswith(b"=0"):
+                                            _last[0] = time.time()
+                            except Exception:
+                                pass
+                            try:
+                                if ln.startswith(b"out_time_us=") or ln.startswith(b"out_time_ms="):
                                     us = int(ln.split(b"=", 1)[1])
-                                except ValueError:
-                                    continue
-                                if us >= 0:
-                                    fr_ = min(1.0, us / 1e6 / c[2])
-                                    if len(c) > 3 and c[3]:
-                                        c[3](fr_)
-                                    else:
-                                        self._exp_prog(c[0] + c[1] * fr_)
+                                    if us >= 0:
+                                        fr_ = min(1.0, us / 1e6 / c[2])
+                                        if len(c) > 3 and c[3]:
+                                            c[3](fr_)
+                                        else:
+                                            self._exp_prog(c[0] + c[1] * fr_)
+                            except Exception:
+                                pass                    # keep draining ffmpeg's pipe no matter what
+                    except Exception:
+                        pass
+                    try:                                # drain whatever is left so ffmpeg can never block on a full pipe
+                        while pp.stdout.read(65536):
+                            pass
                     except Exception:
                         pass
                 threading.Thread(target=rd, daemon=True).start()
@@ -21896,6 +22043,10 @@ class Tab2Editor(tk.Frame):
                     p.kill()
                     p.wait()
                     return -2, "timeout"
+                if stall and prog and time.time() - _last[0] > stall:  # no progress for `stall` sec = really hung
+                    p.kill()
+                    p.wait()
+                    return -2, "timeout (ffmpeg %d sec atke ache)" % int(stall)
                 time.sleep(0.15)
             errf.seek(0)
             return p.returncode, errf.read().decode("utf-8", "replace")[-400:]
@@ -22136,6 +22287,7 @@ class Tab2Editor(tk.Frame):
         if ovs:                                              # light leak overlay line: screen-blend on the joined video
             self._pg_ctx = None
             self._exp_prog(77)
+            self._ovl_partial = None
             self._exp_say("light leak overlay boshano hochhe\u2026")
             vid2 = os.path.join(tmp, "video_ov.mp4")
             if len(ovs) > 3:                                 # many leaks: small pieces (no giant graph -> no hang)
