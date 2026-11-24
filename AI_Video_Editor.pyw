@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.1"
+APP_VERSION = "3.3.2"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -33772,6 +33772,22 @@ class App(_Base):
             return False
         low = body.lower()
         st = d["stages"]
+        if low.startswith("[parts]"):
+            mm = re.match(r"^\[parts\]\s*(?:total\s+(\d+)|(\d+)\s+(start|done))", low)
+            if mm:
+                if mm.group(1):
+                    d["parts_total"] = max(1, int(mm.group(1)))
+                else:
+                    k = int(mm.group(2))
+                    tot = max(d.get("parts_total", 1), k)
+                    if mm.group(3) == "start":
+                        d["parts_cur"] = k
+                        d["detail"] = f"MP3: Part {k}/{tot} generate hocche\u2026" if tot > 1 else d["detail"]
+                    else:
+                        d.setdefault("parts_done", set()).add(k)
+                        if tot > 1:
+                            d["detail"] = f"MP3: Part {k}/{tot} done" + (" \u2014 ebar Part " + str(k + 1) if k < tot else " \u2014 jora lagano hocche\u2026")
+            return False
         before = self._voice_cur_stage(d)
         if low.startswith(("mp3 saved", "mp3 notun kore")) and "mp3" in st:
             d["done"].add("mp3")
@@ -33891,7 +33907,20 @@ class App(_Base):
             elif s_ in d["bad"]:
                 put(s_, lb, text=nm + " \u2717", fg=BAD)
             elif s_ == cur and run:
-                put(s_, lb, text=nm + " " + dots, fg=_mix(ACCENT, FG, pulse))
+                pt = d.get("parts_total", 1) if s_ == "mp3" else 1
+                if pt > 1:
+                    pd_, pc_ = d.get("parts_done", set()), d.get("parts_cur")
+                    segs = []
+                    for k in range(1, pt + 1):
+                        if k in pd_:
+                            segs.append(f"Part {k} \u2713")
+                        elif k == pc_:
+                            segs.append(f"Part {k} {dots}")
+                        else:
+                            segs.append(f"Part {k}")
+                    put(s_, lb, text=nm + "  [" + "  |  ".join(segs) + "]", fg=_mix(ACCENT, FG, pulse))
+                else:
+                    put(s_, lb, text=nm + " " + dots, fg=_mix(ACCENT, FG, pulse))
             elif s_ == cur:
                 put(s_, lb, text=nm + " \u25a0", fg=WARN)
             else:
@@ -36431,6 +36460,7 @@ class VoiceRunner:
             self.log(f"  {credits} credits > {limit} — script line hishebe adha korlam "
                      f"(ei account e prothom ongsho, baki porer account e)")
             leftovers.insert(0, rest)
+            self.log(f"  [parts] total {getattr(self, '_parts_other', 0) + 1 + len(leftovers)}")
             cur = first
             self._cancel_split_dialog(page)
             ta = self.find_editor(page)
@@ -36716,7 +36746,7 @@ class VoiceRunner:
         d.value.save_as(out_mp3)
         if not os.path.exists(out_mp3) or os.path.getsize(out_mp3) < 1000:
             raise RuntimeError("MP3 download thik hoyni")
-        self.log(f"  MP3 saved: {out_mp3}")
+        self.log(f"  Part file saved: {out_mp3}")
 
     def zamzar_dismiss(self, page):
         try:
@@ -36956,15 +36986,57 @@ class VoiceRunner:
             self.vpn_disconnect()
         base = os.path.splitext(os.path.basename(mp3))[0].lstrip(".")
         parts_dir = os.path.join(os.path.dirname(mp3), ".parts_" + base)
-        rm_tree(parts_dir)
-        os.makedirs(parts_dir, exist_ok=True)
-        pending, files, n = [text], [], 0
+        plan_p = os.path.join(parts_dir, "plan.json")
+        sig = hashlib.sha1((text + "\n#voice:" + str(voice or "")).encode("utf-8")).hexdigest()
+        pending, files, n, splits = [text], [], 0, 0
         max_splits = int(self.cfg.get("credit_split_max", 2))     # credit shesh hole sorboccho koybar vag hobe
-        splits = 0
+
+        def _save_plan():
+            """Prottek part shesh hole: kon kon part ready + baki ongsho gulo file e rakhe (resume er jonno)."""
+            try:
+                atomic_write(plan_p, json.dumps({"sig": sig, "files": [os.path.basename(f) for f in files],
+                                                 "pending": pending, "splits": splits}))
+            except Exception:
+                pass
+
+        # ── resume: age-r cholte-thaka kaj (app bondho / stop kora) thakle shesh hoye jaoa part gulo abar toiri korbo na ──
+        resumed = False
+        try:
+            pl = json.loads(read_text(plan_p)) if os.path.exists(plan_p) else None
+        except Exception:
+            pl = None
+        if isinstance(pl, dict) and pl.get("sig") == sig and isinstance(pl.get("pending"), list) \
+                and isinstance(pl.get("files"), list):
+            names = pl["files"]
+            fl = [os.path.join(parts_dir, f) for f in names]
+            if all(names[i] == f"part{i + 1}.mp3" for i in range(len(names))) \
+                    and all(os.path.isfile(f) and os.path.getsize(f) > 1000 for f in fl) \
+                    and (fl or pl["pending"]):
+                files, pending, n = fl, [str(x) for x in pl["pending"]], len(fl)
+                try:
+                    splits = int(pl.get("splits", 0))
+                except Exception:
+                    splits = 0
+                resumed = bool(fl)
+        if resumed:
+            self._parts_other = 0
+            self.log(f"  [parts] total {len(files) + len(pending)}")
+            for k in range(1, len(files) + 1):
+                self.log(f"  [parts] {k} done")
+            self.log(f"  Resume: Part 1-{len(files)} age-i toiri chilo (abar generate hobe na) "
+                     f"— Part {len(files) + 1} theke shuru")
+        else:
+            rm_tree(parts_dir)
+            os.makedirs(parts_dir, exist_ok=True)
+            pending, files, n, splits = [text], [], 0, 0
+            _save_plan()
         while pending:
             chunk = pending.pop(0)
             n += 1
             part = os.path.join(parts_dir, f"part{n}.mp3")
+            self._parts_other = len(files) + len(pending)
+            self.log(f"  [parts] total {self._parts_other + 1}")
+            self.log(f"  [parts] {n} start")
             try:
                 left = self._speechify_chunk(chunk, part, voice, can_split=splits < max_splits)
             except VoiceCreditOut:
@@ -36972,21 +37044,28 @@ class VoiceRunner:
                 if not halves or splits >= max_splits:
                     raise
                 splits += 1
+                n -= 1                                          # ei part ta abar 2 vag hoye notun kore gona hobe
                 self.log(f"  credit-shesh vag {splits}/{max_splits}")
                 pending = [halves[0], halves[1]] + pending      # 1st half age, 2nd half porer account e (order thik thake)
+                self.log(f"  [parts] total {len(files) + len(pending)}")
+                _save_plan()
                 continue
             files.append(part)
+            self.log(f"  [parts] {n} done")
             if left:
                 self.log(f"  part {n} download hoyeche — baki {len(left)} ongsho notun account e hobe")
                 pending = left + pending                # ei part er por-i porer ongsho, order thik thakbe
+            _save_plan()
         if len(files) == 1:
             os.replace(files[0], mp3)
+            self.log(f"  MP3 saved: {mp3}")
         else:
             self.log(f"  {len(files)} ta part jora lagachhi (part 1 age)")
             ok, err = merge_audio_files(files, mp3)
             if not ok:
                 raise RuntimeError("Part jora lagano fail: " + err)
             self.log("  complete MP3 toiri hoyeche")
+            self.log(f"  MP3 saved: {mp3}")
         rm_tree(parts_dir)
 
     def do_srt(self, mp3, srt):
