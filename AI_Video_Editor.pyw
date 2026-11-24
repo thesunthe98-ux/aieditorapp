@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.3"
+APP_VERSION = "3.3.4"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -33519,6 +33519,10 @@ class App(_Base):
         self.voice_vcombo.bind("<FocusOut>", lambda e: self._voice_voice_commit())
         self.voice_vcombo.bind("<Button-3>", self._voice_voice_forget)
         mkbtn(name_row, "\U0001f5d1 Delete voice", self._voice_voice_forget, "flat", pady=3, padx=10).pack(side="left")
+        self.voice_sbangla = tk.StringVar(value="0")
+        bn_row = tk.Frame(ec, bg=PANEL)                 # alada row — screen soto hole-o Bangla button dekha jabe
+        bn_row.pack(fill="x", padx=14, pady=(0, 8), after=name_row)
+        mktoggle(bn_row, "Bangla", self.voice_sbangla, bg=PANEL).pack(side="left")
         boxes = tk.Frame(ec, bg=PANEL)
         boxes.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         boxes.columnconfigure(0, weight=1, uniform="vbox")
@@ -33647,6 +33651,8 @@ class App(_Base):
                                    self._voice_sched("script", self._voice_autosave_script, 900))
         self.voice_svoice.trace_add("write", lambda *a: None if self._voice_loading else
                                     self._voice_sched("script", self._voice_autosave_script, 900))
+        self.voice_sbangla.trace_add("write", lambda *a: None if self._voice_loading else
+                                     self._voice_sched("script", self._voice_autosave_script, 300))
         self.voice_stext.bind("<<Modified>>", self._voice_text_modified)
         self.voice_ltext.bind("<<Modified>>", self._voice_text_modified)
         self.voice_atext.bind("<<Modified>>", self._voice_acct_modified)
@@ -34125,6 +34131,16 @@ class App(_Base):
         if old and old != name and old in d["map"]:
             del d["map"][old]
             changed = True
+        if old and old != name and old in d["bangla"]:
+            del d["bangla"][old]
+            changed = True
+        want_bn = bool(self.voice_sbangla.get() == "1")
+        if want_bn and not d["bangla"].get(name):
+            d["bangla"][name] = True
+            changed = True
+        elif not want_bn and name in d["bangla"]:
+            del d["bangla"][name]
+            changed = True
         if v:
             if d["map"].get(name) != v:
                 d["map"][name] = v
@@ -34184,6 +34200,7 @@ class App(_Base):
         self._voice_loading = True
         self.voice_sname.set("")
         self.voice_svoice.set("")
+        self.voice_sbangla.set("0")
         self._voice_loading = False
         for w in (self.voice_stext, self.voice_ltext):
             w.delete("1.0", "end")
@@ -34210,7 +34227,9 @@ class App(_Base):
         self._voice_cur_script = fname
         self._voice_loading = True
         self.voice_sname.set(os.path.splitext(fname)[0])
-        self.voice_svoice.set(str(_voice_voices_load()["map"].get(os.path.splitext(fname)[0], "") or ""))
+        _vd = _voice_voices_load()
+        self.voice_svoice.set(str(_vd["map"].get(os.path.splitext(fname)[0], "") or ""))
+        self.voice_sbangla.set("1" if _vd["bangla"].get(os.path.splitext(fname)[0]) else "0")
         self._voice_loading = False
         for w, base in ((self.voice_stext, VOICE_SCRIPTS), (self.voice_ltext, VOICE_LB)):
             p = os.path.join(base, fname)
@@ -34229,7 +34248,10 @@ class App(_Base):
                     pass
             try:
                 _d = _voice_voices_load()
-                if _d["map"].pop(os.path.splitext(self._voice_cur_script)[0], None) is not None:
+                _k = os.path.splitext(self._voice_cur_script)[0]
+                _a = _d["map"].pop(_k, None) is not None
+                _b = _d["bangla"].pop(_k, None) is not None
+                if _a or _b:
                     _voice_voices_save(_d)
             except Exception:
                 pass
@@ -35422,9 +35444,10 @@ def _voice_voices_load():
         d = {}
     if not isinstance(d, dict):
         d = {}
-    m, n = d.get("map"), d.get("names")
+    m, n, b = d.get("map"), d.get("names"), d.get("bangla")
     return {"map": m if isinstance(m, dict) else {},
-            "names": [x for x in n if isinstance(x, str) and x.strip()] if isinstance(n, list) else []}
+            "names": [x for x in n if isinstance(x, str) and x.strip()] if isinstance(n, list) else [],
+            "bangla": b if isinstance(b, dict) else {}}
 
 
 def _voice_voices_save(d):
@@ -35438,6 +35461,28 @@ def voice_for_script(name, cfg=None):
     if v:
         return v
     return str((cfg or {}).get("voice_name") or VOICE_DEFAULTS["voice_name"]).strip() or "Albert (M)"
+
+
+def script_is_bangla(name):
+    """Script er 'Bangla' button on thakle True (Speechify style text e bangla accent boshbe)."""
+    return bool(_voice_voices_load()["bangla"].get(name))
+
+
+BANGLA_STYLE_DEFAULT = "Read this in a warm, friendly tone with bangla accent."
+
+
+def bangla_style_text(cur):
+    """Speechify style box er text e English accent er jaygay 'bangla' boshay. Accent word na thakle default text."""
+    cur = (cur or "").strip()
+    if not cur:
+        return BANGLA_STYLE_DEFAULT
+    new, n = re.subn(r"(?i)\bwith\s+(?:an?\s+)?[\w\-]+(?:\s+[\w\-]+)?\s+accent\b", "with bangla accent", cur)
+    if n:
+        return new
+    new, n = re.subn(r"(?i)\b(?!bangla\b)[\w\-]+(?:\s+[\w\-]+)?\s+accent\b", "bangla accent", cur)
+    if n:
+        return new
+    return BANGLA_STYLE_DEFAULT
 
 
 def _voice_save_cfg(cfg):
@@ -36445,6 +36490,9 @@ class VoiceRunner:
         ta = self.find_editor(page)
         self.select_voice(page, voice)
         self.sleep(500, page)
+        bangla = bool(getattr(self, "_bangla", False))
+        if bangla:
+            self._apply_bangla_style(page)
         limit = int(cfg.get("split_credit_limit", 600) or 0)
         leftovers = []                                  # je part gulo porer account e generate hobe (order e)
         cur = text
@@ -36467,6 +36515,8 @@ class VoiceRunner:
             self._clear_editor(page, ta)
             self._paste_script(page, ta, cur)
             credits = self._prep_split(page)
+        if bangla:
+            self._apply_bangla_style(page)              # paste er por-o style text ta bangla ache kina abar dekho
         split_btn = self._split_btn(page)
         try:
             lbl = (split_btn.inner_text(timeout=3000) or "").strip()
@@ -36477,6 +36527,50 @@ class VoiceRunner:
         self.wait_generation(page)
         self.export_and_download(page, out_mp3)
         return leftovers
+
+    _BN_FIND_JS = """() => {
+        document.querySelectorAll('[data-bn-style]').forEach(e => e.removeAttribute('data-bn-style'));
+        const els = [...document.querySelectorAll('input, textarea, [contenteditable="true"]')];
+        for (const e of els) {
+            if (!e.offsetParent) continue;
+            const isForm = (e.tagName === 'INPUT' || e.tagName === 'TEXTAREA');
+            const v = (isForm ? e.value : e.innerText) || '';
+            if (v.length < 300 && /accent|read this/i.test(v)) {
+                e.setAttribute('data-bn-style', '1');
+                return v;
+            }
+        }
+        return null;
+    }"""
+
+    def _apply_bangla_style(self, page):
+        """'Read this in a warm, friendly tone with American accent.' box er accent -> 'bangla' (script e Bangla on thakle)."""
+        last = None
+        for attempt in range(4):
+            cur = page.evaluate(self._BN_FIND_JS)
+            if cur is None:
+                page.wait_for_timeout(1200)
+                continue
+            new = bangla_style_text(cur)
+            if cur.strip() == new:
+                if attempt == 0:
+                    self.log("  Bangla style text age thekei ache")
+                return
+            loc = page.locator("[data-bn-style='1']").first
+            try:
+                loc.click(timeout=4000)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.insert_text(new)
+                page.wait_for_timeout(500)
+            except Exception as e:
+                last = e
+                continue
+            chk = page.evaluate(self._BN_FIND_JS)
+            if chk is not None and chk.strip() == new:
+                self.log(f"  Bangla style: {new}")
+                return
+        raise RuntimeError("Bangla style text box e 'bangla accent' boshano gelo na" + (f" ({last})" if last else ""))
 
     def _split_btn(self, page):
         # button kokhono "Split & Generate (206 credits)", kokhono shudhu "Split"
@@ -37925,6 +38019,7 @@ class VoiceRunner:
         tmp = os.path.join(out, ".regen_tmp.mp3")
         if os.path.exists(tmp):
             os.remove(tmp)
+        self._bangla = script_is_bangla(name)
         self.do_speechify(text, tmp, voice_for_script(name, self.cfg))
         for f in os.listdir(out):
             if os.path.splitext(f)[1].lower() in AUDIO_EXTS and f != ".regen_tmp.mp3":
@@ -37998,6 +38093,7 @@ class VoiceRunner:
         self.log(f"===== {name} =====")
         try:
             if not (os.path.exists(mp3) and os.path.getsize(mp3) > 1000):
+                self._bangla = script_is_bangla(name)
                 self.do_speechify(text, mp3, voice_for_script(name, self.cfg))
                 for _f in os.listdir(out):               # notun MP3 hole purano SRT / Corrected SRT ar kaj-er na
                     if _f.lower().endswith(".srt"):
