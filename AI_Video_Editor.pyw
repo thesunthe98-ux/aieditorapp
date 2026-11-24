@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.4"
+APP_VERSION = "3.3.5"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -36440,6 +36440,95 @@ class VoiceRunner:
         except Exception:
             pass
 
+    def _sp_ensure_logged_out(self, page):
+        """Sign-in link e gele jodi purano account auto-login thake (Home/Build Something dekhay, email form nei)
+        tahole logout/storage clear kore abar sign-in page e jai — nahole email fill 30s timeout kheye fail kore."""
+        def _form_ready():
+            try:
+                if page.get_by_placeholder("Email address").first.is_visible():
+                    return True
+                if page.get_by_role("button", name=re.compile(r"Continue with Email", re.I)).first.is_visible():
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def _logged_in():
+            try:
+                return page.get_by_text("Build Something").first.is_visible()
+            except Exception:
+                return False
+
+        for attempt in range(3):
+            t0 = time.time()
+            ready = False
+            while time.time() - t0 < 8:
+                if _form_ready():
+                    return
+                if _logged_in():
+                    ready = True
+                    break
+                time.sleep(0.5)
+            if not ready:
+                return                                  # kono-tai na — _sp_open_email_form nijei dekhbe
+            self.log(f"  purano account logged-in ache (try {attempt + 1}) — logout/clear korchi")
+            try:                                        # 1) UI logout
+                page.locator("img[alt*='avatar' i], [class*='avatar' i]").last.click(timeout=3000)
+                page.get_by_text(re.compile(r"^\s*(Log ?out|Sign ?out)\s*$", re.I)).first.click(timeout=3000)
+                page.wait_for_timeout(1500)
+            except Exception:
+                pass
+            self.clear_speechify_cookies()              # 2) cookie + storage + IndexedDB
+            try:
+                page.evaluate("""async () => {
+                    try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}
+                    try { const dbs = await indexedDB.databases();
+                          for (const d of dbs) indexedDB.deleteDatabase(d.name); } catch (e) {}
+                }""")
+            except Exception:
+                pass
+            try:
+                cdp = self.ctx.new_cdp_session(page)
+                cdp.send("Storage.clearDataForOrigin", {"origin": VOICE_ORIGIN, "storageTypes": "all"})
+            except Exception:
+                pass
+            page.goto(VOICE_SIGN_IN, timeout=90000)
+
+    def _sp_open_voiceover(self, page):
+        """Login er por Home e boshe thakle voiceover editor e niye jay: onek rokom button try kore, URL check kore."""
+        tries = (
+            ("'Create a Voiceover' card", lambda: page.get_by_text("Create a Voiceover", exact=True).first),
+            ("sidebar 'Voiceover'",       lambda: page.get_by_role("link", name=re.compile(r"^\s*Voiceover\s*$", re.I)).first),
+            ("sidebar 'Voiceover' text",  lambda: page.get_by_text("Voiceover", exact=True).first),
+            ("card icon/desc",            lambda: page.get_by_text("Ads, audiobooks, and presentations").first),
+        )
+        for reload_round in range(2):                   # 0 = prothom 5 bar, 1 = page reload er por abar 5 bar
+            for rnd in range(5):
+                for name, mk in tries:
+                    self.dismiss_onboarding(page)
+                    if "/voiceover/" in page.url:
+                        return
+                    try:
+                        mk().click(timeout=5000)
+                        self.log(f"  Voiceover: {name} e click korlam (try {rnd + 1}/5)")
+                    except Exception as e:
+                        self.log(f"  Voiceover: {name} click hoy nai ({str(e).splitlines()[0][:80]})")
+                        continue
+                    try:
+                        page.wait_for_url("**/voiceover/**", timeout=10000)
+                        return
+                    except Exception:
+                        self.log(f"  Voiceover: URL bodlay nai (ekhon: {page.url})")
+                page.wait_for_timeout(1500)
+            if reload_round == 0:
+                self.log("  Voiceover: 5 bar try korlam hoy nai — page reload kore abar 5 bar try korchi")
+                try:
+                    page.reload(timeout=90000)
+                    page.get_by_text("Build Something").wait_for(timeout=60000)
+                except Exception:
+                    pass
+        raise RuntimeError("Voiceover page e jawa gelo na (10 bar try + reload) — onno account e jachhi")
+
     def _sp_open_email_form(self, page, timeout=45):
         """Sign-in page e direct email form na eshe 'Continue with Google/Apple/Email' page ashle
         'Continue with Email' e click kore email+password form ber kore."""
@@ -36473,6 +36562,7 @@ class VoiceRunner:
         except Exception:
             pass
         page.goto(VOICE_SIGN_IN, timeout=90000)
+        self._sp_ensure_logged_out(page)
         self._sp_open_email_form(page)
         page.get_by_placeholder("Email address").fill(email, timeout=30000)
         page.get_by_placeholder("Password").fill(password)
@@ -36485,8 +36575,7 @@ class VoiceRunner:
             self._last_acct = acct_line
             self._cur_acct = None
             self.log("  mail used list e geche (ar use hobe na)")
-        page.get_by_text("Voiceover", exact=True).first.click()
-        page.wait_for_url("**/voiceover/**", timeout=60000)
+        self._sp_open_voiceover(page)
         ta = self.find_editor(page)
         self.select_voice(page, voice)
         self.sleep(500, page)
@@ -38782,6 +38871,7 @@ class Tab2SpeechifyRunner(VoiceRunner):
         page.goto(VOICE_SIGN_IN, timeout=90000)
         self._wipe_session(page)
         page.goto(VOICE_SIGN_IN, timeout=90000)
+        self._sp_ensure_logged_out(page)
         self._sp_open_email_form(page)
         page.get_by_placeholder("Email address").fill(email, timeout=30000)
         page.get_by_placeholder("Password").fill(pw)
