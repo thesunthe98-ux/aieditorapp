@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.5"
+APP_VERSION = "3.3.6"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -36514,6 +36514,13 @@ class VoiceRunner:
                     except Exception as e:
                         self.log(f"  Voiceover: {name} click hoy nai ({str(e).splitlines()[0][:80]})")
                         continue
+                    try:                                # "Let's Create a Project" popup ashle New Blank Project e click
+                        nb = page.get_by_role("button", name=re.compile(r"New Blank Project", re.I)).first
+                        nb.wait_for(state="visible", timeout=6000)
+                        nb.click(timeout=5000)
+                        self.log("  Voiceover: 'New Blank Project' e click korlam")
+                    except Exception:
+                        pass
                     try:
                         page.wait_for_url("**/voiceover/**", timeout=10000)
                         return
@@ -36860,9 +36867,14 @@ class VoiceRunner:
                     .last)
 
         self.log("  voice: Favorites e khujchhi")
-        page.get_by_text("Favorites", exact=True).click()
-        page.wait_for_timeout(1500)
-        found = page.get_by_text(name, exact=True).count() > 0
+        bn = bool(getattr(self, "_bangla", False))
+        if bn:                                          # Bangla on: Favorites na — Library -> search -> Expressive -> voice
+            found = False
+            self.log("  Bangla on — Library te search + Expressive")
+        else:
+            page.get_by_text("Favorites", exact=True).click()
+            page.wait_for_timeout(1500)
+            found = page.get_by_text(name, exact=True).count() > 0
         if not found:
             self.log(f"  Library te search: {short}")
             page.get_by_text("Library", exact=True).first.click()
@@ -36872,6 +36884,19 @@ class VoiceRunner:
             except Exception:
                 page.get_by_role("textbox").first.fill(short)
             page.wait_for_timeout(2500)
+            if bn:
+                try:
+                    ex = page.get_by_role("button", name=re.compile(r"^\s*Expressive\s*$", re.I)).first
+                    if ex.get_attribute("aria-pressed", timeout=3000) != "true":
+                        ex.click(timeout=4000)
+                    self.log("  Expressive e click korlam")
+                except Exception:
+                    try:
+                        page.get_by_text("Expressive", exact=True).first.click(timeout=4000)
+                        self.log("  Expressive e click korlam")
+                    except Exception as e:
+                        self.log(f"  Expressive click hoy nai ({str(e).splitlines()[0][:80]})")
+                page.wait_for_timeout(2500)
             if not self._scroll_find_in_list(page, lambda: page.get_by_text(name, exact=True)):
                 self.close_voice_library(page)
                 raise RuntimeError(f"Voice '{name}' paoa jayni")
