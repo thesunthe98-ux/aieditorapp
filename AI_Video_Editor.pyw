@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.6"
+APP_VERSION = "3.3.7"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -33406,7 +33406,8 @@ class App(_Base):
             self._voice_sort.set("date")
 
         self.header(f, "Voice + SRT",
-                    "Script \u2192 Speechify (MP3) \u2192 VeePN \u2192 Zamzar (SRT). Prottek script er MP3+SRT alada folder e.")
+                    "Script \u2192 Speechify (MP3) \u2192 VeePN \u2192 Zamzar (SRT). Bangla ON thakle SRT Speechify Captions theke (VPN lagbe na). "
+                    "Prottek script er MP3+SRT alada folder e.")
 
         # ── always-visible control bar ──
         ctl = tk.Frame(f, bg=PANEL)
@@ -35254,6 +35255,7 @@ VOICE_ALLOWED = ("speechify.com", "zamzar.com", "google.com")
 VOICE_SIGN_IN = "https://studio.speechify.com/sign-in"
 VOICE_ORIGIN = "https://studio.speechify.com"
 VOICE_ZAMZAR = "https://www.zamzar.com/convert/mp3-to-srt/"
+VOICE_CAPTIONS = "https://studio.speechify.com/captions"      # Bangla script er SRT eikhan theke (VPN lagbe na)
 
 
 def _voice_ensure_dirs():
@@ -35509,6 +35511,18 @@ def _ensure_playwright():
 
 class GeminiLoginNeeded(RuntimeError):
     """Gemini te Google login nei."""
+
+
+class CaptionNeedLogin(Exception):
+    """Speechify Captions page e login nei — notun account lagbe."""
+
+
+class CaptionLimit(Exception):
+    """Speechify Captions e limit dekhachhe — notun account lagbe."""
+
+
+class CaptionNoAccount(RuntimeError):
+    """accounts.txt e aar mail nei."""
 
 
 class ZamzarRetry(Exception):
@@ -37348,6 +37362,8 @@ class VoiceRunner:
         rm_tree(parts_dir)
 
     def do_srt(self, mp3, srt):
+        if getattr(self, "_bangla", False):                 # Bangla button on -> Speechify Captions (VPN/Zamzar lagbe na)
+            return self.do_srt_speechify(mp3, srt)
         for attempt in range(int(self.cfg["max_vpn_tries"])):
             self.check_stop()
             try:
@@ -37376,6 +37392,202 @@ class VoiceRunner:
             finally:
                 self.close_page(page)
         raise RuntimeError("Zamzar e sob chesta fail")
+
+    # ───────── Bangla script: SRT Speechify Captions theke (VPN ar Zamzar lagbe na) ─────────
+    _CAP_LIMIT_RE = re.compile(
+        r"reached (your|the|our) .{0,40}limit|limit (reached|exceeded)|daily limit|free (limit|quota|plan limit)"
+        r"|out of (free )?(minutes|credits|quota)|not enough (credits|minutes)|insufficient (credits|minutes)"
+        r"|no (credits|minutes) (left|remaining)|ran out of", re.I)
+
+    def _cap_busy(self, page):
+        """Upload / Transcribing cholche kina (percent ba Uploading/Transcribing text) — tokhon limit dhora hobe na."""
+        for rx in (r"\b\d{1,3}\s*%", r"Uploading", r"Transcribing", r"Processing"):
+            try:
+                if page.get_by_text(re.compile(rx, re.I)).first.is_visible():
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _cap_limit_shown(self, page):
+        """Shudhu popup/dialog/toast er vitore SPOSHTO limit message thakle True. Sidebar er 'Upgrade' text ke ghunna kore na."""
+        if self._cap_busy(page):
+            return False
+        if self.credit_popup(page):
+            return True
+        try:
+            dlg = page.locator("[role=dialog], [role=alertdialog], [class*=modal i], [class*=toast i], [class*=snackbar i]")
+            for i in range(min(dlg.count(), 6)):
+                try:
+                    if not dlg.nth(i).is_visible():
+                        continue
+                    t = dlg.nth(i).inner_text(timeout=800) or ""
+                except Exception:
+                    continue
+                if self._CAP_LIMIT_RE.search(t):
+                    return True
+                if re.search(r"\bupgrade\b", t, re.I) and re.search(r"\b(limit|credits?|minutes|free plan)\b", t, re.I):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _cap_logged_out(self, page):
+        try:
+            if re.search(r"sign-?in|sign-?up|login", page.url or "", re.I):
+                return True
+            if page.get_by_placeholder("Email address").first.is_visible():
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _cap_login(self, page, skipped):
+        """Notun account diye Speechify e login (limit dekhale / login na thakle)."""
+        acct = self.peek_account(skipped)
+        if not acct:
+            raise CaptionNoAccount("accounts.txt e aar mail nei")
+        email, pw, line = acct
+        self.log(f"  Speechify Captions: notun account e login -> {email}")
+        try:
+            self.clear_speechify_cookies()
+            page.goto(VOICE_SIGN_IN, timeout=90000)
+            try:
+                cdp = self.ctx.new_cdp_session(page)
+                cdp.send("Storage.clearDataForOrigin", {"origin": VOICE_ORIGIN, "storageTypes": "all"})
+            except Exception:
+                pass
+            page.goto(VOICE_SIGN_IN, timeout=90000)
+            self._sp_ensure_logged_out(page)
+            self._sp_open_email_form(page)
+            page.get_by_placeholder("Email address").fill(email, timeout=30000)
+            page.get_by_placeholder("Password").fill(pw)
+            page.get_by_role("button", name="Continue", exact=True).click()
+            page.get_by_text("Build Something").wait_for(timeout=60000)
+        except BaseException:
+            skipped.add(line)
+            self.release_account(line)
+            raise
+        self.mark_used(line)
+        self.log("  login hoyeche (mail used list e geche)")
+
+    def _cap_once(self, page, mp3, out_srt):
+        """Ekbar Captions page e: upload -> Transcribing... -> Your Transcript is Ready -> .SRT download."""
+        self.log("Speechify Captions: page khulchi")
+        page.goto(VOICE_CAPTIONS, wait_until="domcontentloaded", timeout=90000)
+        choose = (page.get_by_role("button", name=re.compile(r"Choose Files?", re.I))
+                  .or_(page.get_by_text(re.compile(r"^\s*Choose Files?\s*$", re.I)))).first
+        t0 = time.time()
+        while True:
+            self.check_stop()
+            self.dismiss_onboarding(page)
+            if self._cap_logged_out(page):
+                raise CaptionNeedLogin("login nei")
+            try:
+                if choose.is_visible():
+                    break
+            except Exception:
+                pass
+            if self._cap_limit_shown(page):
+                raise CaptionLimit("page khulei limit")
+            if time.time() - t0 > 60:
+                raise RuntimeError("Captions page e 'Choose File' paoa jayni")
+            self.sleep(1500, page)
+        self.log("  audio upload")
+        uploaded = False
+        try:
+            with page.expect_file_chooser(timeout=10000) as fc:
+                choose.click(timeout=5000)
+            fc.value.set_files(mp3)
+            uploaded = True
+        except Exception:
+            pass
+        if not uploaded:
+            page.locator("input[type=file]").first.set_input_files(mp3, timeout=15000)
+        ready_rx = re.compile(r"Your Transcript is Ready", re.I)
+        busy_rx = re.compile(r"Transcribing", re.I)
+        timeout = float(self.cfg.get("caption_timeout_min", 10)) * 60
+        t0 = time.time()
+        seen = False
+        while True:
+            self.check_stop()
+            try:
+                if page.get_by_text(ready_rx).first.is_visible():
+                    break
+            except Exception:
+                pass
+            if not seen:
+                try:
+                    if page.get_by_text(busy_rx).first.is_visible():
+                        seen = True
+                        self.log("  Transcribing...")
+                except Exception:
+                    pass
+            if self._cap_limit_shown(page):
+                self.sleep(2500, page)
+                if self._cap_limit_shown(page):
+                    raise CaptionLimit("limit dekhachhe")
+            if self._cap_logged_out(page):
+                raise CaptionNeedLogin("login hariye geche")
+            if self._cap_busy(page):
+                t0 = max(t0, time.time() - timeout + 120)      # kaj cholche — alpo somoy aro dao
+            if time.time() - t0 > timeout:
+                raise CaptionLimit("transcript ashenai (timeout) — limit hote pare")
+            self.sleep(2000, page)
+        self.log("  Transcript ready — .SRT download")
+        btn = (page.get_by_role("button", name=re.compile(r"^\s*\.?SRT\s*$", re.I))
+               .or_(page.get_by_text(re.compile(r"^\s*\.SRT\s*$", re.I)))).first
+        try:
+            with page.expect_download(timeout=120000) as d:
+                btn.click(timeout=10000)
+        except Exception as e:
+            if self._cap_limit_shown(page):
+                raise CaptionLimit("download e limit")
+            raise RuntimeError("SRT download shuru hoyni: " + str(e).splitlines()[0][:150])
+        os.makedirs(os.path.dirname(out_srt) or ".", exist_ok=True)
+        d.value.save_as(out_srt)
+        if not os.path.exists(out_srt) or os.path.getsize(out_srt) == 0:
+            raise RuntimeError("SRT download thik hoyni")
+        try:
+            if "-->" not in read_text(out_srt):
+                raise RuntimeError("Download howa file SRT na")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        self.log(f"  SRT saved: {out_srt}")
+
+    def do_srt_speechify(self, mp3, srt):
+        """Bangla script: SRT Speechify Captions theke. VPN lagbe na. Je account diye audio hoyeche (browser e login ache)
+        shei account diyei age try; limit dekhale / login na thakle notun account e login kore abar."""
+        self.log("SRT: Speechify Captions (Bangla) — VPN / Zamzar lagbe na")
+        skipped = set()
+        need_login = False
+        max_tries = max(2, int(self.cfg.get("max_account_tries", 3)) * 2)
+        last = ""
+        for attempt in range(max_tries):
+            self.check_stop()
+            page = self.new_page()
+            try:
+                if need_login:
+                    self._cap_login(page, skipped)
+                    need_login = False
+                self._cap_once(page, mp3, srt)
+                return
+            except (VoiceStopped, CaptionNoAccount):
+                raise
+            except (CaptionNeedLogin, CaptionLimit) as e:
+                last = str(e)
+                self.log(f"  Captions: {e} -> notun account e login kore abar")
+                self.debug(page, "captions_limit")
+                need_login = True
+            except Exception as e:
+                last = str(e).splitlines()[0][:200] if str(e) else repr(e)
+                self.log(f"  Captions fail: {last}")
+                self.debug(page, "captions")
+            finally:
+                self.close_page(page)
+        raise RuntimeError("Speechify Captions e SRT toiri hoyni" + (f": {last}" if last else ""))
 
     # ───────────────────────── Gemini: SRT correction ─────────────────────────
     # ── login helpers ──
@@ -38149,6 +38361,7 @@ class VoiceRunner:
         tmp = os.path.join(out, ".regen_tmp.srt")
         if os.path.exists(tmp):
             os.remove(tmp)
+        self._bangla = script_is_bangla(name)
         self.do_srt(mp3, tmp)
         for f in os.listdir(out):
             if f.lower().endswith(".srt") and f != ".regen_tmp.srt":      # purano SRT + purano Corrected SRT
@@ -38205,6 +38418,7 @@ class VoiceRunner:
         os.makedirs(out, exist_ok=True)
         mp3, srt = os.path.join(out, f"{name}.mp3"), os.path.join(out, f"{name}.srt")
         self.log(f"===== {name} =====")
+        self._bangla = script_is_bangla(name)
         try:
             if not (os.path.exists(mp3) and os.path.getsize(mp3) > 1000):
                 self._bangla = script_is_bangla(name)
