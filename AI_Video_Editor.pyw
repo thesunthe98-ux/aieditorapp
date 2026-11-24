@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.2"
+APP_VERSION = "3.3.3"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -36592,6 +36592,77 @@ class VoiceRunner:
         self.log(f"  credit dekhacche: {credits if credits is not None else 'pai nai'}")
         return credits
 
+    _VOICE_SCROLL_JS = """([x, y, dy]) => {
+        let el = (x != null && y != null) ? document.elementFromPoint(x, y) : null;
+        if (!el) el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight * 0.6);
+        while (el && el !== document.body && el !== document.documentElement) {
+            const st = getComputedStyle(el);
+            if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 2) break;
+            el = el.parentElement;
+        }
+        if (!el || el === document.body || el === document.documentElement) return null;
+        const before = el.scrollTop;
+        el.scrollTop = before + dy;
+        return {moved: el.scrollTop - before, atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 4};
+    }"""
+
+    def _scroll_find_in_list(self, page, finder, max_rounds=60):
+        """Voice Library list e voice upore na thakle (niche / lazy-load) scroll kore kore khuje ber kore.
+        finder() -> Playwright locator. Pele scroll_into_view kore True, list er shesh porjonto na pele False."""
+        def present():
+            try:
+                loc = finder()
+                if loc.count() > 0:
+                    t = loc.first
+                    try:
+                        t.scroll_into_view_if_needed(timeout=3000)
+                    except Exception:
+                        pass
+                    return t.is_visible()
+            except Exception:
+                pass
+            return False
+
+        if present():
+            return True
+        self.log("  voice upore nei \u2014 niche scroll kore khujchhi")
+        use_rx = re.compile(r"^\s*Use Voice\s*$", re.I)
+        stuck = 0
+        for i in range(max_rounds):
+            self.check_stop()
+            x = y = None
+            try:
+                bb = page.get_by_role("button", name=use_rx).first.bounding_box()
+                if bb:
+                    x, y = bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2
+            except Exception:
+                pass
+            try:
+                r = page.evaluate(self._VOICE_SCROLL_JS, [x, y, 450])
+            except Exception:
+                r = None
+            if r is None:                                       # scroll container na pele mouse wheel
+                try:
+                    page.mouse.move(x if x is not None else 640, y if y is not None else 450)
+                    page.mouse.wheel(0, 450)
+                except Exception:
+                    pass
+                moved, at_end = 1, False
+            else:
+                moved, at_end = r.get("moved", 0), bool(r.get("atEnd"))
+            page.wait_for_timeout(700)
+            if present():
+                self.log(f"  voice pelam (scroll #{i + 1})")
+                return True
+            if moved <= 0 or at_end:
+                stuck += 1
+                if stuck >= 3:                                  # list er shesh, aro row load hocche na
+                    break
+                page.wait_for_timeout(1200)                     # notun row lazy-load hote dei
+            else:
+                stuck = 0
+        return False
+
     def select_voice(self, page, voice=None):
         name = (voice or self.cfg.get("voice_name") or "Albert (M)").strip() or "Albert (M)"
         self.log(f"  voice name: {name}")
@@ -36618,7 +36689,7 @@ class VoiceRunner:
             except Exception:
                 page.get_by_role("textbox").first.fill(short)
             page.wait_for_timeout(2500)
-            if page.get_by_text(name, exact=True).count() == 0:
+            if not self._scroll_find_in_list(page, lambda: page.get_by_text(name, exact=True)):
                 self.close_voice_library(page)
                 raise RuntimeError(f"Voice '{name}' paoa jayni")
         row = find_row()
@@ -38778,6 +38849,19 @@ class Tab2SpeechifyRunner(VoiceRunner):
                             break
                 except Exception:
                     continue
+            if btn is None:                                         # exact match upore nei -> niche scroll kore khuji
+                for c in dict.fromkeys([name, short]):
+                    rx = re.compile(rf"^\s*{re.escape(c)}(\s*\([A-Za-z]\))?\s*$", re.I)
+                    try:
+                        if self._scroll_find_in_list(page, lambda rx=rx: page.get_by_text(rx)):
+                            t = page.get_by_text(rx).first
+                            row = t.locator("xpath=ancestor::div[.//button[normalize-space(.)='Use Voice']][1]")
+                            b = row.locator("button", has_text="Use Voice").first
+                            if b.is_visible():
+                                btn = b
+                                break
+                    except Exception:
+                        continue
             if btn is None:
                 btn = use.first                                     # exact na pele prothom result
                 self.log(f"  voice '{name}' exact match nei \u2014 prothom result nilam")
