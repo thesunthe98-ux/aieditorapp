@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.3.1"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -35441,6 +35441,10 @@ class ZamzarRetry(Exception):
     """Zamzar e kaj hocche na -> VPN badle abar prothom theke upload."""
 
 
+class VoiceCreditOut(RuntimeError):
+    """Generate/check/regenerate cholar majhkhane Speechify credit shesh (limit popup)."""
+
+
 class VoiceStopped(Exception):
     pass
 
@@ -36618,11 +36622,16 @@ class VoiceRunner:
                 play = chip.locator("xpath=preceding::button[1]")
                 play.hover(timeout=3000)
                 page.wait_for_timeout(500)
+                self._check_credit(page)                # hover er por limit popup elo kina
                 if page.get_by_text("Regenerate block").first.is_visible():
                     play.click()
                     clicked += 1
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(1500)
+                    self._check_credit(page)            # regenerate chapar por limit popup elo kina
+            except VoiceCreditOut:
+                raise                                   # credit shesh — chupchap ignore kora jabe na
             except Exception:
+                self._check_credit(page)                # click fail hole popup er karone kina dekhi
                 continue
         return clicked
 
@@ -36632,7 +36641,7 @@ class VoiceRunner:
             if ln:
                 self.mark_blocked(ln)
                 self._last_acct = None
-            raise RuntimeError("Credit shesh (You ran out of credits) — account block korlam, porer account e jachhi")
+            raise VoiceCreditOut("Credit shesh (You ran out of credits) — account block korlam")
 
     def wait_generation(self, page):
         export = page.get_by_role("button", name="Export", exact=True)
@@ -36647,6 +36656,7 @@ class VoiceRunner:
                     raise RuntimeError("Generate timeout")
                 self.sleep(3000, page)
             n = self.regen_missing(page)
+            self._check_credit(page)
             if n == 0:
                 self.log("  sob block generate hoyeche")
                 return
@@ -36908,7 +36918,7 @@ class VoiceRunner:
             raise RuntimeError("SRT download thik hoyni")
         self.log(f"  SRT saved: {out_srt}")
 
-    def _speechify_chunk(self, text, out_mp3, voice=None):
+    def _speechify_chunk(self, text, out_mp3, voice=None, can_split=True):
         """Ekta chunk ke ekta account e generate kore out_mp3 te rakhe. Return: je ongsho gulo baki (porer account e)."""
         skipped = set()
         for attempt in range(int(self.cfg["max_account_tries"])):
@@ -36925,6 +36935,13 @@ class VoiceRunner:
             except VoiceStopped:
                 self.release_account(acct[2])
                 raise
+            except VoiceCreditOut:
+                self.release_account(acct[2])           # account already blocked (_check_credit)
+                if can_split and split_script_half(text):
+                    self.log(f"  Credit shesh ({acct[0]}) — script 2 vag kore 2 ta alada account e generate hobe")
+                    raise                               # do_speechify script ke adha kore porer account e pathabe
+                self.log(f"  Credit shesh ({acct[0]}) — ar vag kora jabe na (limit/ekta-i line), porer account e puro ta")
+                skipped.add(acct[2])
             except Exception as e:
                 self.log(f"  Speechify fail ({acct[0]}): {str(e).splitlines()[0][:200]}")
                 self.debug(page, "speechify")
@@ -36942,11 +36959,22 @@ class VoiceRunner:
         rm_tree(parts_dir)
         os.makedirs(parts_dir, exist_ok=True)
         pending, files, n = [text], [], 0
+        max_splits = int(self.cfg.get("credit_split_max", 2))     # credit shesh hole sorboccho koybar vag hobe
+        splits = 0
         while pending:
             chunk = pending.pop(0)
             n += 1
             part = os.path.join(parts_dir, f"part{n}.mp3")
-            left = self._speechify_chunk(chunk, part, voice)
+            try:
+                left = self._speechify_chunk(chunk, part, voice, can_split=splits < max_splits)
+            except VoiceCreditOut:
+                halves = split_script_half(chunk)
+                if not halves or splits >= max_splits:
+                    raise
+                splits += 1
+                self.log(f"  credit-shesh vag {splits}/{max_splits}")
+                pending = [halves[0], halves[1]] + pending      # 1st half age, 2nd half porer account e (order thik thake)
+                continue
             files.append(part)
             if left:
                 self.log(f"  part {n} download hoyeche — baki {len(left)} ongsho notun account e hobe")
