@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.9"
+APP_VERSION = "3.4.0"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -695,6 +695,97 @@ def merge_audio_files(files, out_path):
                        text=True, errors="replace")
     ok = r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0
     return ok, (r.stderr or "").strip()[-600:]
+
+
+def audio_silences(path):
+    """ffmpeg silencedetect -> [(start, end)] (second). Fail hole []."""
+    try:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af",
+                            "silencedetect=noise=-35dB:d=0.25", "-f", "null", "-"],
+                           creationflags=NOWIN, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           text=True, errors="replace", timeout=300)
+        txt = r.stderr or ""
+    except Exception:
+        return []
+    out, cur = [], None
+    for m in re.finditer(r"silence_(start|end):\s*(-?[\d.]+)", txt):
+        v = float(m.group(2))
+        if m.group(1) == "start":
+            cur = max(0.0, v)
+        elif cur is not None:
+            out.append((cur, v))
+            cur = None
+    return out
+
+
+def plan_audio_cuts(dur, silences, max_sec=300.0, window=60.0, min_tail=8.0):
+    """Audio ke max_sec er choto choto part e vag korar cut point. Cut shorbodha 'shobcheye lomba nirobota' (silence) te
+    porbe (shesh `window` second er moddhe) — jate kotha majhkhane na kate. Nirobota na thakle hard cut.
+    Last part jeno 'min_tail' second er cheye choto na hoy. Return: [0, c1, c2, ..., dur]"""
+    cuts, start = [0.0], 0.0
+    while dur - start > max_sec:
+        hi = start + max_sec
+        lo = hi - window
+        best, best_len = None, 0.0
+        for a, b in silences:
+            mid = (a + b) / 2.0
+            if lo <= mid <= hi and (b - a) > best_len:
+                best, best_len = mid, (b - a)
+        end = best if best is not None else hi
+        if dur - end < min_tail:
+            end = dur - min_tail
+        cuts.append(end)
+        start = end
+    cuts.append(dur)
+    return cuts
+
+
+def cut_audio_part(src, dst, start, length):
+    """src theke [start, start+length) ongsho mp3 hishebe dst e (shothik cut er jonno re-encode)."""
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-t", f"{length:.3f}",
+           "-i", src, "-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", dst]
+    r = subprocess.run(cmd, creationflags=NOWIN, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, errors="replace")
+    ok = r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0
+    return ok, (r.stderr or "").strip()[-400:]
+
+
+def _srt_fmt_ts(sec):
+    ms = int(round(max(0.0, sec) * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def merge_srt_parts(parts, out_path):
+    """parts = [(srt_path, offset_second)]. Prottek part er shob time e offset jog kore, 1 theke notun number diye
+    ekta SRT toiri kore (tai merge howa SRT 0 theke shuru na hoye, asol audio timeline e thake). Return cue count."""
+    cues = []
+    for path, off in parts:
+        try:
+            txt = open(path, encoding="utf-8-sig", errors="replace").read()
+        except Exception:
+            continue
+        for blk in re.split(r"\n\s*\n", txt.replace("\r\n", "\n").replace("\r", "\n")):
+            rows = [l.rstrip() for l in blk.strip().split("\n") if l.strip()]
+            ti = next((i for i, l in enumerate(rows) if "-->" in l), None)
+            if ti is None:
+                continue
+            m = re.match(r"\s*(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)", rows[ti])
+            if not m:
+                continue
+            g = m.groups()
+            a = int(g[0]) * 3600 + int(g[1]) * 60 + int(g[2]) + int(g[3]) / float(10 ** len(g[3]))
+            b = int(g[4]) * 3600 + int(g[5]) * 60 + int(g[6]) + int(g[7]) / float(10 ** len(g[7]))
+            text = "\n".join(rows[ti + 1:]).strip()
+            if text:
+                cues.append((a + off, b + off, text))
+    cues.sort(key=lambda c: c[0])
+    with open(out_path, "w", encoding="utf-8") as f:
+        for i, (a, b, t) in enumerate(cues, 1):
+            f.write(f"{i}\n{_srt_fmt_ts(a)} --> {_srt_fmt_ts(b)}\n{t}\n\n")
+    return len(cues)
 
 
 def split_script_half(text):
@@ -37586,6 +37677,42 @@ class VoiceRunner:
         self.log(f"  SRT saved: {out_srt}")
 
     def do_srt_speechify(self, mp3, srt):
+        """Speechify boro audio nite pare na -> audio 5 minute (max) er part e vag kore prottek part er SRT nao,
+        tarpor prottek part er time e offset jog kore (part 2 = 5:00 theke...) ekta complete SRT banao."""
+        max_sec = min(float(self.cfg.get("caption_chunk_sec", 300)), 300.0)
+        dur = media_duration(mp3)
+        if not dur or dur <= max_sec + 1.0:
+            return self._srt_speechify_one(mp3, srt)
+        self.log(f"SRT: audio {dur / 60:.1f} min — {max_sec / 60:.0f} min er part e vag kore SRT hobe")
+        cuts = plan_audio_cuts(dur, audio_silences(mp3), max_sec=max_sec)
+        n = len(cuts) - 1
+        self.log("  parts: " + " | ".join(f"{cuts[i]:.1f}-{cuts[i + 1]:.1f}s" for i in range(n)))
+        tmp = os.path.join(os.path.dirname(srt) or ".", "_srt_parts_" + str(int(time.time())))
+        os.makedirs(tmp, exist_ok=True)
+        try:
+            parts = []
+            for i in range(n):
+                self.check_stop()
+                a, b = cuts[i], cuts[i + 1]
+                pm = os.path.join(tmp, f"part{i + 1}.mp3")
+                ps = os.path.join(tmp, f"part{i + 1}.srt")
+                ok, err = cut_audio_part(mp3, pm, a, b - a)
+                if not ok:
+                    raise RuntimeError(f"Audio part {i + 1} kata jayni: {err}")
+                self.log(f"SRT part {i + 1}/{n} ({a:.1f}s - {b:.1f}s)")
+                self._srt_speechify_one(pm, ps)
+                parts.append((ps, a))                    # offset = ei part audio te kothay shuru
+            cnt = merge_srt_parts(parts, srt)
+            if cnt <= 0:
+                raise RuntimeError("Part gulo jora lagiye kono subtitle pawa jayni")
+            self.log(f"  {n} ta part er SRT jora hoyeche (time offset shoho): {cnt} line -> {srt}")
+        finally:
+            try:
+                rm_tree(tmp)
+            except Exception:
+                pass
+
+    def _srt_speechify_one(self, mp3, srt):
         """Bangla script: SRT Speechify Captions theke. VPN lagbe na. Je account diye audio hoyeche (browser e login ache)
         shei account diyei age try; limit dekhale / login na thakle notun account e login kore abar."""
         self.log("SRT: Speechify Captions (Bangla) — VPN / Zamzar lagbe na")
