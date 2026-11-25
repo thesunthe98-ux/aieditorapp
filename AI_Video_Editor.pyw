@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.4.0"
+APP_VERSION = "3.4.1"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -27140,10 +27140,25 @@ class Tab3Anim(tk.Frame):
         except Exception:
             return 3
 
+    def _load_start_after(self):
+        try:
+            a = str(json.loads(self._rd(ANIM_SETTINGS) or "{}").get("after", "none"))
+        except Exception:
+            a = "none"
+        return a if a in VOICE_AFTER_LABELS else "none"
+
+    def _start_after_act(self):
+        try:
+            v = self.start_after.get()
+        except Exception:
+            return "none"
+        return next((a for a, l in VOICE_AFTER_LABELS.items() if l == v), "none")
+
     def _save_threads(self, *_):
         try:
             atomic_write(ANIM_SETTINGS, json.dumps({"threads": int(self.thr_var.get()),
-                                                    "check_threads": self._check_threads()}))
+                                                    "check_threads": self._check_threads(),
+                                                    "after": self._start_after_act()}))
         except Exception:
             pass
         self._refresh_info()
@@ -27171,6 +27186,11 @@ class Tab3Anim(tk.Frame):
                                        state="readonly", width=3)
         self.chk_thr_cb.pack(side="left")
         self.chk_thr_cb.bind("<<ComboboxSelected>>", self._save_threads)
+        self.start_after = tk.StringVar(value=VOICE_AFTER_LABELS.get(self._load_start_after(), "Kichu na"))
+        self.start_after.trace_add("write", self._save_threads)
+        ttk.Combobox(row, textvariable=self.start_after, values=list(VOICE_AFTER_LABELS.values()),
+                     state="readonly", width=12).pack(side="left", padx=(18, 0))
+        mklabel(row, "\u2190 sob kaj shesh hole", 9, MUTED, bg=PANEL).pack(side="left", padx=6)
         self.run_lbl = mklabel(row, "Ready", 10, MUTED, bg=PANEL)
         self.run_lbl.pack(side="right", padx=6)
         self.info_lbl = mklabel(ctl, "", 9, MUTED, bg=PANEL, anchor="w", justify="left", wraplength=760)
@@ -27309,6 +27329,64 @@ class Tab3Anim(tk.Frame):
             self.app.note(f"2D Animation: done {hub.done}, failed {hub.failed}", OK if not hub.failed else WARN)
         except Exception:
             pass
+        if not stopped and not left:
+            self.after(300, self._start_after_finish)
+
+    def _start_after_finish(self):
+        act = self._start_after_act()
+        if act not in ("shutdown", "sleep"):
+            return
+        if self._hub is not None or self._chk_busy:       # onno kaj shuru hoye gele PC bondho korbe na
+            return
+        name = VOICE_AFTER_LABELS[act]
+        state = {"left": 60, "job": None, "dead": False}
+        self._log(f"Sob kaj shesh \u2014 60s por {name} hobe (Cancel korte window e chapun)", "warn")
+        win = tk.Toplevel(self)
+        win.title(name)
+        win.configure(bg=PANEL)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        lbl = mklabel(win, "", 12, FG, True, bg=PANEL)
+        lbl.pack(padx=30, pady=(22, 8))
+        mklabel(win, "Cancel chaple PC bondho hobe na.", 9, MUTED, bg=PANEL).pack(padx=30)
+        brow = tk.Frame(win, bg=PANEL)
+        brow.pack(pady=18)
+
+        def close():
+            state["dead"] = True
+            if state["job"]:
+                try:
+                    win.after_cancel(state["job"])
+                except Exception:
+                    pass
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        def cancel():
+            close()
+            self._log(f"{name} cancel kora hoyeche", "info")
+
+        def go():
+            close()
+            self.after(500, lambda: self.app._voice_power(act))
+
+        def tick():
+            if state["dead"]:
+                return
+            m, sec = divmod(state["left"], 60)
+            lbl.configure(text=f"{name} hobe  {m:02d}:{sec:02d}  por")
+            if state["left"] <= 0:
+                go()
+                return
+            state["left"] -= 1
+            state["job"] = win.after(1000, tick)
+
+        mkbtn(brow, "Cancel", cancel, "danger", padx=18).pack(side="left", padx=6)
+        mkbtn(brow, "Ekhoni koro", go, "ghost", padx=14).pack(side="left", padx=6)
+        win.protocol("WM_DELETE_WINDOW", cancel)
+        tick()
 
     # ───── start / stop ─────
     def _collect(self, only=None, regen=False, mode="fails"):
@@ -27877,13 +27955,15 @@ class Tab3Anim(tk.Frame):
                        selectcolor=PANEL2, activebackground=BG, activeforeground=FG).pack(side="left", padx=(14, 0))
         tk.Checkbutton(top, text="Shake kom (calm)", variable=self.d3_calm, bg=BG, fg=FG,
                        selectcolor=PANEL2, activebackground=BG, activeforeground=FG).pack(side="left", padx=(14, 0))
+        top2 = tk.Frame(f, bg=BG)          # alada row: window choto hole-o option ta dekha jabe
+        top2.pack(fill="x", padx=22, pady=(0, 6))
         self.d3_after = tk.StringVar(value=VOICE_AFTER_LABELS.get(str(self._3d_cfg0.get("after") or "none"), "Kichu na"))
         self.d3_after.trace_add("write", self._3d_changed)
-        ab = ttk.Combobox(top, textvariable=self.d3_after, values=list(VOICE_AFTER_LABELS.values()),
+        ab = ttk.Combobox(top2, textvariable=self.d3_after, values=list(VOICE_AFTER_LABELS.values()),
                           state="readonly", width=12)
-        ab.pack(side="left", padx=(16, 0))
-        mklabel(top, "\u2190 sob part shesh hole", 9, MUTED, bg=BG).pack(side="left", padx=6)
-        self.d3_state = mklabel(top, "Ready", 10, MUTED, bg=BG)
+        ab.pack(side="left")
+        mklabel(top2, "\u2190 sob part shesh hole", 9, MUTED, bg=BG).pack(side="left", padx=6)
+        self.d3_state = mklabel(top2, "Ready", 10, MUTED, bg=BG)
         self.d3_state.pack(side="right", padx=8)
         self.d3_info = mklabel(f, "", 9, MUTED, bg=BG, anchor="w")
         self.d3_info.pack(fill="x", padx=24, pady=(0, 4))
