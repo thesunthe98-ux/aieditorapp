@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.7"
+APP_VERSION = "3.3.8"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -37409,8 +37409,26 @@ class VoiceRunner:
                 pass
         return False
 
+    def _cap_failed_shown(self, page):
+        """Captions page e 'Transcription failed' (Too many requests / Try again later) error card dekhacche kina.
+        Ei error asle ei account e r kaj hobe na -> notun account e login kore abar generate korte hobe."""
+        try:
+            if page.get_by_text(re.compile(r"Transcription failed", re.I)).first.is_visible():
+                return True
+        except Exception:
+            pass
+        try:
+            if (page.get_by_text(re.compile(r"Too many requests", re.I)).first.is_visible()
+                    and page.get_by_text(re.compile(r"Upload another video", re.I)).first.is_visible()):
+                return True
+        except Exception:
+            pass
+        return False
+
     def _cap_limit_shown(self, page):
         """Shudhu popup/dialog/toast er vitore SPOSHTO limit message thakle True. Sidebar er 'Upgrade' text ke ghunna kore na."""
+        if self._cap_failed_shown(page):                # "Transcription failed - Too many requests. Try again later."
+            return True
         if self._cap_busy(page):
             return False
         if self.credit_popup(page):
