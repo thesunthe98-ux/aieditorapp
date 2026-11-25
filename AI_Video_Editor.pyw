@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.3.8"
+APP_VERSION = "3.3.9"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -37423,6 +37423,13 @@ class VoiceRunner:
                 return True
         except Exception:
             pass
+        try:   # onno jekono error card: "Upload another video" + "Try again" button, kintu transcript ready na
+            if (page.get_by_text(re.compile(r"Upload another video", re.I)).first.is_visible()
+                    and page.get_by_role("button", name=re.compile(r"^\s*Try again\s*$", re.I)).first.is_visible()
+                    and not page.get_by_text(re.compile(r"Your Transcript is Ready", re.I)).first.is_visible()):
+                return True
+        except Exception:
+            pass
         return False
 
     def _cap_limit_shown(self, page):
@@ -37524,8 +37531,9 @@ class VoiceRunner:
             page.locator("input[type=file]").first.set_input_files(mp3, timeout=15000)
         ready_rx = re.compile(r"Your Transcript is Ready", re.I)
         busy_rx = re.compile(r"Transcribing", re.I)
-        timeout = float(self.cfg.get("caption_timeout_min", 10)) * 60
+        timeout = min(float(self.cfg.get("caption_timeout_min", 5)), 5.0) * 60      # maximum 5 minute
         t0 = time.time()
+        hard_end = t0 + timeout                         # kono obosthay 5 minute er beshi opekkha korbe na
         seen = False
         while True:
             self.check_stop()
@@ -37549,6 +37557,8 @@ class VoiceRunner:
                 raise CaptionNeedLogin("login hariye geche")
             if self._cap_busy(page):
                 t0 = max(t0, time.time() - timeout + 120)      # kaj cholche — alpo somoy aro dao
+            if time.time() > hard_end:
+                raise CaptionLimit("transcript ashenai (hard timeout)")
             if time.time() - t0 > timeout:
                 raise CaptionLimit("transcript ashenai (timeout) — limit hote pare")
             self.sleep(2000, page)
