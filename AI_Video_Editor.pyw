@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.4.1"
+APP_VERSION = "3.4.2"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -28906,6 +28906,2691 @@ class Tab3Anim(tk.Frame):
         self._flush()
 
 
+# ═════════════════════════════ TAB 4 : FLOW VIDEO ═════════════════════════════
+# Left sidebar: Avatar -> Prompt -> Setting -> Script
+
+FLOW_BASE = os.path.join(WORKSPACE, "FlowVideo")
+FLOW_AV_DIR = os.path.join(FLOW_BASE, "avatars")                 # upload kora avatar image gulor copy
+FLOW_AVATARS = os.path.join(FLOW_BASE, "avatars.json")
+FLOW_PROMPTS = os.path.join(FLOW_BASE, "prompts.json")
+FLOW_SCRIPTS = os.path.join(FLOW_BASE, "script.json")
+FLOW_SETTINGS = os.path.join(FLOW_BASE, "settings.json")
+FLOW_USAGE = os.path.join(FLOW_BASE, "usage.json")                   # account wise aajker video count
+FLOW_LANGS = ("English", "Spanish", "Bangla")
+# Flow (Veo 3.1) video shudhu Landscape 16:9 ar Portrait 9:16 support kore
+FLOW_RATIOS = (("16:9", "16:9  Landscape"), ("9:16", "9:16  Portrait"))
+FLOW_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+FLOW_URL = "https://flow.google.com/"
+FLOW_MODEL = "Veo 3.1 - Lite"
+FLOW_MODEL_RX = r"Veo\s*3\.1\s*[-\u2013\u2014]\s*Lite"
+FLOW_COUNT = "x1"
+FLOW_CREDIT_COST = 10          # ekta video generate korte 10 credit lage
+FLOW_MAX_TRIES = 3             # ekta video minimum 3 ta alada Chrome e try hobe, tao fail hole skip + cross
+# site English, kintu account Bangla hote pare -> duita bhashatei match kore
+FLOW_RX_NEWPROJ = r"New\s*project|\u09a8\u09a4\u09c1\u09a8\s*\u09aa\u09cd\u09b0\u09cb\u099c\u09c7\u0995\u09cd\u099f|\u09a8\u09a4\u09c1\u09a8\s*\u09aa\u09cd\u09b0\u0995\u09b2\u09cd\u09aa"
+FLOW_RX_START = r"Get\s*started|\u09b6\u09c1\u09b0\u09c1\s*\u0995\u09b0\u09c1\u09a8"
+FLOW_RX_CLOSE = (r"^(close|dismiss|got it|no thanks|not now|skip|maybe later|\u00d7|\u2715|\u2716|"
+                 r"\u09ac\u09a8\u09cd\u09a7.*|\u09a0\u09bf\u0995 \u0986\u099b\u09c7|\u098f\u0996\u09a8 \u09a8\u09af\u09bc)$")
+FLOW_CLICKABLE = ('button,[role="button"],[role="tab"],[role="option"],[role="menuitem"],[role="menuitemradio"],'
+                  '[role="radio"],[role="switch"],[role="combobox"],a,[tabindex="0"]')
+FLOW_SCOPE_DLG = '[role="dialog"],[role="alertdialog"],dialog[open],[aria-modal="true"]'
+FLOW_JS_FIND = r"""
+(args) => {
+  const sel = args[0], scopeSel = args[1];
+  const roots = scopeSel ? Array.from(document.querySelectorAll(scopeSel)) : [document];
+  const out = [], seen = new Set();
+  for (const root of roots) {
+    for (const el of root.querySelectorAll(sel)) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      const r = el.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) continue;
+      const st = getComputedStyle(el);
+      if (st.visibility === 'hidden' || st.display === 'none' || +st.opacity === 0) continue;
+      out.push({
+        text: (el.innerText || el.textContent || '').trim(),
+        label: el.getAttribute('aria-label') || '',
+        title: el.getAttribute('title') || '',
+        state: el.getAttribute('aria-checked') || el.getAttribute('aria-pressed') ||
+               el.getAttribute('aria-selected') || el.getAttribute('data-state') || '',
+        disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
+        bg: st.backgroundColor || '',
+        val: (el.value !== undefined && el.value !== null) ? String(el.value) : '',
+        cls: (typeof el.className === 'string') ? el.className : '',
+        x: r.x, y: r.y, w: r.width, h: r.height
+      });
+    }
+  }
+  return out;
+}
+"""
+
+
+FLOW_JS_PASTE = r"""
+(t) => {
+  const el = document.activeElement;
+  if (!el) return false;
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, t);
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    return true;
+  }
+  const dt = new DataTransfer();
+  dt.setData('text/plain', t);
+  el.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true}));
+  return true;
+}
+"""
+FLOW_JS_ACTIVE_TEXT = """() => { const e = document.activeElement; if (!e || e === document.body) return '';
+  return (e.value !== undefined && e.value !== null) ? String(e.value) : (e.innerText || ''); }"""
+FLOW_JS_PROMPT_IMG = r"""(sel) => {
+  const boxes = Array.from(document.querySelectorAll(sel)).filter(e => {
+    const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 8; });
+  if (!boxes.length) return 0;
+  const tb = boxes.reduce((a, b) => (b.getBoundingClientRect().y > a.getBoundingClientRect().y ? b : a)).getBoundingClientRect();
+  let n = 0;
+  const ok = r => r.width >= 24 && r.width <= 170 && r.height >= 24 && r.height <= 170 &&
+                  r.y >= tb.y - 220 && r.y <= tb.y + 10 && r.x >= tb.x - 120 && r.x <= tb.x + tb.width;
+  for (const el of document.querySelectorAll('img,div,span,button')) {
+    const r = el.getBoundingClientRect();
+    if (!ok(r)) continue;
+    const st = getComputedStyle(el);
+    if (el.tagName === 'IMG') { if (el.complete && el.naturalWidth > 0) n++; }
+    else if (/url\(/.test(st.backgroundImage || '')) n++;
+  }
+  return n;
+}"""
+FLOW_JS_BIGIMG = """() => Array.from(document.querySelectorAll('img')).some(i => {
+  const r = i.getBoundingClientRect(); return r.width > 200 && r.height > 200 && i.complete && i.naturalWidth > 0; })"""
+FLOW_JS_CREDIT_TXT = """() => {
+  const W = window.innerWidth, out = [];
+  for (const el of document.querySelectorAll('div,span,p,a,button,li')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4 || r.x < W - 700 || r.y > 800) continue;
+    const t = (el.innerText || '').trim();
+    if (t.length < 3 || t.length > 120) continue;
+    if (/credit|\u0995\u09cd\u09b0\u09c7\u09a1\u09bf\u099f/i.test(t)) out.push(t);
+  }
+  return out;
+}"""
+FLOW_PROMPT_SEL = 'textarea,[contenteditable="true"],[contenteditable="plaintext-only"],[role="textbox"],input[type="text"]'
+
+
+class FlowStop(Exception):
+    pass
+
+
+class FlowNoCredit(Exception):
+    pass
+
+
+class FlowNoLogin(Exception):
+    pass
+
+
+def _flow_area(it):
+    return it["w"] * it["h"]
+FLOW_COLORS = ("#4f9dff", "#ff8a3d", "#b36bff", "#2fd1a5", "#ff5fa2",
+               "#e6c229", "#5fd0ff", "#9be15d", "#ff7a7a", "#8c8cff")
+
+
+def flow_thumb(path, size=130):
+    """Image theke thumbnail PhotoImage. Pillow -> Tk nijer loader -> ffmpeg (shob format e kaj kore)."""
+    try:
+        from PIL import Image, ImageTk
+        im = Image.open(path)
+        im.thumbnail((size, size))
+        return ImageTk.PhotoImage(im)
+    except Exception:
+        pass
+    try:
+        img = tk.PhotoImage(file=path)
+        k = max(1, -(-max(img.width(), img.height()) // size))
+        return img.subsample(k, k) if k > 1 else img
+    except Exception:
+        pass
+    try:
+        tmp = os.path.join(tempfile.gettempdir(), f"flow_th_{os.getpid()}_{int(time.time() * 1000)}.png")
+        subprocess.run(["ffmpeg", "-y", "-i", path, "-vf",
+                        f"scale={size}:{size}:force_original_aspect_ratio=decrease", "-frames:v", "1", tmp],
+                       creationflags=NOWIN, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        img = tk.PhotoImage(file=tmp)
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        return img
+    except Exception:
+        return None
+
+
+class Tab4Flow(tk.Frame):
+    SECTIONS = [("script", "\u270e", "Script"), ("avatar", "\u263a", "Avatar"),
+                ("prompt", "\u270d", "Prompt"), ("setting", "\u2699", "Setting"),
+                ("log", "\U0001f4dc", "Live log")]
+
+    def __init__(self, app):
+        super().__init__(app, bg=BG)
+        self.app = app
+        self.cur = None
+        self.nav, self.pages = {}, {}
+        self._jobs = {}
+        self.avatars, self.prompts, self.scripts = [], [], []
+        self._drag = None
+        self._logq = queue.Queue()
+        self._thr = None
+        self._tls = threading.local()                  # prottek Chrome thread er nijoshho session/step
+        self._fl_lock = threading.RLock()
+        self._stop_ev = threading.Event()
+        os.makedirs(FLOW_AV_DIR, exist_ok=True)
+        self.cfg = _json_load(FLOW_SETTINGS, {})
+        if not isinstance(self.cfg, dict):
+            self.cfg = {}
+        self.out_dir = str(self.cfg.get("out_dir") or "")
+
+        self.side = tk.Frame(self, bg=SIDE, width=96)
+        self.side.pack(side="left", fill="y")
+        self.side.pack_propagate(False)
+        tk.Frame(self, bg=PANEL2, width=1).pack(side="left", fill="y")
+        self.nav_ind = tk.Frame(self.side, bg=ACCENT, width=3)
+        self.content = tk.Frame(self, bg=BG)
+        self.content.pack(side="left", fill="both", expand=True)
+        for key, icon, name in self.SECTIONS:
+            b = NavItem(self.side, icon, name, lambda k=key: self.show(k))
+            b.pack(fill="x", padx=8, pady=2)
+            self.nav[key] = b
+            self.pages[key] = tk.Frame(self.content, bg=BG)
+        self._build_avatar(self.pages["avatar"])      # avatar age — script er "Select avatar" ei list use kore
+        self._build_prompt(self.pages["prompt"])
+        self._build_setting(self.pages["setting"])
+        self._build_script(self.pages["script"])
+        self._build_log(self.pages["log"])
+        self.side.bind("<Configure>", lambda e: self._move_ind())
+        if DND_OK:
+            self.app._dnd_register_tree(self)
+        self.show("script")
+        self.after(200, self._pump)
+
+    # ───── nav ─────
+    def show(self, key):
+        if self.cur and self.cur != key:
+            self.pages[self.cur].place_forget()
+            self.nav[self.cur].set_active(False)
+        self.cur = key
+        self.nav[key].set_active(True, animate=False)
+        self.pages[key].place(x=0, y=0, relwidth=1, relheight=1)
+        if key == "script":
+            self._refresh_run_info()
+        elif key == "setting":
+            self._refresh_profiles()
+        self.after(30, self._move_ind)
+
+    def _move_ind(self):
+        b = self.nav.get(self.cur)
+        if b is None or b.winfo_height() < 20:
+            return
+        self.nav_ind.place(x=0, y=b.winfo_y() + 12, width=3, height=b.winfo_height() - 24)
+        self.nav_ind.lift()
+
+    def activate(self):
+        self.after(60, self._move_ind)
+
+    def deactivate(self):
+        self._flush()
+
+    @property
+    def _sess(self):
+        return getattr(self._tls, "sess", None)
+
+    @_sess.setter
+    def _sess(self, v):
+        self._tls.sess = v
+
+    @property
+    def _cur_step(self):
+        return getattr(self._tls, "step", "")
+
+    @_cur_step.setter
+    def _cur_step(self, v):
+        self._tls.step = v
+
+    def is_running(self):
+        return self._thr is not None and self._thr.is_alive()
+
+    def shutdown(self):
+        self._stop_ev.set()
+        t = self._thr
+        if t is not None and t.is_alive():
+            t.join(3)
+        self._flush()
+
+    # ───── debounce save ─────
+    def _sched(self, key, fn, ms=600):
+        old = self._jobs.get(key)
+        if old:
+            try:
+                self.after_cancel(old)
+            except Exception:
+                pass
+        self._jobs[key] = self.after(ms, fn)
+
+    def _flush(self):
+        for k in list(self._jobs):
+            try:
+                self.after_cancel(self._jobs.pop(k))
+            except Exception:
+                pass
+        for fn in (self._save_avatars, self._save_prompts, self._save_scripts, self._save_cfg):
+            try:
+                fn()
+            except Exception:
+                pass
+
+    # ───── shared small helpers ─────
+    @staticmethod
+    def _wheel_fwd(sf):
+        return lambda e: (sf._wheel(e), "break")[1]
+
+    def _txt_wheel(self, e, t, sf):
+        """Text er vitore scroll hole text, nahole pura page scroll."""
+        lo, hi = t.yview()
+        if lo <= 0.0 and hi >= 1.0:
+            sf._wheel(e)
+        else:
+            if getattr(e, "num", 0) == 4:
+                n = -1
+            elif getattr(e, "num", 0) == 5:
+                n = 1
+            else:
+                n = int(-e.delta / 120) or (-1 if e.delta > 0 else 1)
+            t.yview_scroll(n, "units")
+        return "break"
+
+    def _make_text(self, parent, sf, col, text, on_change, height=6, bottom=12):
+        tw = tk.Frame(parent, bg=PANEL)
+        tw.pack(fill="x", padx=12, pady=(0, bottom))
+        sb = ttk.Scrollbar(tw, orient="vertical")
+        txt = mktext(tw, height=height, yscrollcommand=sb.set)
+        txt.configure(bg=PANEL2, padx=12, pady=10, highlightthickness=1,
+                      highlightbackground=PANEL2, highlightcolor=col)
+        sb.configure(command=txt.yview)
+        sb.pack(side="right", fill="y")
+        txt.pack(side="left", fill="both", expand=True)
+        txt.insert("1.0", text)
+        txt.edit_reset()
+        txt.edit_modified(False)
+        txt.bind("<<Modified>>", lambda e: on_change())
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            txt.bind(ev, lambda e, t=txt: self._txt_wheel(e, t, sf))
+        return txt
+
+    @staticmethod
+    def _fit_text(txt, cnt):
+        lines = int(txt.index("end-1c").split(".")[0])
+        txt.configure(height=max(6, min(14, lines + 1)))
+        cnt.configure(text=f"{len(txt.get('1.0', 'end-1c').split())} words")
+
+    def _free_name(self, items, base):
+        used = {b["name"].get().strip().lower() for b in items}
+        k = 1
+        while f"{base} {k}".lower() in used:
+            k += 1
+        return f"{base} {k}"
+
+    def _free_color(self, items):
+        used = {b["color"] for b in items}
+        for k in range(len(FLOW_COLORS)):
+            if k not in used:
+                return k
+        return len(items) % len(FLOW_COLORS)
+
+    def _empty_hint(self, sf, text):
+        return mklabel(sf.inner, text, 11, MUTED, justify="center")
+
+    # ══════════════════════════ AVATAR ══════════════════════════
+    def _build_avatar(self, f):
+        self.app.header(f, "Avatar", "'Add avatar' chepe box banao — image upload koro, nam dao")
+        bar = tk.Frame(f, bg=BG)
+        bar.pack(fill="x", padx=22, pady=(0, 8))
+        mkbtn(bar, "\uff0b  Add avatar", lambda: self._add_avatar(), "primary", pady=6, padx=16).pack(side="left")
+        self.av_cnt = mklabel(bar, "", 9, MUTED, bg=BG)
+        self.av_cnt.pack(side="left", padx=12)
+        mklabel(f, "\U0001f5bc Image file ekhane drag & drop korle notun avatar hobe \u00b7 kono avatar box er upor drop korle "
+                   "oi box er image change hobe", 9, MUTED, anchor="w").pack(fill="x", padx=24, pady=(0, 6))
+        self.av_sf = ScrollFrame(f)
+        self.av_sf.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 14))
+        self.av_empty = self._empty_hint(self.av_sf, "Ekhono kono avatar nei.\n'\uff0b Add avatar' chepe box banao ba image drag & drop koro.")
+        data = _json_load(FLOW_AVATARS, [])
+        for d in data if isinstance(data, list) else []:
+            if isinstance(d, dict):
+                self._add_avatar(d.get("id"), str(d.get("name", "")), str(d.get("file", "")),
+                                 save=False, focus=False)
+        self._av_refresh()
+
+    def _av_refresh(self):
+        n = len(self.avatars)
+        self.av_cnt.configure(text=f"{n} avatar" + ("s" if n != 1 else ""))
+        if n == 0:
+            self.av_empty.pack(pady=60)
+        else:
+            self.av_empty.pack_forget()
+
+    def _save_avatars(self):
+        data = [{"id": b["id"], "name": b["name"].get(), "file": b["file"]} for b in self.avatars]
+        os.makedirs(FLOW_BASE, exist_ok=True)
+        atomic_write(FLOW_AVATARS, json.dumps(data, ensure_ascii=False, indent=1))
+
+    def _av_changed(self):
+        self._sched("avatars", self._save_avatars)
+        self._sched("runinfo", self._refresh_run_info, 400)
+        self._refresh_av_buttons()
+
+    def _av_path(self, box):
+        return os.path.join(FLOW_AV_DIR, box["file"]) if box["file"] else ""
+
+    def _add_avatar(self, aid=None, name="", file="", save=True, focus=True):
+        import uuid
+        col = FLOW_COLORS[self._free_color(self.avatars)]
+        fr = tk.Frame(self.av_sf.inner, bg=PANEL, highlightthickness=2, highlightbackground=col, highlightcolor=col)
+        box = {"frame": fr, "id": aid or uuid.uuid4().hex[:8], "color": FLOW_COLORS.index(col),
+               "name": tk.StringVar(value=name or self._free_name(self.avatars, "Avatar")),
+               "file": file if (file and os.path.isfile(os.path.join(FLOW_AV_DIR, file))) else "",
+               "img": None}
+        fr._abox = box
+        body = tk.Frame(fr, bg=PANEL)
+        body.pack(fill="x", padx=12, pady=12)
+        pv = tk.Frame(body, bg=PANEL2, width=140, height=140)
+        pv.pack(side="left")
+        pv.pack_propagate(False)
+        box["pv"] = tk.Label(pv, text="No image\n(click to upload)", bg=PANEL2, fg=MUTED,
+                             font=(FONT, 9), cursor="hand2")
+        box["pv"].pack(fill="both", expand=True)
+        box["pv"].bind("<Button-1>", lambda e, b=box: self._upload_avatar(b))
+        right = tk.Frame(body, bg=PANEL)
+        right.pack(side="left", fill="both", expand=True, padx=(16, 0))
+        mklabel(right, "Avatar name", 9, MUTED, bg=PANEL, anchor="w").pack(fill="x")
+        ent = mkentry(right, box["name"], width=34)
+        ent.configure(highlightcolor=col)
+        ent.pack(anchor="w", ipady=3, pady=(2, 10))
+        row = tk.Frame(right, bg=PANEL)
+        row.pack(anchor="w")
+        mkbtn(row, "\U0001f5bc Upload image", lambda b=box: self._upload_avatar(b), "ghost", pady=3, padx=12).pack(side="left")
+        mkbtn(row, "\U0001f5d1 Delete", lambda b=box: self._delete_avatar(b), "ghost", pady=3, padx=12).pack(side="left", padx=6)
+        box["info"] = mklabel(right, "", 9, MUTED, bg=PANEL, anchor="w")
+        box["info"].pack(fill="x", pady=(8, 0))
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            fr.bind(ev, self._wheel_fwd(self.av_sf))
+        box["name"].trace_add("write", lambda *a: self._av_changed())
+        self.avatars.append(box)
+        fr.pack(fill="x", pady=(0, 10), padx=(0, 48))
+        if box["file"]:
+            self._show_av_image(box)
+        if DND_OK:
+            self.app._dnd_register_tree(fr)
+        self._av_refresh()
+        if save:
+            self._av_changed()
+        if focus:
+            self.av_sf.after(80, lambda: self.av_sf.cv.yview_moveto(1.0))
+            ent.focus_set()
+            ent.select_range(0, "end")
+        return box
+
+    def _show_av_image(self, box):
+        p = self._av_path(box)
+        th = flow_thumb(p, 130) if p else None
+        box["img"] = th
+        if th is not None:
+            box["pv"].configure(image=th, text="")
+            box["info"].configure(text=box["file"], fg=MUTED)
+        else:
+            box["pv"].configure(image="", text="Preview hoy ni\n(file ache)")
+            box["info"].configure(text=box["file"], fg=WARN)
+
+    def _set_av_image(self, box, src):
+        ext = os.path.splitext(src)[1].lower()
+        if ext not in FLOW_IMG_EXTS:
+            messagebox.showinfo("Avatar", "Shudhu image file dao (png, jpg, jpeg, webp, bmp, gif).", parent=self.app)
+            return False
+        name = f"{box['id']}_{int(time.time())}{ext}"
+        dst = os.path.join(FLOW_AV_DIR, name)
+        try:
+            os.makedirs(FLOW_AV_DIR, exist_ok=True)
+            shutil.copy2(src, dst)
+        except Exception as e:
+            messagebox.showerror("Avatar", f"Image copy hoy ni:\n{e}", parent=self.app)
+            return False
+        old = self._av_path(box)
+        box["file"] = name
+        if old and os.path.isfile(old) and os.path.abspath(old) != os.path.abspath(dst):
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+        self._show_av_image(box)
+        self._av_changed()
+        return True
+
+    def _upload_avatar(self, box):
+        p = filedialog.askopenfilename(parent=self.app, title="Avatar image select koro",
+                                       filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"), ("All", "*.*")])
+        if p:
+            self._set_av_image(box, p)
+
+    def _delete_avatar(self, box):
+        used = [s["name"].get() for s in self.scripts if s["avatar"] == box["id"]]
+        msg = f"'{box['name'].get()}' avatar delete korbo?"
+        if used:
+            msg += f"\n\n{len(used)} ta script box e ei avatar select kora ache — oigulo theke selection muchhe jabe."
+        if not messagebox.askyesno("Delete avatar", msg, parent=self.app):
+            return
+        p = self._av_path(box)
+        self.avatars.remove(box)
+        box["frame"].destroy()
+        if p and os.path.isfile(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        for s in self.scripts:
+            if s["avatar"] == box["id"]:
+                s["avatar"] = None
+        self._av_refresh()
+        self._save_avatars()
+        self._save_scripts()
+        self._refresh_av_buttons()
+
+    def _av_by_id(self, aid):
+        return next((b for b in self.avatars if b["id"] == aid), None)
+
+    # ══════════════════════════ PROMPT ══════════════════════════
+    def _build_prompt(self, f):
+        self.app.header(f, "Prompt", "'Add prompt' chepe box banao — nam dao, language select koro, prompt lekho")
+        bar = tk.Frame(f, bg=BG)
+        bar.pack(fill="x", padx=22, pady=(0, 8))
+        mkbtn(bar, "\uff0b  Add prompt", lambda: self._add_prompt(), "primary", pady=6, padx=16).pack(side="left")
+        self.pr_cnt = mklabel(bar, "", 9, MUTED, bg=BG)
+        self.pr_cnt.pack(side="left", padx=12)
+        self.pr_sf = ScrollFrame(f)
+        self.pr_sf.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 14))
+        self.pr_empty = self._empty_hint(self.pr_sf, "Ekhono kono prompt nei.\n'\uff0b Add prompt' chepe prothom box banao.")
+        data = _json_load(FLOW_PROMPTS, [])
+        for d in data if isinstance(data, list) else []:
+            if isinstance(d, dict):
+                c = d.get("color")
+                self._add_prompt(str(d.get("name", "")), str(d.get("text", "")), str(d.get("lang", "")),
+                                 save=False, focus=False, color=c if isinstance(c, int) else None)
+        self._pr_refresh()
+
+    def _pr_refresh(self):
+        n = len(self.prompts)
+        self.pr_cnt.configure(text=f"{n} prompt" + ("s" if n != 1 else ""))
+        if n == 0:
+            self.pr_empty.pack(pady=60)
+        else:
+            self.pr_empty.pack_forget()
+
+    def _save_prompts(self):
+        data = [{"name": b["name"].get(), "lang": b["lang"].get(), "text": b["txt"].get("1.0", "end-1c"),
+                 "color": b["color"]} for b in self.prompts]
+        os.makedirs(FLOW_BASE, exist_ok=True)
+        atomic_write(FLOW_PROMPTS, json.dumps(data, ensure_ascii=False, indent=1))
+
+    def _pr_changed(self):
+        self._sched("prompts", self._save_prompts)
+        self._sched("runinfo", self._refresh_run_info, 400)
+
+    def _add_prompt(self, name="", text="", lang="", save=True, focus=True, color=None):
+        ci = (color % len(FLOW_COLORS)) if isinstance(color, int) else self._free_color(self.prompts)
+        col = FLOW_COLORS[ci]
+        fr = tk.Frame(self.pr_sf.inner, bg=PANEL, highlightthickness=2, highlightbackground=col, highlightcolor=col)
+        if lang not in FLOW_LANGS:
+            lang = FLOW_LANGS[0]
+        box = {"frame": fr, "color": ci, "name": tk.StringVar(value=name or self._free_name(self.prompts, "Prompt")),
+               "lang": tk.StringVar(value=lang)}
+        hd = tk.Frame(fr, bg=PANEL)
+        hd.pack(fill="x", padx=12, pady=(10, 6))
+        badge = tk.Label(hd, text="", bg=col, fg="#0b1114", font=(FONT, 10, "bold"), width=3)
+        badge.pack(side="left", padx=(2, 10), ipady=2)
+        box["badge"] = badge
+        ent = mkentry(hd, box["name"], width=30)
+        ent.configure(highlightcolor=col)
+        ent.pack(side="left", ipady=3)
+        mklabel(hd, "Language", 9, MUTED, bg=PANEL).pack(side="left", padx=(14, 6))
+        cb = ttk.Combobox(hd, textvariable=box["lang"], values=FLOW_LANGS, state="readonly", width=10)
+        cb.pack(side="left")
+        cb.bind("<<ComboboxSelected>>", lambda e: self._pr_changed())
+        box["cnt"] = mklabel(hd, "", 9, MUTED, bg=PANEL)
+        box["cnt"].pack(side="left", padx=12)
+        mkbtn(hd, "\U0001f5d1 Delete", lambda b=box: self._delete_prompt(b), "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "\U0001f4cb Copy", lambda b=box: self._copy_prompt(b), "ghost", pady=2, padx=10).pack(side="right", padx=5)
+
+        def mod(b=box):
+            t = b["txt"]
+            if t.edit_modified():
+                t.edit_modified(False)
+                self._fit_text(t, b["cnt"])
+                self._pr_changed()
+        box["txt"] = self._make_text(fr, self.pr_sf, col, text, mod)
+        box["name"].trace_add("write", lambda *a: self._pr_changed())
+        self.prompts.append(box)
+        self._fit_text(box["txt"], box["cnt"])
+        self._pr_repack()
+        if DND_OK:
+            self.app._dnd_register_tree(fr)
+        self._pr_refresh()
+        if save:
+            self._pr_changed()
+        if focus:
+            self.pr_sf.after(80, lambda: self.pr_sf.cv.yview_moveto(1.0))
+            ent.focus_set()
+            ent.select_range(0, "end")
+        return box
+
+    def _pr_repack(self):
+        for b in self.prompts:
+            b["frame"].pack_forget()
+        for i, b in enumerate(self.prompts):
+            b["frame"].pack(fill="x", pady=(0, 10), padx=(0, 48))
+            b["badge"].configure(text=str(i + 1))
+
+    def _copy_prompt(self, box):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(box["txt"].get("1.0", "end-1c"))
+            self.app.note("Prompt copy hoyeche \u2713", OK)
+        except Exception:
+            pass
+
+    def _delete_prompt(self, box):
+        if box["txt"].get("1.0", "end-1c").strip():
+            if not messagebox.askyesno("Delete", f"'{box['name'].get()}' delete korbo?", parent=self.app):
+                return
+        self.prompts.remove(box)
+        box["frame"].destroy()
+        self._pr_repack()
+        self._pr_refresh()
+        self._save_prompts()
+
+    # ══════════════════════════ SETTING ══════════════════════════
+    def _build_setting(self, f):
+        self.app.header(f, "Setting", "Flow Video er setting")
+        card = tk.Frame(f, bg=PANEL)
+        card.pack(fill="x", padx=22, pady=(0, 10))
+        inner = tk.Frame(card, bg=PANEL)
+        inner.pack(fill="x", padx=16, pady=14)
+        cur = self.cfg.get("ratio")
+        lab = next((l for k, l in FLOW_RATIOS if k == cur), FLOW_RATIOS[0][1])
+        self.ratio_var = tk.StringVar(value=lab)
+        mklabel(inner, "Video ratio", 10, FG, True, bg=PANEL, anchor="w").pack(fill="x")
+        cb = ttk.Combobox(inner, textvariable=self.ratio_var, values=[l for _, l in FLOW_RATIOS],
+                          state="readonly", width=18)
+        cb.pack(anchor="w", pady=(4, 6))
+        mklabel(inner, "Flow video shudhu Landscape (16:9) ar Portrait (9:16) support kore.", 9, MUTED,
+                bg=PANEL, anchor="w").pack(fill="x")
+        self.ratio_var.trace_add("write", lambda *a: self._cfg_changed())
+
+        card2 = tk.Frame(f, bg=PANEL)
+        card2.pack(fill="x", padx=22, pady=(0, 10))
+        in2 = tk.Frame(card2, bg=PANEL)
+        in2.pack(fill="x", padx=16, pady=14)
+        mklabel(in2, "Account status (Tab 3 er Chrome profile)", 10, FG, True, bg=PANEL, anchor="w").pack(fill="x")
+        aw = tk.Frame(in2, bg=PANEL)
+        aw.pack(fill="x", pady=(6, 6))
+        asb = ttk.Scrollbar(aw, orient="vertical")
+        self.acc_lbl = tk.Text(aw, height=8, width=60, bg=PANEL2, fg=MUTED, font=(FONT, 9), relief="flat", bd=0,
+                               wrap="none", padx=10, pady=6, highlightthickness=0, state="disabled",
+                               yscrollcommand=asb.set, cursor="arrow")
+        asb.configure(command=self.acc_lbl.yview)
+        asb.pack(side="right", fill="y")
+        self.acc_lbl.pack(side="left", fill="x", expand=True)
+        mklabel(in2, "Chrome automatic Tab 3 theke serial e (Profile 1, 2, 3...) use hoy. Ekta video te "
+                     f"{FLOW_CREDIT_COST} credit lage. Credit shesh hole Flow er 'Credits refresh daily at ...' somoy porjonto "
+                     "oi account e kaj hobe na, tarpor abar automatic use hobe.", 9, MUTED,
+                bg=PANEL, anchor="w", justify="left", wraplength=620).pack(fill="x")
+        bb = tk.Frame(in2, bg=PANEL)
+        bb.pack(anchor="w", pady=(8, 0))
+        mkbtn(bb, "\u21bb  Refresh", self._refresh_profiles, "ghost", pady=3, padx=12).pack(side="left")
+        mkbtn(bb, "Reset limit lock", self._reset_usage, "ghost", pady=3, padx=12).pack(side="left", padx=8)
+        self._refresh_profiles()
+
+    def _flow_profiles(self):
+        data = _json_load(ANIM_CHROME, [])
+        return [d for d in (data if isinstance(data, list) else [])
+                if isinstance(d, dict) and d.get("name") and d.get("dir")]
+
+    def _refresh_profiles(self):
+        try:
+            now, out = time.time(), []
+            for p in self._flow_profiles():
+                u = self._blocked_until(p["name"])
+                out.append(f"{p['name']}: " + (f"\u26d4 limit \u2014 {time.strftime('%d %b %I:%M %p', time.localtime(u))} porjonto bondho"
+                                              if u > now else "\u2713 ready"))
+            t = self.acc_lbl
+            t.configure(state="normal")
+            t.delete("1.0", "end")
+            t.insert("1.0", "\n".join(out) if out else "Kono Chrome profile nei \u2014 Tab 3 er 'Chrome' section e add koro.")
+            t.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _ratio(self):
+        lab = self.ratio_var.get()
+        return next((k for k, l in FLOW_RATIOS if l == lab), FLOW_RATIOS[0][0])
+
+    def _cfg_changed(self):
+        self._sched("cfg", self._save_cfg)
+        self._sched("runinfo", self._refresh_run_info, 400)
+
+    def _threads(self):
+        try:
+            return max(1, min(15, int(self.thr_var.get())))
+        except Exception:
+            return 1
+
+    def _save_cfg(self):
+        self.cfg = {"ratio": self._ratio(), "out_dir": self.out_dir, "threads": self._threads()}
+        os.makedirs(FLOW_BASE, exist_ok=True)
+        atomic_write(FLOW_SETTINGS, json.dumps(self.cfg, ensure_ascii=False, indent=1))
+
+    # ══════════════════════════ SCRIPT ══════════════════════════
+    def _build_script(self, f):
+        self.app.header(f, "Script", "Script box add koro, avatar + language select koro, START dile sentence gulo serially Flow e jabe (log: Live log section e)")
+        self._build_run_ctl(f)                         # START / STOP + status + progress (log alada "Live log" section e)
+        bar = tk.Frame(f, bg=BG)
+        bar.pack(fill="x", padx=22, pady=(0, 8))
+        mkbtn(bar, "\uff0b  Add script", lambda: self._add_script(), "primary", pady=6, padx=16).pack(side="left")
+        self.sc_cnt = mklabel(bar, "", 9, MUTED, bg=BG)
+        self.sc_cnt.pack(side="left", padx=12)
+        mkbtn(bar, "\U0001f4c1  Select folder", self._pick_out, "ghost", pady=6, padx=14).pack(side="left", padx=(8, 0))
+        self.out_lbl = mklabel(bar, "", 9, MUTED, bg=BG)
+        self.out_lbl.pack(side="left", padx=10)
+        self._out_lbl_upd()
+        mklabel(f, "\u2630 handle dhore upor-niche tano \u00b7 .txt box e drop korle oi box e boshbe, "
+                   "baire drop korle notun box hobe", 9, MUTED, anchor="w").pack(fill="x", padx=24, pady=(0, 6))
+        self.sc_sf = ScrollFrame(f)
+        self.sc_sf.pack(fill="both", expand=True, padx=(22, 10), pady=(0, 8))
+        self.sc_empty = self._empty_hint(self.sc_sf, "Ekhono kono script nei.\n'\uff0b Add script' chepe prothom box banao.")
+        data = _json_load(FLOW_SCRIPTS, [])
+        for d in data if isinstance(data, list) else []:
+            if isinstance(d, dict):
+                c = d.get("color")
+                self._add_script(str(d.get("name", "")), str(d.get("text", "")), save=False, focus=False,
+                                 color=c if isinstance(c, int) else None, avatar=d.get("avatar"),
+                                 lang=str(d.get("lang", "")))
+        self._sc_refresh()
+        self._refresh_run_info()
+
+    def _sc_refresh(self):
+        n = len(self.scripts)
+        self.sc_cnt.configure(text=f"{n} script" + ("s" if n != 1 else ""))
+        if n == 0:
+            self.sc_empty.pack(pady=60)
+        else:
+            self.sc_empty.pack_forget()
+
+    def _save_scripts(self):
+        data = [{"name": b["name"].get(), "lang": b["lang"].get(), "text": b["txt"].get("1.0", "end-1c"),
+                 "color": b["color"], "avatar": b["avatar"]} for b in self.scripts]
+        os.makedirs(FLOW_BASE, exist_ok=True)
+        atomic_write(FLOW_SCRIPTS, json.dumps(data, ensure_ascii=False, indent=1))
+
+    def _sc_changed(self):
+        self._sched("ticks", lambda: [self._sc_ticks(b) for b in self.scripts], 400)
+        self._sched("scripts", self._save_scripts)
+        self._sched("runinfo", self._refresh_run_info, 400)
+
+    def _sc_repack(self):
+        for b in self.scripts:
+            b["frame"].pack_forget()
+        for i, b in enumerate(self.scripts):
+            b["frame"].pack(fill="x", pady=(0, 10), padx=(0, 48))
+            b["badge"].configure(text=str(i + 1))
+
+    def _add_script(self, name="", text="", save=True, focus=True, color=None, avatar=None, lang=""):
+        ci = (color % len(FLOW_COLORS)) if isinstance(color, int) else self._free_color(self.scripts)
+        col = FLOW_COLORS[ci]
+        fr = tk.Frame(self.sc_sf.inner, bg=PANEL, highlightthickness=2, highlightbackground=col, highlightcolor=col)
+        box = {"frame": fr, "color": ci, "name": tk.StringVar(value=name or self._free_name(self.scripts, "Script")),
+               "lang": tk.StringVar(value=lang if lang in FLOW_LANGS else FLOW_LANGS[0]), "chips": [], "lines": [],
+               "failed": set(), "avatar": avatar if (isinstance(avatar, str) and self._av_by_id(avatar)) else None}
+        fr._sbox = box
+        hd = tk.Frame(fr, bg=PANEL)
+        hd.pack(fill="x", padx=12, pady=(10, 6))
+        handle = tk.Label(hd, text="\u2630", bg=PANEL, fg=col, font=(FONT, 15, "bold"), cursor="fleur", padx=4)
+        handle.pack(side="left")
+        badge = tk.Label(hd, text="", bg=col, fg="#0b1114", font=(FONT, 10, "bold"), width=3, cursor="fleur")
+        badge.pack(side="left", padx=(2, 10), ipady=2)
+        box["badge"] = badge
+        for w in (handle, badge):
+            w.bind("<ButtonPress-1>", lambda e, b=box: self._drag_start(b))
+            w.bind("<B1-Motion>", self._drag_move)
+            w.bind("<ButtonRelease-1>", self._drag_end)
+        ent = mkentry(hd, box["name"], width=20)
+        ent.configure(highlightcolor=col)
+        ent.pack(side="left", ipady=3)
+        box["av_btn"] = mkbtn(hd, "", lambda b=box: self._pick_avatar(b), "ghost", pady=3, padx=12)
+        box["av_btn"].pack(side="left", padx=(10, 0))
+        cb = ttk.Combobox(hd, textvariable=box["lang"], values=FLOW_LANGS, state="readonly", width=9)
+        cb.pack(side="left", padx=(10, 0))
+        cb.bind("<<ComboboxSelected>>", lambda e: self._sc_changed())
+        box["cnt"] = mklabel(hd, "", 9, MUTED, bg=PANEL)
+        box["cnt"].pack(side="left", padx=12)
+        mkbtn(hd, "\U0001f5d1 Delete", lambda b=box: self._delete_script(b), "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "\U0001f4c4 Load .txt", lambda b=box: self._load_file_into(b), "ghost", pady=2, padx=10).pack(side="right", padx=5)
+        mkbtn(hd, "\u21e7 Top", lambda b=box: self._move_top(b), "ghost", pady=2, padx=10).pack(side="right")
+        mkbtn(hd, "\U0001f4c2 Open folder", lambda b=box: self._open_box_folder(b), "ghost", pady=2, padx=10).pack(side="right", padx=5)
+
+        def mod(b=box):
+            t = b["txt"]
+            if t.edit_modified():
+                t.edit_modified(False)
+                self._fit_text(t, b["cnt"])
+                self._sc_render(b)
+                self._sc_changed()
+        box["txt"] = self._make_text(fr, self.sc_sf, col, text, mod, bottom=6)
+        sw = tk.Frame(fr, bg=PANEL)                       # sentence count + numbered boxes (prottek line = 1 sentence)
+        sw.pack(fill="x", padx=12, pady=(0, 12))
+        box["sum"] = mklabel(sw, "", 9, MUTED, bg=PANEL, anchor="w")
+        box["sum"].pack(fill="x", pady=(0, 4))
+        stt = tk.Frame(sw, bg=PANEL)
+        stt.pack(fill="x")
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            stt.bind(ev, self._wheel_fwd(self.sc_sf))
+        stt.bind("<Configure>", lambda e, b=box: self.after_idle(lambda: self._sc_fit(b)))
+        box["stt"] = stt
+        box["name"].trace_add("write", lambda *a: self._sc_changed())
+        self.scripts.append(box)
+        self._fit_text(box["txt"], box["cnt"])
+        self._sc_render(box)
+        self._paint_av_btn(box)
+        self._sc_repack()
+        if DND_OK:
+            self.app._dnd_register_tree(fr)
+        self._sc_refresh()
+        if save:
+            self._sc_changed()
+        if focus:
+            self.sc_sf.after(80, lambda: self.sc_sf.cv.yview_moveto(1.0))
+            ent.focus_set()
+            ent.select_range(0, "end")
+        return box
+
+    # ───── sentence boxes: text er prottek non-empty line = 1 ta sentence ─────
+    def _sc_render(self, box):
+        lines = [i for i, l in enumerate(box["txt"].get("1.0", "end-1c").split("\n"), 1) if l.strip()]
+        n = len(lines)
+        box["lines"] = lines
+        box["sum"].configure(text=(f"{n} sentence" + ("s" if n != 1 else "")) if n
+                             else "Sentence nei (prottek line = 1 ta sentence)")
+        chips = box["chips"]
+        if len(chips) == n:
+            self._sc_ticks(box)
+            return
+        while len(chips) > n:
+            chips.pop().destroy()
+        while len(chips) < n:
+            k = len(chips) + 1
+            lb = tk.Label(box["stt"], text=f"\u26aa {k}", font=(FONT, 8, "bold"), width=6, padx=1, pady=0, bd=0,
+                          bg=PANEL2, fg=MUTED, cursor="hand2")
+            lb.bind("<Button-1>", lambda e, b=box, k=k: self._sc_goto(b, k))
+            for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                lb.bind(ev, self._wheel_fwd(self.sc_sf))
+            chips.append(lb)
+        box["laid"] = None
+        self._sc_fit(box)
+        self._sc_ticks(box)
+
+    def _sc_fit(self, box):
+        """Box gulo jayga onujayi grid e sajay (soman column)."""
+        t, chips = box.get("stt"), box.get("chips")
+        if t is None or not chips:
+            return
+        try:
+            w = t.winfo_width()
+            if w < 40:
+                return
+            cw = max(c.winfo_reqwidth() for c in chips) + 3
+            cols = max(1, w // cw)
+            key = (cols, len(chips))
+            if box.get("laid") == key:
+                return
+            box["laid"] = key
+            for i, c in enumerate(chips):
+                c.grid(row=i // cols, column=i % cols, padx=1, pady=1, sticky="w")
+        except Exception:
+            pass
+
+    def _sc_goto(self, box, k):
+        """Box e click korle oi sentence text e highlight hoy."""
+        if not (1 <= k <= len(box["lines"])):
+            return
+        ln = box["lines"][k - 1]
+        t = box["txt"]
+        t.tag_remove("sel", "1.0", "end")
+        t.tag_add("sel", f"{ln}.0", f"{ln}.end")
+        t.see(f"{ln}.0")
+        t.focus_set()
+
+    # ───── select avatar ─────
+    def _paint_av_btn(self, box):
+        a = self._av_by_id(box["avatar"]) if box["avatar"] else None
+        if box["avatar"] and a is None:
+            box["avatar"] = None
+        nm = (a["name"].get().strip() or "(no name)") if a else ""
+        box["av_btn"].configure(text=("\U0001f464 " + nm) if a else "\U0001f464 Select avatar",
+                                fg=FG if a else MUTED)
+
+    def _refresh_av_buttons(self):
+        for b in self.scripts:
+            self._paint_av_btn(b)
+
+    def _pick_avatar(self, box):
+        if not self.avatars:
+            messagebox.showinfo("Select avatar", "Ekhono kono avatar nei. Age 'Avatar' section e avatar add koro.",
+                                parent=self.app)
+            return
+        m = tk.Menu(self, tearoff=0, bg=PANEL2, fg=FG, activebackground=ACCENT, activeforeground=ACCENT_FG,
+                    bd=0, font=(FONT, 10))
+        for a in self.avatars:
+            nm = a["name"].get().strip() or "(no name)"
+            mark = "\u2713  " if box["avatar"] == a["id"] else "     "
+            m.add_command(label=mark + nm, command=lambda i=a["id"]: self._set_avatar(box, i))
+        if box["avatar"]:
+            m.add_separator()
+            m.add_command(label="     \u2715  Clear selection", command=lambda: self._set_avatar(box, None))
+        btn = box["av_btn"]
+        try:
+            m.tk_popup(btn.winfo_rootx(), btn.winfo_rooty() + btn.winfo_height())
+        finally:
+            m.grab_release()
+
+    def _set_avatar(self, box, aid):
+        box["avatar"] = aid
+        self._paint_av_btn(box)
+        self._sc_changed()
+
+    # ───── reorder / top / delete / load ─────
+    def _drag_start(self, box):
+        self._drag = box
+        box["frame"].configure(highlightthickness=4)
+
+    def _drag_move(self, e):
+        box = self._drag
+        if box is None or box not in self.scripts:
+            return
+        inner, cv = self.sc_sf.inner, self.sc_sf.cv
+        y = e.y_root - inner.winfo_rooty()
+        new = sum(1 for b in self.scripts
+                  if b is not box and b["frame"].winfo_y() + b["frame"].winfo_height() / 2 < y)
+        if new != self.scripts.index(box):
+            self.scripts.remove(box)
+            self.scripts.insert(new, box)
+            self._sc_repack()
+            inner.update_idletasks()
+        cy = e.y_root - cv.winfo_rooty()
+        if cy < 40:
+            cv.yview_scroll(-1, "units")
+        elif cy > cv.winfo_height() - 40:
+            cv.yview_scroll(1, "units")
+
+    def _drag_end(self, e=None):
+        box, self._drag = self._drag, None
+        if box is not None:
+            try:
+                box["frame"].configure(highlightthickness=2)
+            except tk.TclError:
+                pass
+            self._sc_changed()
+
+    def _move_top(self, box):
+        if box in self.scripts and self.scripts[0] is not box:
+            self.scripts.remove(box)
+            self.scripts.insert(0, box)
+            self._sc_repack()
+            self._sc_changed()
+        self.sc_sf.after(50, lambda: self.sc_sf.cv.yview_moveto(0.0))
+
+    def _delete_script(self, box):
+        if box["txt"].get("1.0", "end-1c").strip():
+            if not messagebox.askyesno("Delete", f"'{box['name'].get()}' delete korbo?", parent=self.app):
+                return
+        self.scripts.remove(box)
+        box["frame"].destroy()
+        self._sc_repack()
+        self._sc_refresh()
+        self._save_scripts()
+
+    def _fill_box(self, box, path):
+        t = box["txt"]
+        t.delete("1.0", "end")
+        t.insert("1.0", read_text(path))
+        t.edit_separator()
+        self._fit_text(t, box["cnt"])
+        self._sc_render(box)
+        self._sc_changed()
+
+    def _load_file_into(self, box):
+        p = filedialog.askopenfilename(parent=self.app, title=".txt file select koro",
+                                       filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if p:
+            try:
+                self._fill_box(box, p)
+            except Exception as e:
+                messagebox.showerror("Load", f"File pora jayni:\n{e}", parent=self.app)
+
+    # ══════════════════════════ RUN (Script section er vitore) ══════════════════════════
+    def _build_run_ctl(self, f):
+        ctl = tk.Frame(f, bg=PANEL)
+        ctl.pack(fill="x", padx=22, pady=(0, 10))
+        row = tk.Frame(ctl, bg=PANEL)
+        row.pack(fill="x", padx=14, pady=(12, 6))
+        self.start_btn = mkbtn(row, "\u25b6  START", self._start, "primary", padx=22)
+        self.start_btn.pack(side="left")
+        self.stop_btn = mkbtn(row, "\u25a0  STOP", self._stop, "danger", padx=18)
+        self.stop_btn.pack(side="left", padx=8)
+        self.stop_btn.configure(state="disabled")
+        mklabel(row, "Threads", 10, MUTED, bg=PANEL).pack(side="left", padx=(16, 4))
+        try:
+            tv = max(1, min(15, int(self.cfg.get("threads", 1))))
+        except Exception:
+            tv = 1
+        self.thr_var = tk.StringVar(value=str(tv))
+        self.thr_cb = ttk.Combobox(row, textvariable=self.thr_var, values=[str(i) for i in range(1, 16)],
+                                   state="readonly", width=4)
+        self.thr_cb.pack(side="left")
+        self.thr_var.trace_add("write", lambda *a: self._cfg_changed())
+        self.fix_btn = mkbtn(row, "\u21bb  Fix fails", self._fix_fails, "ghost", padx=14)
+        self.fix_btn.pack(side="left", padx=(14, 0))
+        self.run_lbl = mklabel(row, "Ready", 10, MUTED, bg=PANEL)
+        self.run_lbl.pack(side="right", padx=6)
+        self.run_info = mklabel(ctl, "", 9, MUTED, bg=PANEL, anchor="w", justify="left", wraplength=760)
+        self.run_info.pack(fill="x", padx=14, pady=(0, 6))
+        self.pbar = SmoothBar(ctl, maximum=100, active=self.is_running)
+        self.pbar.pack(fill="x", padx=14, pady=(0, 12))
+
+    # ══════════════════════════ LIVE LOG (alada section, shobar shesh e) ══════════════════════════
+    def _build_log(self, f):
+        self.app.header(f, "Live log", "Script section er START/STOP er log ekhane dekhabe")
+        lw = tk.Frame(f, bg=PANEL)
+        lw.pack(fill="both", expand=True, padx=22, pady=(0, 16))
+        hd = tk.Frame(lw, bg=PANEL)
+        hd.pack(fill="x", padx=14, pady=(10, 6))
+        tk.Frame(hd, bg=ACCENT, width=3, height=15).pack(side="left", padx=(0, 9))
+        mklabel(hd, "Log", 11, FG, True, bg=PANEL).pack(side="left")
+        mkbtn(hd, "Clear", self._clear_log, "ghost", pady=2, padx=10).pack(side="right")
+        body = tk.Frame(lw, bg=LOG_BG)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        sb = ttk.Scrollbar(body, orient="vertical")
+        self.log_txt = tk.Text(body, bg=LOG_BG, fg=LOG_FG, font=(MONO, 10), relief="flat", bd=0, wrap="word",
+                               state="disabled", padx=10, pady=8, highlightthickness=0, yscrollcommand=sb.set)
+        sb.configure(command=self.log_txt.yview)
+        sb.pack(side="right", fill="y")
+        self.log_txt.pack(side="left", fill="both", expand=True)
+        for tg, col in (("info", LOG_FG), ("ok", OK), ("warn", WARN), ("err", BAD), ("dim", MUTED)):
+            self.log_txt.tag_configure(tg, foreground=col)
+
+    def _collect_jobs(self):
+        """Main thread e snapshot (tk variable thread e chhoa jabe na). Return: (jobs, warnings)."""
+        jobs, warns = [], []
+        ratio = self._ratio()
+        for b in self.scripts:
+            sents = [l.strip() for l in b["txt"].get("1.0", "end-1c").split("\n") if l.strip()]
+            if not sents:
+                continue
+            nm = b["name"].get().strip() or "Script"
+            av = self._av_by_id(b["avatar"]) if b["avatar"] else None
+            lang = b["lang"].get()
+            prs = [p["name"].get() for p in self.prompts
+                   if p["lang"].get() == lang and p["txt"].get("1.0", "end-1c").strip()]
+            fol = self._box_folder(b)
+            ptxt = next((p["txt"].get("1.0", "end-1c") for p in self.prompts
+                         if p["lang"].get() == lang and p["txt"].get("1.0", "end-1c").strip()), "")
+            if ptxt and not re.search(r"enter\s+sentence", ptxt, re.I):
+                warns.append(f"'{nm}' er prompt e 'Enter sentence' lekha nei (sentence boshbe kothay?)")
+            if av is None:
+                warns.append(f"'{nm}' e avatar select kora nei")
+            elif not av["file"]:
+                warns.append(f"'{nm}' er avatar '{av['name'].get()}' e image upload kora nei")
+            if not prs:
+                warns.append(f"'{nm}' er language ({lang}) er kono prompt nei")
+            for k, t in enumerate(sents, 1):
+                jobs.append({"box": nm, "n": k, "of": len(sents), "text": t, "lang": lang, "ratio": ratio,
+                             "avatar": av["name"].get() if av else None,
+                             "avatar_file": self._av_path(av) if av and av["file"] else None,
+                             "prompts": prs, "prompt_text": ptxt,
+                             "folder": fol, "dest": os.path.join(fol, f"{k}.mp4"), "bref": b})
+        return jobs, warns
+
+    def _refresh_run_info(self):
+        if not hasattr(self, "run_info"):
+            return
+        try:
+            jobs, warns = self._collect_jobs()
+            nb = len({j["box"] for j in jobs})
+            msg = f"Script box: {nb}  \u00b7  Sentence: {len(jobs)}  \u00b7  Ratio: {self._ratio()}"
+            if warns:
+                msg += "\n\u26a0 " + "\n\u26a0 ".join(warns[:4])
+                if len(warns) > 4:
+                    msg += "\n\u26a0 ... aro " + str(len(warns) - 4) + " ta"
+            self.run_info.configure(text=msg, fg=WARN if warns else MUTED)
+        except Exception:
+            pass
+
+    def _log(self, msg, lv="info"):
+        tag = getattr(getattr(self, "_tls", None), "tag", "")
+        self._logq.put(("log", time.strftime("%H:%M:%S"), (f"[{tag}] " if tag else "") + msg, lv))
+
+    def _clear_log(self):
+        self.log_txt.configure(state="normal")
+        self.log_txt.delete("1.0", "end")
+        self.log_txt.configure(state="disabled")
+
+    def _fix_fails(self):
+        """Fail (\u274c) hoye jawa video gulo-i abar generate."""
+        if not self.is_running():
+            self._start(only_failed=True)
+
+    def _start(self, only_failed=False):
+        if self.is_running():
+            return
+        jobs, warns = self._collect_jobs()
+        if only_failed:
+            jobs = [j for j in jobs if j["n"] in (j["bref"].get("failed") or ()) and not os.path.isfile(j["dest"])]
+            if not jobs:
+                messagebox.showinfo("Fix fails", "Kono fail (\u274c) howa video nei.\n\n(\u274c chinho shudhu ei app chalu thakar somoy-er "
+                                                 "ager run theke mone thake.)", parent=self.app)
+                return
+        if not jobs:
+            messagebox.showinfo("Run", "Kono sentence nei. Script section e script likho (prottek line = 1 ta sentence).",
+                                parent=self.app)
+            return
+        profs = self._profile_order()
+        if not profs:
+            messagebox.showwarning("Run", "Kono Chrome profile nei.\n\nTab 3 er 'Chrome' section e '\uff0b Add new chrome' "
+                                          "chepe profile baniye Flow e login koro.", parent=self.app)
+            return
+        self._flush()
+        self._stop_ev.clear()
+        if only_failed:
+            for j in jobs:
+                j["bref"].setdefault("failed", set()).discard(j["n"])
+            for bx in self.scripts:
+                self._sc_ticks(bx)
+            self._log(f"\u21bb Fix fails \u2014 {len(jobs)} ta fail howa video abar generate hobe", "ok")
+        else:
+            for bx in self.scripts:                          # ager run er cross muche dao
+                bx["failed"] = set()
+                self._sc_ticks(bx)
+        nthr = self._threads()
+        self.start_btn.configure(state="disabled")
+        self.fix_btn.configure(state="disabled")
+        self.thr_cb.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self.run_lbl.configure(text="Running\u2026", fg=OK)
+        self.pbar["value"] = 0
+        self._refresh_run_info()
+        for w in warns:
+            self._log("\u26a0 " + w, "warn")
+        self._thr = threading.Thread(target=self._worker, args=(jobs, profs, nthr), daemon=True)
+        self._thr.start()
+
+    def _stop(self):
+        if self.is_running():
+            self._stop_ev.set()
+            self.stop_btn.configure(state="disabled")
+            self.run_lbl.configure(text="Stopping\u2026", fg=WARN)
+            self._log("Stop chaoa hoyeche \u2014 cholte thaka kaj shesh hoye thambe...", "warn")
+
+    # ───── folder / usage / profile helpers ─────
+    def _out_root(self):
+        return self.out_dir or os.path.join(FLOW_BASE, "output")
+
+    def _box_folder(self, box):
+        nm = re.sub(r'[\\/:*?"<>|]+', "_", box["name"].get()).strip(" .") or "Script"
+        return os.path.join(self._out_root(), nm)
+
+    def _out_lbl_upd(self):
+        if hasattr(self, "out_lbl"):
+            self.out_lbl.configure(text=self._out_root())
+
+    def _pick_out(self):
+        p = filedialog.askdirectory(parent=self.app, title="Video save korar folder / drive select koro",
+                                    initialdir=self._out_root() if os.path.isdir(self._out_root()) else None)
+        if p:
+            self.out_dir = os.path.normpath(p)
+            self._out_lbl_upd()
+            self._cfg_changed()
+            for bx in self.scripts:
+                self._sc_ticks(bx)
+
+    def _open_box_folder(self, box):
+        fol = self._box_folder(box)
+        try:
+            os.makedirs(fol, exist_ok=True)
+            open_path(fol)
+        except Exception as e:
+            messagebox.showerror("Open folder", f"Folder khola gelo na:\n{e}", parent=self.app)
+
+    def _sc_ticks(self, box):
+        """Download howa video er sentence number e tick (folder e N.mp4 thakle)."""
+        try:
+            fol = self._box_folder(box)
+            bad = box.get("failed") or ()
+            for k, lb in enumerate(box["chips"], 1):
+                if os.path.isfile(os.path.join(fol, f"{k}.mp4")):
+                    lb.configure(text="\u2705 " + str(k), fg=OK)
+                elif k in bad:                                  # 3 ta Chrome e fail -> skip, cross
+                    lb.configure(text="\u274c " + str(k), fg=BAD)
+                else:
+                    lb.configure(text="\u26aa " + str(k), fg=MUTED)
+        except Exception:
+            pass
+
+    def _profile_order(self):
+        return [p for p in self._flow_profiles() if os.path.isdir(p["dir"])]     # Tab 3 er serial e
+
+    # account lock: credit shesh hole Flow er refresh somoy porjonto
+    def _blocked_until(self, name):
+        d = _json_load(FLOW_USAGE, {})
+        r = d.get(name) if isinstance(d, dict) else None
+        try:
+            return float(r.get("until", 0)) if isinstance(r, dict) else 0.0
+        except Exception:
+            return 0.0
+
+    def _block(self, name, until):
+        with self._fl_lock:
+            d = _json_load(FLOW_USAGE, {})
+            if not isinstance(d, dict):
+                d = {}
+            d[name] = {"until": float(until)}
+            os.makedirs(FLOW_BASE, exist_ok=True)
+            atomic_write(FLOW_USAGE, json.dumps(d, ensure_ascii=False, indent=1))
+
+    def _reset_usage(self):
+        if messagebox.askyesno("Reset", "Shob account er limit lock tule dibo?", parent=self.app):
+            os.makedirs(FLOW_BASE, exist_ok=True)
+            atomic_write(FLOW_USAGE, "{}")
+            self._refresh_profiles()
+
+    @staticmethod
+    def _parse_reset(texts):
+        """'Credits refresh daily at 2:33 PM' -> porer oi somoy (epoch)."""
+        for t in texts:
+            m = re.search(r"refresh[^\d]{0,30}(\d{1,2}):(\d{2})\s*([ap]\.?m)?", " ".join(str(t).split()), re.I)
+            if not m:
+                continue
+            h, mi, ap = int(m.group(1)), int(m.group(2)), (m.group(3) or "").lower()
+            if ap.startswith("p") and h < 12:
+                h += 12
+            elif ap.startswith("a") and h == 12:
+                h = 0
+            now = datetime.datetime.now()
+            tgt = now.replace(hour=h % 24, minute=mi, second=0, microsecond=0)
+            if tgt <= now:
+                tgt += datetime.timedelta(days=1)
+            return tgt.timestamp() + 120                 # 2 min buffer
+        return None
+
+    def _block_account(self, name, sess=None):
+        ts = (sess or {}).get("reset") if sess else None
+        if not ts and sess:
+            self._read_credits(sess["page"], sess)
+            ts = sess.get("reset")
+        if not ts or ts < time.time():
+            ts = time.time() + 3 * 3600                  # somoy bujhte na parle 3 ghonta por abar dekhbo
+            self._log(f"  {name}: refresh somoy pora jayni \u2014 3 ghonta por abar check korbo", "warn")
+        self._block(name, ts)
+        self._log(f"\u26d4 {name}: {time.strftime('%d %b %I:%M %p', time.localtime(ts))} er age ei account e kaj hobe na", "err")
+
+    @staticmethod
+    def _job_problem(j):
+        if not j.get("avatar_file") or not os.path.isfile(j["avatar_file"]):
+            return "avatar select/image upload kora nei"
+        if not j.get("prompt_text"):
+            return f"{j['lang']} language er kono prompt nei"
+        if not re.search(r"enter\s+sentence", j["prompt_text"], re.I):
+            return "prompt e 'Enter sentence' lekha nei"
+        return ""
+
+    # ───── main worker: N ta Chrome thread ekshathe, shared job list theke ─────
+    def _sleep(self, sec):
+        end = time.time() + sec
+        while time.time() < end:
+            if self._stop_ev.is_set():
+                raise FlowStop()
+            time.sleep(0.25)
+
+    def _worker(self, jobs, profs, nthr=1):
+        stopped = False
+        self._dead = {}
+        try:
+            ok, err = _ensure_playwright()
+            if not ok:
+                raise RuntimeError(f"Playwright install hoy ni: {err}")
+            if not _voice_chrome_exe():
+                raise RuntimeError("Google Chrome install kora nei.")
+            total = len(jobs)
+            todo, nd = [], 0
+            for j in jobs:
+                if os.path.isfile(j["dest"]):
+                    nd += 1
+                    continue
+                pb = self._job_problem(j)
+                if pb:
+                    self._log(f"[{j['box']}] {j['n']}/{j['of']} skip — {pb}", "warn")
+                    continue
+                todo.append(j)
+            if nd:
+                self._log(f"{nd} ta video age-i folder e ache — skip", "dim")
+            self._logq.put(("prog", nd * 100.0 / max(1, total)))
+            done = [nd]
+            n_use = max(1, min(int(nthr), len(profs), max(1, len(todo))))
+            if int(nthr) > n_use:
+                self._log(f"Threads {nthr} chaoa hoyeche, kintu {len(profs)} ta Chrome profile / {len(todo)} ta video — {n_use} ta thread cholbe", "warn")
+            self._log(f"Start — {len(todo)} ta video banabe (total {total} sentence) · account: {len(profs)} ta · "
+                      f"threads: {n_use} · {FLOW_CREDIT_COST} credit/video · save: {self._out_root()}", "ok")
+            left = 0
+            if todo:
+                for j in todo:
+                    j["tried"], j["att"], j["claimed"] = set(), 0, False
+                shared = {"lock": threading.RLock(), "busy": set(), "alive": n_use,
+                          "jobs": todo, "total": total, "done": done}
+                ths = []
+                for i in range(n_use):
+                    t = threading.Thread(target=self._thread_main, args=(i + 1, n_use, profs, shared), daemon=True)
+                    t.start()
+                    ths.append(t)
+                while any(t.is_alive() for t in ths):
+                    for t in ths:
+                        t.join(0.5)
+                if self._stop_ev.is_set():
+                    raise FlowStop()
+                left = sum(1 for j in todo if not j.get("ok") and not j.get("dead"))
+            nfail = sum(1 for j in todo if j.get("dead"))
+            self._log(f"✓ Shesh — {done[0]}/{total} ta video folder e ache"
+                      + (f" · ❌ {nfail} ta 3 ta Chrome e fail hoye skip (Fix fails chepe abar try korte paro)" if nfail else "") + ".", "ok")
+            if left:
+                why = []
+                for p in profs:
+                    n = p["name"]
+                    u = self._blocked_until(n)
+                    if u > time.time():
+                        why.append(f"{n}: credit shesh \u2014 {time.strftime('%d %b %I:%M %p', time.localtime(u))} e refresh")
+                    elif self._dead.get(n) == "login":
+                        why.append(f"{n}: login kora nei")
+                    elif self._dead.get(n) == "flagged":
+                        why.append(f"{n}: Flow 'unusual activity' Failed dilo")
+                    elif self._dead.get(n) == "error":
+                        why.append(f"{n}: error")
+                msg = (f"Limit shesh! Baki {left} ta video banano gelo na.\n\n" + "\n".join(why)
+                       + "\n\nRefresh somoyer por abar START dao.")
+                self._log("⛔ " + msg.replace("\n\n", " · ").replace("\n", " · "), "err")
+                self._logq.put(("alert", "Limit shesh", msg))
+        except FlowStop:
+            stopped = True
+            self._log("■ Stopped by user.", "warn")
+        except Exception as e:
+            self._log(f"Error: {(str(e).splitlines() or [type(e).__name__])[0][:300]}", "err")
+        finally:
+            self._logq.put(("end", stopped))
+
+    def _pick_profile(self, profs, pend, shared):
+        """(lock er vitore) free + dead/blocked na emon profile; ei profile e ekhono try na howa video thakle oita."""
+        now = time.time()
+        cands = [p for p in profs if p["name"] not in self._dead and self._blocked_until(p["name"]) <= now
+                 and p["name"] not in shared["busy"]]
+        if not cands:
+            return None
+        pick = next((p for p in cands if any(p["name"] not in j["tried"] for j in pend)), None)
+        if pick is None:                         # shob free Chrome e try hoyeche, tobuo 3 bar hoy ni
+            for j in pend:
+                j["tried"].clear()
+            self._log("  available Chrome gulo-te ekbar kore try hoyeche — baki attempt abar shuru theke", "dim")
+            pick = cands[0]
+        shared["busy"].add(pick["name"])
+        return pick
+
+    def _thread_main(self, tid, nthr, profs, shared):
+        """Ekta Chrome thread: free profile niye -> video claim -> submit -> download -> Chrome close -> porer profile."""
+        self._tls.tid = tid
+        self._tls.tag = f"T{tid}" if nthr > 1 else ""
+        lock = shared["lock"]
+        try:
+            self._sleep((tid - 1) * 4)                    # Chrome gulo ekshathe na khule ektu gap diye
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                while True:
+                    if self._stop_ev.is_set():
+                        raise FlowStop()
+                    prof, wait = None, False
+                    with lock:
+                        pend = [j for j in shared["jobs"] if not j.get("ok") and not j.get("dead") and not j.get("claimed")]
+                        claimed_any = any(j.get("claimed") for j in shared["jobs"])
+                        if not pend:
+                            if not claimed_any:
+                                break
+                            wait = True               # onno thread er fail howa video fire ashte pare
+                        else:
+                            prof = self._pick_profile(profs, pend, shared)
+                            if prof is None:
+                                if shared["busy"] or claimed_any:
+                                    wait = True
+                                else:
+                                    break             # kono profile baki nei (shob dead/credit shesh)
+                    if wait:
+                        self._sleep(2)
+                        continue
+                    try:
+                        self._session_cycle(pw, prof, shared)
+                    finally:
+                        with lock:
+                            shared["busy"].discard(prof["name"])
+        except FlowStop:
+            pass
+        except Exception as e:
+            self._log(f"Error (thread {tid}): {(str(e).splitlines() or [type(e).__name__])[0][:260]}", "err")
+        finally:
+            self._close_session()
+            with lock:
+                shared["alive"] = max(0, shared["alive"] - 1)
+
+    def _session_cycle(self, pw, prof, shared):
+        """Ekta profile e Chrome khole: setup -> credit onujayi video claim -> shob submit -> download -> Chrome close."""
+        name, dead, lock = prof["name"], self._dead, shared["lock"]
+        total, done = shared["total"], shared["done"]
+        with lock:
+            pend = [j for j in shared["jobs"] if not j.get("ok") and not j.get("dead") and not j.get("claimed")
+                    and name not in j["tried"]]
+        if not pend:
+            return
+        first = pend[0]
+        bref, nm = first["bref"], first["box"]
+        sess = None
+        try:
+            sess = self._open_session(pw, prof)
+            self._log(f"▶ {name} · '{nm}' · Chrome khulechhe", "ok")
+            self._flow_setup(sess["page"], first["ratio"], sess)
+            sess["box"] = bref
+            self._log("✓ Flow setup shesh (Video · Ingredients · ratio · " + FLOW_MODEL + " · " + FLOW_COUNT + " · Batch view)", "ok")
+        except (FlowStop, KeyboardInterrupt):
+            self._close_session()
+            raise
+        except FlowNoLogin:
+            dead[name] = "login"
+            self._log(f"\u26a0 {name}: Flow e login kora nei \u2014 ei profile skip (Tab 3 theke login koro)", "err")
+            self._close_session()
+            return
+        except FlowNoCredit as e:
+            dead[name] = "credit"
+            self._log(f"\u26d4 {name}: credit shesh ({e})", "err")
+            self._block_account(name, self._sess)
+            self._close_session()
+            return
+        except Exception as e:
+            dead[name] = "error"
+            self._log(f"Error ({name}): {(str(e).splitlines() or [type(e).__name__])[0][:260]}  [dhap: {self._cur_step}]", "err")
+            self._close_session()
+            return
+        page, st = sess["page"], sess["st"]
+        try:
+            while True:                                   # credit thakle ei Chrome e-i aro video claim
+                if self._stop_ev.is_set():
+                    raise FlowStop()
+                cr = sess.get("credits")
+                cap = None if cr is None else cr // FLOW_CREDIT_COST
+                with lock:
+                    allp = [j for j in shared["jobs"] if not j.get("ok") and not j.get("dead") and not j.get("claimed")]
+                    pend = [j for j in allp if j["bref"] is bref and name not in j["tried"]]
+                    if not pend or (cap is not None and cap <= 0):
+                        break
+                    share = -(-len(allp) // max(1, shared["alive"]))      # barir vag: sob Chrome e somanbhabe
+                    n = min(len(pend), max(1, share), cap if cap is not None else len(pend))
+                    batch = pend[:n]
+                    for j in batch:
+                        j["claimed"] = True
+                self._log(f"▶ {name} · '{nm}' · {len(batch)} ta video (credit: {cr if cr is not None else '?'})", "ok")
+                inflight = {}
+                try:
+                    for j in batch:
+                        if self._stop_ev.is_set():
+                            raise FlowStop()
+                        if sess.get("credits") is not None:
+                            if sess["credits"] < FLOW_CREDIT_COST:
+                                dead[name] = "credit"
+                                break
+                        elif not self._credit_ok(sess, name):
+                            dead[name] = "credit"
+                            break
+                        try:
+                            ok = self._flow_make(j, st)
+                        except (FlowStop, KeyboardInterrupt):
+                            raise
+                        except Exception as e:
+                            self._log(f"Error: {(str(e).splitlines() or [type(e).__name__])[0][:240]}  [dhap: {self._cur_step}]", "err")
+                            self._job_failed(j, name, f"automation error — dhap: {self._cur_step} | {(str(e).splitlines() or [type(e).__name__])[0][:140]}")
+                            dead[name] = "error"
+                            break
+                        if not ok:
+                            self._job_failed(j, name, "skip", final=True)
+                            continue
+                        if sess.get("credits") is not None:
+                            sess["credits"] -= FLOW_CREDIT_COST
+                        inflight[id(j)] = {"j": j, "tries": 0, "clear": 0}
+                        self._log(f"  submit {len(inflight)} ta hoyeche — credit baki thakle porer ta submit hobe (download pore)", "dim")
+                        if self._unusual_shown(page):
+                            self._flag_chrome(page, name, inflight)
+                            break
+                    if inflight:
+                        self._log(f"✓ Submit shesh ({len(inflight)} ta) — ekhon generate howa check kore download hobe", "ok")
+                        self._collect(page, inflight, st, total, done, name)
+                except (FlowStop, KeyboardInterrupt):
+                    raise
+                except Exception as e:
+                    self._log(f"Error ({name}): {(str(e).splitlines() or [type(e).__name__])[0][:260]}  [dhap: {self._cur_step}]", "err")
+                    for e_ in list(inflight.values()):
+                        self._job_failed(e_["j"], name, f"download/check error — dhap: {self._cur_step} | {(str(e).splitlines() or [type(e).__name__])[0][:140]}")
+                    dead[name] = "error"
+                finally:
+                    with lock:
+                        for j in batch:
+                            j["claimed"] = False          # fail / submit na howa video porer Chrome e jabe
+                if name in dead:
+                    break
+                try:                                      # asol credit abar pori; shesh hole ei account block
+                    c2 = self._read_credits(page, sess)
+                except (FlowStop, KeyboardInterrupt):
+                    raise
+                except Exception:
+                    c2 = None
+                if c2 is not None:
+                    sess["credits"] = c2
+                    if c2 < FLOW_CREDIT_COST:
+                        dead[name] = "credit"
+                        self._log(f"⛔ {name}: credit {c2} — ei Chrome er kaj shesh", "warn")
+                        break
+        finally:
+            if dead.get(name) == "credit" and self._blocked_until(name) <= time.time() and self._sess is not None:
+                try:
+                    self._block_account(name, self._sess)
+                except (FlowStop, KeyboardInterrupt):
+                    raise
+                except Exception:
+                    pass
+            self._close_session()                         # kaj shesh -> Chrome close, thread porer profile e jabe
+            self._log(f"■ {name}: Chrome close", "dim")
+
+    def _open_session(self, pw, prof):
+        os.makedirs(prof["dir"], exist_ok=True)
+        _force_nvidia_for_chrome()
+        off = (int(getattr(self._tls, "tid", 1)) - 1) * 28
+        args = ["--disable-blink-features=AutomationControlled", f"--window-position={off},{off}",
+                "--window-size=1366,900", "--lang=en-US", "--accept-lang=en-US",
+                "--disable-features=Translate,TranslateUI,TranslateRankerEnforcement",
+                "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding"] + ANIM_GPU_ARGS
+        try:
+            ctx = pw.chromium.launch_persistent_context(
+                prof["dir"], channel="chrome", headless=False, no_viewport=True, locale="en-US",
+                ignore_default_args=["--disable-extensions", "--enable-automation"], args=args)
+        except Exception as e:
+            raise RuntimeError("Chrome khola gelo na. Ei profile onno kothao khola thakle age bondho koro. "
+                               + (str(e).splitlines() or [""])[0][:140])
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        st = {"page": page, "up": set(), "dl": []}
+        page.on("download", lambda d: st["dl"].append(d))
+        def _hook(pg):                                       # Flow download new tab/popup e khulle-o dhorbe
+            try:
+                pg.on("download", lambda d: st["dl"].append(d))
+            except Exception:
+                pass
+        ctx.on("page", _hook)
+        self._sess = {"prof": prof, "ctx": ctx, "page": page, "st": st, "box": None, "credits": None}
+        return self._sess
+
+    def _close_session(self):
+        s, self._sess = getattr(self, "_sess", None), None
+        if s is not None:
+            try:
+                s["ctx"].close()
+            except Exception:
+                pass
+
+    def _job_failed(self, j, name, why, final=False):
+        j["tried"].add(name)
+        j["att"] += 1
+        if final or j["att"] >= FLOW_MAX_TRIES:
+            j["dead"] = True
+            self._logq.put(("fail", j["bref"], j["n"]))
+            self._log(f"  ❌ [{j['box']}] {j['n']} — {j['att']} bar fail ({why}) — skip", "err")
+        else:
+            self._log(f"  ↻ [{j['box']}] {j['n']} — {name} e fail ({why}) [{j['att']}/{FLOW_MAX_TRIES}] — porer Chrome e abar try hobe", "warn")
+
+    # ───── credit (upor dan e profile e click -> '0 Google Flow credits') ─────
+    @staticmethod
+    def _parse_credits(texts):
+        bn = {0x09E6 + i: ord("0") + i for i in range(10)}
+        cr = "ক্রেডিট"
+        ts = sorted({" ".join(str(s).translate(bn).split()) for s in texts}, key=len)
+        for t in ts:                                   # "0 Google Flow credits" / "1,250 credits"
+            m = re.search(r"(\d[\d,]*)\s*(?:google\s*flow\s*|flow\s*|ai\s*)?(?:credits?|" + cr + ")", t, re.I)
+            if m:
+                return int(m.group(1).replace(",", ""))
+        for t in ts:                                   # "Credits: 250"
+            if re.search(r"refresh|per\s|each|cost|uses?\b", t, re.I):
+                continue
+            m = re.search(r"(?:credits?|" + cr + r")\D{0,20}?(\d[\d,]*)", t, re.I)
+            if m:
+                return int(m.group(1).replace(",", ""))
+        return None
+
+    def _read_credits(self, page, sess=None):
+        try:
+            W = page.evaluate("window.innerWidth")
+            top = [x for x in self._find(page, 'button,[role="button"],a') if x["y"] < 90 and x["x"] > W - 240]
+            if not top:
+                return None
+            pref = [x for x in top if re.search(r"account|profile|google", x["label"] + " " + x["title"], re.I)]
+            self._click_it(page, max(pref or top, key=lambda i: i["x"]))
+            texts = []
+            for _ in range(4):                          # popup Google er iframe e thake — shob frame dekhi
+                self._fw(page, 700)
+                for fr in page.frames:
+                    try:
+                        texts += fr.evaluate(FLOW_JS_CREDIT_TXT)
+                    except Exception:
+                        pass
+                if self._parse_credits(texts) is not None:
+                    break
+            self._close_account_popup(page)             # Escape iframe popup bondho kore na -> X button / baire click
+            rs = self._parse_reset(texts)
+            if sess is not None and rs:
+                sess["reset"] = rs
+            return self._parse_credits(texts)
+        except (FlowStop, KeyboardInterrupt):
+            raise
+        except Exception:
+            return None
+
+    _RX_UNUSUAL = r"unusual activity|extensions that modify the page"
+
+    def _unusual_shown(self, page):
+        """Flow tile e 'We noticed some unusual activity...' Failed likha ashlo kina."""
+        try:
+            return bool(self._find(page, "div,span,p", self._RX_UNUSUAL))
+        except Exception:
+            return False
+
+    def _flag_chrome(self, page, name, inflight):
+        """'Unusual activity' Failed -> ei Chrome/account ei run e skip; pending video gulo porer Chrome e jabe."""
+        self._dead[name] = "flagged"
+        self._log(f"\u26d4 {name}: Flow bolche 'We noticed some unusual activity' (Failed) \u2014 ei Chrome skip, porer Chrome e jachhi", "err")
+        self._shot(page, "unusual_activity")
+        for e_ in list(inflight.values()):
+            self._job_failed(e_["j"], name, "KARON: Flow 'unusual activity' Failed \u2014 ei Chrome skip")
+        inflight.clear()
+
+    def _account_popup_open(self, page):
+        """Upor dan er profile popup ('0 Google Flow credits' / Sign out of all accounts) khola ache kina (main page ba iframe e)."""
+        rx = r"Sign out of all accounts|Manage subscription|Switch account"
+        try:
+            if self._find(page, "div,span,button,a", rx):
+                return True
+        except Exception:
+            pass
+        for fr in page.frames:
+            if fr == page.main_frame:
+                continue
+            try:
+                if fr.evaluate("() => /Sign out of all accounts|Manage subscription|Switch account/i.test(document.body ? document.body.innerText : '')"):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _close_account_popup(self, page):
+        """Profile popup ke sotti bondho kore (X button -> Escape -> baire faka jayga e click). True = bondho."""
+        if not self._account_popup_open(page):
+            return True
+        try:
+            W = page.evaluate("window.innerWidth")
+        except Exception:
+            W = 1366
+        for k in range(5):
+            if k == 0:                                         # popup er X (close) button — shob frame e
+                for fr in page.frames:
+                    try:
+                        bt = fr.get_by_role("button", name=re.compile(r"^\s*close\s*$", re.I))
+                        if bt.count():
+                            bt.first.click(timeout=1500)
+                            break
+                    except Exception:
+                        continue
+            elif k == 1:
+                page.keyboard.press("Escape")
+            elif k == 2:                                       # popup er baire, upor er faka jayga
+                page.mouse.click(W * 0.74, 40)
+            elif k == 3:
+                page.mouse.click(W * 0.50, 12)
+            else:
+                page.keyboard.press("Escape")
+            self._fw(page, 700)
+            if not self._account_popup_open(page):
+                self._log("  profile popup bondho kora holo \u2713", "dim")
+                return True
+        self._log("  \u26a0 profile popup bondho kora gelo na \u2014 download button click hoyto popup er niche chole jabe", "warn")
+        self._shot(page, "popup_open")
+        return False
+
+    def _credit_ok(self, sess, name):
+        page = sess["page"]
+        if sess.pop("fresh", False):                    # setup er somoy-i pora hoyechhe
+            cr = sess["credits"]
+        else:
+            cr = self._read_credits(page, sess)
+            if cr is None:
+                cr = sess["credits"]
+            else:
+                sess["credits"] = cr
+        if cr is None and self._find(page, "div,span,p", r"out of (google )?flow credits"):
+            cr = 0                                       # "You're out of Google Flow credits" banner
+        if cr is not None and cr < FLOW_CREDIT_COST:
+            self._log(f"⛔ {name}: credit {cr} — ekta video te {FLOW_CREDIT_COST} credit lage, ei account e ar create hobe na", "err")
+            return False
+        return True
+
+    # ───── batch view + download ─────
+    def _set_batch_view(self, page):
+        try:
+            W = page.evaluate("window.innerWidth")
+            g = [x for x in self._find(page, 'button,[role="button"]', r"^settings$") if x["y"] < 120]
+            if not g:
+                top = sorted([x for x in self._find(page, 'button,[role="button"]')
+                              if x["y"] < 110 and x["x"] > W - 420], key=lambda i: i["x"])
+                g = [top[-3]] if len(top) >= 3 else []
+            if not g:
+                raise RuntimeError("settings (gear) button pawa gelo na")
+            self._click_it(page, min(g, key=_flow_area))
+            self._fw(page, 800)
+            self._pick(page, self._word("Batch"), "Batch view")
+            page.keyboard.press("Escape")
+            self._fw(page, 600)
+        except (FlowStop, KeyboardInterrupt):
+            raise
+        except Exception as e:
+            self._log(f"  Batch view select kora gelo na ({(str(e).splitlines() or [''])[0][:100]}) \u2014 manually Batch select koro", "warn")
+            self._shot(page, "batch_view")
+
+    def _wait_download(self, page, st, sec):
+        for _ in range(int(sec * 2.5)):
+            if st["dl"]:
+                return st["dl"][-1]
+            self._fw(page, 400)
+        return st["dl"][-1] if st["dl"] else None
+
+    def _poll(self, page, inflight, st, total, done, name):
+        """Ekbar shob pending video check: toiri hole shathe shathe download, fail hole retry queue e."""
+        normal = [k for k in inflight if not inflight[k].get("deferred")]
+        order = normal if normal else list(inflight)           # baki shob shesh hole tobei deferred (download timeout howa) gulo abar
+        if not normal and order:
+            for k in order:
+                inflight[k]["deferred"] = False
+            self._log(f"  baki video-r kaj shesh \u2014 download na howa {len(order)} ta abar try hocche", "dim")
+        for key in list(order):
+            if key not in inflight:
+                continue
+            e = inflight[key]
+            j = e["j"]
+            r = self._try_download(page, e, st)
+            if r == "wait" and (time.time() - e.get("lastlog", 0) > 20 or e.get("why") != e.get("lastwhy")):
+                e["lastlog"], e["lastwhy"] = time.time(), e.get("why")
+                self._log(f"  \u23f3 [{j['box']}] {j['n']} \u2014 {e.get('why', 'opekkha')}", "dim")
+            if r == "flagged":
+                self._flag_chrome(page, name, inflight)
+                return
+            if r == "ok":
+                del inflight[key]
+                j["ok"] = True
+                done[0] += 1
+                self._logq.put(("tick", j["bref"], j["n"]))
+                self._logq.put(("prog", done[0] * 100.0 / total))
+                self._log(f"  ✓ [{j['box']}] {j['n']}.mp4 download hoyeche", "ok")
+            elif r in ("fail", "limit"):
+                del inflight[key]
+                if r == "limit":
+                    self._dead[name] = "credit"
+                    self._job_failed(j, name, "Failed — usage limit/credit shesh | " + e.get("fail_why", ""))
+                else:
+                    self._job_failed(j, name, "KARON: " + e.get("fail_why", "video Failed"))
+
+    def _collect(self, page, inflight, st, total, done, name):
+        self._log(f"Video toiri hocche — {len(inflight)} ta baki, toiri hole shathe shathe download hobe")
+        t0 = time.time()
+        self._fw(page, 4000)
+        while inflight and time.time() - t0 < 45 * 60:
+            self._poll(page, inflight, st, total, done, name)
+            if inflight:
+                self._fw(page, 8000)
+        for e in list(inflight.values()):
+            self._job_failed(e["j"], name, "45 minute e shesh hoy ni — shesh obostha: " + str(e.get("why", "?")))
+        inflight.clear()
+
+    def _save_video_src(self, page, v, j):
+        """Download button kaj na korle: tile er <video> er src (https ba blob) theke mp4 nijei save."""
+        try:
+            src = page.evaluate("""(r) => { for (const v of document.querySelectorAll('video')) {
+                const b = v.getBoundingClientRect();
+                if (Math.abs(b.x - r.x) < 3 && Math.abs(b.y - r.y) < 3)
+                  return v.currentSrc || v.src || ((v.querySelector('source') || {}).src) || ''; } return ''; }""",
+                                {"x": v["x"], "y": v["y"]})
+            if not src:
+                self._log("  [dl] fallback: video src pawa jay ni", "warn")
+                return False
+            self._log(f"  [dl] fallback: video src theke save korchi ({src[:60]}...)", "dim")
+            if src.startswith("blob:"):
+                import base64
+                b64 = page.evaluate("""async (u) => { const r = await fetch(u); const a = new Uint8Array(await r.arrayBuffer());
+                    let bin = ''; for (let i = 0; i < a.length; i += 0x8000) bin += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000));
+                    return btoa(bin); }""", src)
+                data = base64.b64decode(b64)
+            else:
+                resp = self._sess["ctx"].request.get(src, timeout=90000)
+                data = resp.body() if resp.ok else b""
+            if len(data) < 10000:
+                self._log("  [dl] fallback: file khub chhoto/khali", "warn")
+                return False
+            os.makedirs(j["folder"], exist_ok=True)
+            tmp = j["dest"] + ".part"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, j["dest"])
+            self._log("  [dl] fallback save hoyeche \u2713", "ok")
+            return True
+        except Exception as ex:
+            self._log(f"  [dl] fallback kaj kore ni: {(str(ex).splitlines() or [''])[0][:120]}", "warn")
+            return False
+
+    def _tile_anchor(self, page, snip):
+        anchors = self._find(page, "div,p,span", re.escape(snip))
+        if not anchors and len(snip) > 12:
+            anchors = self._find(page, "div,p,span", re.escape(snip[:12]))
+        return min(anchors, key=_flow_area) if anchors else None
+
+    def _scroll_to_tile(self, page, snip):
+        """Notun video upore ashe, purono gulo niche chole jay -> tile na paole niche scroll kore khuje,
+        paole screen er majhamajhi e anen (jate Download button click kora jay)."""
+        try:
+            W = page.evaluate("window.innerWidth")
+            H = page.evaluate("window.innerHeight")
+        except Exception:
+            W, H = 1280, 800
+        page.mouse.move(W * 0.72, H * 0.55)
+        a = self._tile_anchor(page, snip)
+        if a is None:
+            for _ in range(40):                      # niche niche scroll
+                page.mouse.wheel(0, int(H * 0.7))
+                self._fw(page, 450)
+                a = self._tile_anchor(page, snip)
+                if a is not None:
+                    break
+            if a is None:                            # pai ni -> abar ekdom upore, porer poll e abar chesta
+                for _ in range(6):
+                    page.mouse.wheel(0, -30000)
+                    self._fw(page, 150)
+                return None
+        for _ in range(4):                           # tile ke screen e anen: button (tile er upore) jeno dekha jay
+            target = H * 0.6
+            if abs(a["y"] - target) < H * 0.2 and a["y"] > 330:
+                break
+            page.mouse.wheel(0, int(a["y"] - target))
+            self._fw(page, 500)
+            a2 = self._tile_anchor(page, snip)
+            if a2 is None:
+                break
+            a = a2
+        return a
+
+    def _try_download(self, page, e, st):
+        j = e["j"]
+        snip = " ".join(j["text"].split())[:30]
+        self._close_account_popup(page)                      # popup khola thakle Download button dhake
+        a = self._scroll_to_tile(page, snip)
+        if a is None:
+            e["why"] = "tile khuje pai ni (niche scroll kore dekhlam)"
+            return "wait"
+        near = lambda b: b["y"] <= a["y"] + 10 and a["y"] - b["y"] < 300 and abs(b["x"] - a["x"]) < 500
+        btns = [b for b in self._find(page, 'button,[role="button"]', r"^download$") if near(b)]
+        if btns:
+            b = max(btns, key=lambda i: i["y"])
+        else:       # label na mille: oi row er button group er prothom (bam dikeri) button
+            grp = [x for x in self._find(page, 'button,[role="button"]') if near(x)]
+            if not grp:
+                e["why"] = "tile er download button pawa jay ni"
+                return "wait"
+            ymax = max(x["y"] for x in grp)
+            b = min([x for x in grp if abs(x["y"] - ymax) < 10], key=lambda i: i["x"])
+        band = lambda it: it["x"] < b["x"] - 20 and b["y"] - 70 <= it["y"] <= b["y"] + 360
+        if [it for it in self._find(page, "div,span,p", r"(^|\s)\d{1,3}\s*%$") if band(it)]:
+            e["clear"] = 0
+            e["why"] = "toiri hocche (% dekhachhe)"
+            return "wait"                                   # ekhono toiri hocche
+        has_vid = bool([v for v in self._find(page, "video") if band(v)])
+        fl = [] if has_vid else [it for it in self._find(page, "div,span,p", r"fail|went wrong|couldn.t|can.t be|violat|policy|try again|error|usage limit|out of .*credits")
+              if band(it) and len(it["text"]) < 220]
+        if fl and any(re.search(self._RX_UNUSUAL, it["text"], re.I) for it in fl):
+            e["fail_why"] = "Flow: 'We noticed some unusual activity' (Failed)"
+            return "flagged"
+        if fl:                                              # tile e 'Failed' likha
+            e["fail_why"] = "tile e Flow likhechhe: " + " / ".join(sorted({" ".join(it["text"].split())[:90] for it in fl}))[:260]
+            if any(re.search(r"usage limit|reached your|out of .*credits", it["text"], re.I) for it in fl):
+                return "limit"
+            return "fail"
+        e["clear"] += 1
+        if e["clear"] < 3 and not [v for v in self._find(page, "video") if band(v)]:
+            e["why"] = "video load hocche"
+            return "wait"
+        e["tries"] += 1
+        st["dl"].clear()
+        SNAP = 'div,span,li,p,button,a,[role]'
+        snap = lambda: {(" ".join(x["text"].split())[:50], round(x["x"] / 8), round(x["y"] / 8)) for x in self._find(page, SNAP)}
+        before = snap()
+        if e["tries"] == 2:                                   # 2nd try: JS click (mouse click kaj na korle)
+            self._log("  Download: JS click (2nd try)", "dim")
+            try:
+                page.evaluate("""(r) => { const el = document.elementFromPoint(r.x, r.y);
+                    const b = el && (el.closest('button,[role=button],a') || el); if (b) b.click(); }""",
+                              {"x": b["x"] + b["w"] / 2, "y": b["y"] + b["h"] / 2})
+            except Exception:
+                self._click_it(page, b)
+        else:
+            self._click_it(page, b)
+        # Download click er por file start hote 5-15s lage -> ekbar click kore 30s porjonto opekkha (abar click na)
+        d, picked, t0, shot_menu = None, False, time.time(), False
+        self._log("  Download click hoyeche — 15s porjonto opekkha (na hole skip, baki gulo age, ei ta pore abar try)", "dim")
+        while time.time() - t0 < 15 and d is None:
+            d = self._wait_download(page, st, 1.2)
+            if d is not None:
+                break
+            if picked:
+                continue
+            # click er por NOTUN je element gulo ashlo (menu/dialog) segulor moddhe quality option khuji
+            new = [x for x in self._find(page, SNAP)
+                   if (" ".join(x["text"].split())[:50], round(x["x"] / 8), round(x["y"] / 8)) not in before
+                   and 2 < len(x["text"].strip()) < 60 and x["w"] < 600 and abs(x["x"] - b["x"]) < 600 and abs(x["y"] - b["y"]) < 600]
+            if new and not shot_menu:
+                shot_menu = True
+                self._log("  [dl] click er por notun element: " + " | ".join(sorted({" ".join(x["text"].split())[:25] for x in new}))[:200], "dim")
+                self._shot(page, "download_menu")
+            pick = None
+            for rx in (r"Original", r"720", r"MP4|video", r"Download", r"1080|GIF"):
+                c = [x for x in new if re.search(rx, x["text"], re.I)]
+                if c:
+                    pick = min(c, key=_flow_area)
+                    break
+            if pick:
+                picked = True
+                self._log(f"  download menu theke option select: {' '.join(pick['text'].split())[:30]!r}", "dim")
+                self._click_it(page, pick)
+                t0 = time.time()                              # menu theke click korar por-o 15s
+                while time.time() - t0 < 15 and d is None:
+                    d = self._wait_download(page, st, 1.2)
+                break
+        if d is None:
+            try:
+                opts_t = [o["text"][:30] for o in self._find(page, '[role="menuitem"],[role="menuitemradio"],[role="option"],li')
+                          if abs(o["x"] - b["x"]) < 400 and abs(o["y"] - b["y"]) < 400]
+                self._log(f"  [dl] 15s e download event ashe ni — button: {b['label'] or b['text'] or '?'!r}, menu option: {opts_t}  (screenshot: debug_download_menu.png / debug_download.png)", "warn")
+            except Exception:
+                pass
+            self._shot(page, "download")                       # Escape er AGE screenshot (menu/dialog dekha jabe)
+            page.keyboard.press("Escape")
+            vids = [v for v in self._find(page, "video") if band(v)]
+            if vids and self._save_video_src(page, vids[0], j):     # fallback: video file shorashori
+                return "ok"
+            e["why"] = e["fail_why"] = (f"Download button click kora hoyeche kintu 15s e file start hoy ni (try {e['tries']}/3)"
+                                        + ("; video src fallback-o fail" if vids else "; tile e <video> element nei, fallback hoy ni"))
+            e["deferred"] = True                               # skip: baki video age, ei ta shobar shesh e abar (max 3 try)
+            if e["tries"] < 3:
+                self._log(f"  \u21b7 [{j['box']}] {j['n']} \u2014 download 15s e start hoyni (try {e['tries']}/3) \u2014 skip, baki gulo age; ei ta shobar shesh e abar try hobe", "warn")
+            return "fail" if e["tries"] >= 3 else "wait"
+        os.makedirs(j["folder"], exist_ok=True)
+        tmp = j["dest"] + ".part"
+        d.save_as(tmp)
+        if os.path.getsize(tmp) < 10000:
+            sz = os.path.getsize(tmp)
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            e["why"] = e["fail_why"] = f"download howa file khub chhoto ({sz} byte) try {e['tries']}/3"
+            return "fail" if e["tries"] >= 3 else "wait"
+        os.replace(tmp, j["dest"])
+        return "ok"
+
+    # ══════════════════════════ FLOW AUTOMATION (Playwright) ══════════════════════════
+    def _fw(self, page, ms):
+        """Stop-aware wait."""
+        end = time.time() + ms / 1000.0
+        while True:
+            if self._stop_ev.is_set():
+                raise FlowStop()
+            left = end - time.time()
+            if left <= 0:
+                return
+            page.wait_for_timeout(int(min(250, max(1, left * 1000))))
+
+    def _shot(self, page, name):
+        try:
+            p = os.path.join(FLOW_BASE, f"debug_{name}.png")
+            page.screenshot(path=p)
+            self._log(f"  (debug screenshot: {p})", "dim")
+        except Exception:
+            pass
+
+    def _find(self, page, sel, rx=None, scope=None):
+        """Visible element gulor info (text/box/state). rx dile text ba aria-label match kore."""
+        try:
+            items = page.evaluate(FLOW_JS_FIND, [sel, scope or ""])
+        except Exception:
+            return []
+        if rx is None:
+            return items
+        pat = re.compile(rx, re.I)
+        out = []
+        for it in items:
+            t = " ".join(it["text"].split())
+            if pat.search(t) or pat.search(it["label"]) or pat.search(it["title"]):
+                out.append(it)
+        return out
+
+    def _click_it(self, page, it):
+        cx, cy = it["x"] + it["w"] / 2, it["y"] + it["h"] / 2
+        page.mouse.move(cx, cy, steps=6)
+        page.mouse.click(cx, cy)
+
+    @staticmethod
+    def _word(w):
+        return r"(^|\s)" + re.escape(w) + r"$"
+
+    # ───── popups ─────
+    def _changelog(self, page):
+        """'Flow Agent' update popup: arrow (->) chepe shesh porjonto giye 'Get started'. Dialog role na thakleo kaj kore."""
+        ANY = "button,[role=\"button\"],a,div,span"
+        gs_all = lambda: [g for g in self._find(page, ANY, FLOW_RX_START) if len(g["text"]) < 30]
+        marker = lambda: bool(self._find(page, ANY, r"View all changelogs?|changelog")) or \
+            bool(self._find(page, "*", FLOW_RX_START, FLOW_SCOPE_DLG))
+        if not gs_all() or not marker():
+            return False
+        clicked = False
+        for _ in range(12):
+            self._fw(page, 400)
+            gs = gs_all()
+            if not gs or not marker():
+                break
+            g = min(gs, key=_flow_area)
+            if not g["disabled"]:                           # 'Get started' enabled hole click
+                self._log("  popup: Get started click", "dim")
+                self._click_it(page, g)
+                clicked = True
+                self._fw(page, 900)
+                if not (gs_all() and marker()):
+                    break
+            # arrow button: Get started er thik upore, boro (~wide) button
+            cand = [b for b in self._find(page, ANY)
+                    if 200 < b["w"] < 600 and 30 < b["h"] < 90 and g["y"] - 170 < b["y"] < g["y"] - 5
+                    and b["x"] + b["w"] > g["x"] - 40 and len(b["text"]) < 30]
+            if cand:
+                self._log("  popup: right arrow click", "dim")
+                self._click_it(page, min(cand, key=_flow_area))
+            else:
+                self._log("  popup: right arrow (keyboard)", "dim")
+                page.keyboard.press("ArrowRight")
+            clicked = True
+            self._fw(page, 800)
+        return clicked
+
+    def _close_generic(self, page):
+        before = len(self._find(page, FLOW_SCOPE_DLG))
+        scope = (FLOW_SCOPE_DLG + ',[role="complementary"],aside,[class*="popup" i],[class*="modal" i],'
+                 '[class*="dialog" i],[class*="toast" i],[class*="snack" i],[class*="sidepanel" i],[class*="side-panel" i]')
+        c = self._find(page, 'button,[role="button"],a,i,span', FLOW_RX_CLOSE, scope)
+        if c:
+            self._log("  popup/side panel: close click", "dim")
+            self._click_it(page, min(c, key=_flow_area))
+            return True
+        if before:
+            page.keyboard.press("Escape")
+            self._fw(page, 350)
+            return len(self._find(page, FLOW_SCOPE_DLG)) < before
+        return False
+
+    def _dismiss(self, page, rounds=4, wait=900):
+        for _ in range(rounds):
+            if not (self._changelog(page) or self._close_generic(page)):
+                break
+            self._fw(page, wait)
+
+    # ───── steps ─────
+    def _not_logged_in(self, page):
+        for _ in range(2):
+            u = page.url
+            if "/about" in u or "accounts.google.com" in u:
+                return True
+            if self._find(page, FLOW_CLICKABLE, FLOW_RX_NEWPROJ):
+                return False
+            if self._find(page, FLOW_CLICKABLE + ",div,span", r"Create with Google Flow|^Sign in$"):
+                return True
+            self._fw(page, 2500)                            # page ekhono load hocche
+        return False
+
+    def _open_new_project(self, page):
+        self._step("'New project' button khujchi")
+        t0 = time.time()
+        while time.time() - t0 < 70:
+            self._dismiss(page, rounds=3)
+            c = [x for x in self._find(page, FLOW_CLICKABLE, FLOW_RX_NEWPROJ) if not x["disabled"]]
+            if not c:
+                c = [x for x in self._find(page, "div,span,p", FLOW_RX_NEWPROJ) if len(x["text"]) < 40]
+            if c:
+                self._log("  New project click")
+                self._click_it(page, min(c, key=_flow_area))
+                for _ in range(40):
+                    self._fw(page, 500)
+                    if "/project/" in page.url:
+                        return
+            else:
+                self._fw(page, 1000)
+        self._shot(page, "newproject")
+        raise RuntimeError("'New project' button pawa gelo na (Flow e login kora ache to?)")
+
+    def _pill(self, page):
+        c = self._find(page, FLOW_CLICKABLE, r"(Video|Image)\s*[\u00b7\u2022\u2219.]\s*\d+\s*p")
+        if not c:           # image mode e pill e model nam thake: "Nano Banana 2.1 ... x2"
+            c = [x for x in self._find(page, FLOW_CLICKABLE, r"(Nano\s*Banana|Veo|Imagen|Omni).*\bx\s*\d\b") if x["w"] < 500]
+        return min(c, key=_flow_area) if c else None
+
+    def _step(self, msg):
+        """Live log e dekhay ekhon kon dhap hocche / try hocche (kothay atke jachhe bojhar jonno)."""
+        self._cur_step = msg
+        self._log("  \u25b8 " + msg, "info")
+
+    def _toggle_is_on(self, page, it):
+        st = (it["state"] or "").lower()
+        if st in ("true", "on", "checked"):
+            return True
+        if st in ("false", "off", "unchecked"):
+            return False
+        if re.search(r"(^|[\s_-])(on|checked|active|enabled)($|[\s_-])", it["cls"], re.I):
+            return True
+        try:        # pixel check (PIL thakle): knob dan dike thakle ON
+            from PIL import Image
+            import io
+            png = page.screenshot(clip={"x": it["x"], "y": it["y"], "width": it["w"], "height": it["h"]})
+            im = Image.open(io.BytesIO(png)).convert("L")
+            w, h = im.size
+            left = max(im.crop((0, 0, w // 2, h)).getdata())
+            right = max(im.crop((w // 2, 0, w, h)).getdata())
+            return right > left + 10
+        except Exception:
+            return None
+
+    def _find_agent_toggle(self, page):
+        its = self._find(page, '[role="switch"],[role="checkbox"],input[type="checkbox"]')
+        if its:
+            return max(its, key=lambda i: i["y"])
+        its = [i for i in self._find(page, FLOW_CLICKABLE + ",div,span", r"Flow\s*Agent") if i["w"] < 200 and i["h"] < 90]
+        if its:
+            return min(its, key=_flow_area)
+        pill = self._pill(page)
+        if pill:
+            cy = pill["y"] + pill["h"] / 2
+            near = [i for i in self._find(page, FLOW_CLICKABLE)
+                    if i["x"] > pill["x"] + pill["w"] - 2 and abs(i["y"] + i["h"] / 2 - cy) < 30]
+            if near:
+                return min(near, key=lambda i: i["x"])
+        return None
+
+    def _agent_off(self, page):
+        for k in range(4):
+            self._step(f"Flow Agent toggle khujchi (try {k + 1}/4)")
+            tg = self._find_agent_toggle(page)
+            if tg is None:
+                self._fw(page, 800)
+                continue
+            on = self._toggle_is_on(page, tg)
+            if on is False:
+                self._log("  Launch Flow Agent: off (ager moto-i)")
+                return
+            if on is None:
+                self._log("  Launch Flow Agent er state bujhte parini \u2014 skip korlam", "warn")
+                self._shot(page, "agent_toggle")
+                return
+            self._log("  Launch Flow Agent: ON chilo \u2192 off korchi")
+            self._click_it(page, tg)
+            self._fw(page, 900)
+            self._dismiss(page, rounds=2)
+        self._log("  Launch Flow Agent toggle off kora gelo na", "warn")
+        self._shot(page, "agent_toggle")
+
+    def _panel_open(self, page):
+        """Setting panel khola: video mode e 'Ingredients' thake, image mode e shudhu 'Video' + 'Image' tab."""
+        ANY = FLOW_CLICKABLE + ",div,span"
+        if self._find(page, ANY, self._word("Ingredients")):
+            return True
+        return bool(self._find(page, ANY, self._word("Video")) and self._find(page, ANY, self._word("Image")))
+
+    def _open_settings(self, page):
+        for k in range(4):
+            self._step(f"Setting panel kholar chesta (try {k + 1}/4)")
+            if self._panel_open(page):
+                return                                      # panel already khola
+            pill = self._pill(page)
+            if pill is not None:
+                self._log("  prompt bar er setting pill e click: " + " ".join(pill["text"].split())[:60], "dim")
+                self._click_it(page, pill)
+            else:
+                tg = self._find_agent_toggle(page)
+                if tg is None:
+                    self._fw(page, 800)
+                    continue
+                self._click_it(page, dict(x=tg["x"] - 45, y=tg["y"], w=10, h=tg["h"]))   # toggle er bam pashe
+            self._fw(page, 1200)
+            if self._panel_open(page):
+                return
+            self._dismiss(page, rounds=1)
+        if not self._panel_open(page):
+            self._shot(page, "settings")
+            raise RuntimeError("Setting panel (Video/Ingredients) khola gelo na")
+
+    def _pick(self, page, rx, what):
+        for k in range(5):
+            self._step(f"'{what}' option khujchi (try {k + 1}/5)")
+            for sel in (FLOW_CLICKABLE, "div,span,p,label"):
+                c = [x for x in self._find(page, sel, rx) if not x["disabled"]]
+                if c:
+                    self._click_it(page, min(c, key=_flow_area))
+                    self._log(f"  select: {what}")
+                    self._fw(page, 600)
+                    return
+            self._fw(page, 600)
+        self._shot(page, "pick_" + re.sub(r"\W+", "", what))
+        raise RuntimeError(f"'{what}' option pawa gelo na")
+
+    def _pick_model(self, page):
+        def trigger():
+            c = [x for x in self._find(page, FLOW_CLICKABLE, r"(Veo|Omni)") if x["w"] > 80]
+            return max(c, key=lambda i: i["w"]) if c else None
+        for k in range(3):
+            self._step(f"Model dropdown khujchi (try {k + 1}/3)")
+            tr = trigger()
+            if tr is None:
+                self._fw(page, 600)
+                continue
+            if re.search(FLOW_MODEL_RX, " ".join(tr["text"].split()), re.I):
+                self._log(f"  model: {FLOW_MODEL} (ager moto-i)")
+                return
+            self._click_it(page, tr)
+            self._fw(page, 800)
+            opts = [x for x in self._find(page, FLOW_CLICKABLE + ",div,span", FLOW_MODEL_RX)
+                    if not re.search(r"Fast|Quality", x["text"], re.I)]
+            if opts:
+                self._click_it(page, min(opts, key=_flow_area))
+                self._log(f"  select: {FLOW_MODEL}")
+                self._fw(page, 800)
+            else:
+                self._shot(page, "model")
+        tr = trigger()
+        if not (tr and re.search(FLOW_MODEL_RX, " ".join(tr["text"].split()), re.I)):
+            raise RuntimeError(f"Model '{FLOW_MODEL}' select kora gelo na")
+
+    def _flow_setup(self, page, ratio, sess=None):
+        self._step("Flow home page khulchi: " + FLOW_URL)
+        page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=60000)
+        self._fw(page, 3500)
+        self._dismiss(page)
+        self._step("Login ache kina check korchi")
+        if self._not_logged_in(page):                       # login nai: 'Create with Google Flow' landing page
+            raise FlowNoLogin("login kora nei")
+        if sess is not None:                                # upor dike profile e click kore credit dekho
+            self._step("Credit check (upor dan e profile e click)")
+            cr = self._read_credits(page, sess)
+            sess["credits"], sess["fresh"] = cr, True
+            if cr is None:
+                self._log("  credit pora gelo na \u2014 credit check chhaRai cholchi", "warn")
+                self._shot(page, "credits")
+            else:
+                self._log(f"  Credit: {cr}  (ekta video = {FLOW_CREDIT_COST} credit \u2192 {cr // FLOW_CREDIT_COST} ta video)", "ok")
+                if cr < FLOW_CREDIT_COST:
+                    raise FlowNoCredit(f"credit {cr} \u2014 {FLOW_CREDIT_COST} er kom")
+        self._step("New project khulchi")
+        self._open_new_project(page)
+        self._log("Project khulechhe: " + page.url, "ok")
+        self._step("Prompt bar ashar opekkha (popup thakle bondho korchi)")
+        for _ in range(30):
+            self._dismiss(page, rounds=2, wait=700)
+            if self._pill(page) or self._find(page, '[role="switch"]'):
+                break
+            self._fw(page, 1000)
+        self._dismiss(page, rounds=3, wait=900)
+        self._step("Launch Flow Agent off korchi")
+        self._agent_off(page)
+        self._step("Setting panel khulchi")
+        self._open_settings(page)
+        self._pick(page, self._word("Video"), "Video")
+        self._pick(page, self._word("Ingredients"), "Ingredients")
+        self._pick(page, self._word(ratio), "Ratio " + ratio)
+        self._step("Model select: " + FLOW_MODEL)
+        self._pick_model(page)
+        self._pick(page, self._word(FLOW_COUNT), FLOW_COUNT)
+        page.keyboard.press("Escape")                      # setting panel bondho
+        self._fw(page, 700)
+        self._step("Batch view set korchi")
+        self._set_batch_view(page)
+        pill = self._pill(page)
+        if pill:
+            self._log("  prompt bar: " + " ".join(pill["text"].split()), "dim")
+
+    # ───── ekta sentence: avatar -> prompt -> submit ─────
+    def _flow_make(self, j, st):
+        page = st["page"]
+        t = j["text"]
+        short = t[:70] + ("\u2026" if len(t) > 70 else "")
+        self._log(f"[{j['box']}] {j['n']}/{j['of']}  {j['lang']}  \u2192  {short}")
+        if not j.get("avatar_file") or not os.path.isfile(j["avatar_file"]):
+            self._log("  avatar/image nei \u2014 ei sentence skip", "warn")
+            return False
+        if not j.get("prompt_text"):
+            self._log(f"  {j['lang']} language er prompt nei \u2014 ei sentence skip", "warn")
+            return False
+        pt = j["prompt_text"]
+        prompt = re.sub(r"enter\s+sentence", lambda m: t, pt, count=1, flags=re.I)
+        if prompt == pt:
+            self._log("  prompt e 'Enter sentence' nei \u2014 ei sentence skip", "warn")
+            return False
+        try:
+            self._close_account_popup(page)
+            self._step(f"[{j['box']}] {j['n']}: avatar add korchi")
+            self._add_ingredient(page, j["avatar_file"], st)
+            self._step(f"[{j['box']}] {j['n']}: prompt boshachhi")
+            self._fill_prompt(page, prompt, t)
+            self._step(f"[{j['box']}] {j['n']}: submit korchi")
+            self._submit(page)
+        except (FlowStop, KeyboardInterrupt):
+            raise
+        except Exception:
+            self._shot(page, f"job_{j['n']}")
+            raise
+        self._log("  submit hoyeche \u2713", "ok")
+        self._fw(page, 5000)                               # 5s por porer sentence
+        return True
+
+    def _assets_open(self, page):
+        return bool(self._find(page, FLOW_CLICKABLE + ",div,span", r"^Upload media$"))
+
+    def _open_assets(self, page):
+        for k in range(4):
+            self._step(f"'+' (Add ingredients) panel kholar chesta (try {k + 1}/4)")
+            if self._assets_open(page):
+                return
+            pill = self._pill(page)
+            if pill is None:
+                self._fw(page, 800)
+                continue
+            cy = pill["y"] + pill["h"] / 2
+            c = self._find(page, FLOW_CLICKABLE, r"Add ingredients|Add media|^add$|^\+$")
+            c = [x for x in c if x["x"] < pill["x"] and abs(x["y"] + x["h"] / 2 - cy) < 40]
+            if not c:
+                c = [x for x in self._find(page, 'button,[role="button"]')
+                     if x["x"] + x["w"] < pill["x"] and abs(x["y"] + x["h"] / 2 - cy) < 30]
+            if c:
+                self._click_it(page, min(c, key=lambda i: i["x"]))
+            self._fw(page, 1200)
+        if not self._assets_open(page):
+            self._shot(page, "assets")
+            raise RuntimeError("'+' (Add ingredients) panel khola gelo na")
+
+    def _agree(self, page):
+        c = [x for x in self._find(page, FLOW_CLICKABLE, r"^I agree$") if not x["disabled"]]
+        if c:
+            self._log("  'I agree' click", "dim")
+            self._click_it(page, min(c, key=_flow_area))
+            self._fw(page, 800)
+            return True
+        return False
+
+    def _btn_ready(self, page, b):
+        m = re.findall(r"[\d.]+", b.get("bg", ""))
+        if len(m) >= 3 and sum(float(x) for x in m[:3]) / 3 > 150:     # enabled = shada button
+            return True
+        try:
+            return bool(page.evaluate(FLOW_JS_BIGIMG))
+        except Exception:
+            return False
+
+    def _upload_file(self, page, path):
+        self._log("  avatar upload: " + os.path.basename(path))
+        ub = [x for x in self._find(page, FLOW_CLICKABLE, r"Upload media") if not x["disabled"]]
+        if not ub:
+            raise RuntimeError("'Upload media' button pawa gelo na")
+        with page.expect_file_chooser(timeout=20000) as fc:
+            self._click_it(page, min(ub, key=_flow_area))
+        fc.value.set_files(os.path.abspath(path))
+        for _ in range(40):                                  # 'Rights to use this image' -> I agree
+            self._fw(page, 300)
+            if self._agree(page):
+                break
+
+    def _add_to_prompt(self, page, path=None):
+        self._step("Upload shesh howar opekkha \u2192 Images tab \u2192 avatar select \u2192 'Add to prompt'")
+        t0, last, last_sel = time.time(), 0.0, -99.0
+        while time.time() - t0 < 180:                        # upload shesh howar opekkha
+            self._fw(page, 800)
+            self._agree(page)
+            el = time.time() - t0
+            allb = self._find(page, 'button,[role="button"]', r"^Add to prompt$")
+            btns = [b for b in allb if not b["disabled"]]
+            if not allb and not self._assets_open(page):      # panel bondho -> avatar ki already prompt e add hoye gechhe?
+                self._fw(page, 600)
+                if self._prompt_has_image(page):
+                    self._log("  avatar already prompt e add hoye ache \u2713 (panel bondho, thumbnail dekha jacche)", "ok")
+                    return
+            imgs_ok = bool(allb) and self._images_only(page, None)    # list e shudhu image (Images tab select) ?
+            if allb and not imgs_ok and el - last_sel >= 5 and path:  # 'All' e video select thakle SEI video add hoye jabe -> age thik kori
+                last_sel = el
+                self._log("  Images tab/avatar select ekhono hoy ni — abar select korchi", "dim")
+                self._select_uploaded(page, path, None)
+                continue
+            if btns and imgs_ok:
+                ready = self._btn_ready(page, btns[0])
+                if ready or el > 20:
+                    if not ready:
+                        self._log("  'Add to prompt' ready kina bujhte parini \u2014 tobuo click korchi", "warn")
+                    self._fw(page, 500)
+                    self._log("  Images tab \u2713 · avatar \u2713 · 'Add to prompt' click")
+                    self._click_it(page, btns[0])
+                    break
+            if imgs_ok and btns and path and el > 8 and el - last_sel >= 8:
+                last_sel = el                                # button ready na -> avatar row abar select
+                self._log("  avatar row abar select korchi", "dim")
+                self._select_uploaded(page, path, None)
+            if el - last >= 10:
+                last = el
+                self._log(f"  'Add to prompt' er opekkha ({int(el)}s) \u2014 button: {len(allb)}, enabled: {len(btns)}, Images tab ok: {imgs_ok}", "dim")
+            if not allb and el > 25:
+                if self._prompt_has_image(page):
+                    self._log("  avatar prompt e ache \u2713 ('Add to prompt' button chilo na)", "ok")
+                    return
+                self._shot(page, "addprompt_gone")
+                raise RuntimeError("'Add to prompt' button nei \u2014 panel bondho hoye gechhe")
+            if el > 90 and not imgs_ok:
+                self._shot(page, "images_tab")
+                raise RuntimeError("'Images' tab select kora gelo na (vul item add hoye jete pare) \u2014 skip")
+        else:
+            self._shot(page, "upload_wait")
+            raise RuntimeError("Avatar upload shesh hoy ni (3 minute opekkha korlam)")
+        for _ in range(25):
+            self._fw(page, 400)
+            if not self._find(page, 'button,[role="button"]', r"^Add to prompt$"):
+                return
+        raise RuntimeError("'Add to prompt' er por panel bondho hoy ni")
+
+    def _prompt_has_image(self, page):
+        """Avatar already prompt box e (thumbnail hishebe) add hoye gechhe kina."""
+        try:
+            return int(page.evaluate(FLOW_JS_PROMPT_IMG, FLOW_PROMPT_SEL) or 0) > 0
+        except Exception:
+            return False
+
+    def _images_only(self, page, ref):
+        """Panel e 'Images' tab sotti select hoyeche? -> list e Image row ache, kono Video row nei."""
+        if ref is None:
+            ub = self._find(page, FLOW_CLICKABLE + ",div,span", r"^Upload media$")
+            ref = min(ub, key=_flow_area) if ub else None
+        px = (ref["x"] + 60) if ref else 0
+        vids = [x for x in self._find(page, "div,li,span,p", r"(^|\s)Video$") if x["x"] > px and x["w"] < 700]
+        imgs = [x for x in self._find(page, "div,li,span,p", r"(^|\s)Image$") if x["x"] > px and x["w"] < 700]
+        return (not vids) and bool(imgs)
+
+    def _select_uploaded(self, page, path, ref):
+        """Age upload kora avatar ta asset panel theke select. True = row e click hoyeche."""
+        stem = re.escape(os.path.splitext(os.path.basename(path))[0])
+        if ref is None:                                    # panel er position: 'Upload media' button theke
+            ub = self._find(page, FLOW_CLICKABLE + ",div,span", r"^Upload media$")
+            ref = min(ub, key=_flow_area) if ub else None
+        rx_row = lambda: [x for x in self._find(page, FLOW_CLICKABLE + ",div,li,span,p", stem)
+                          if x["w"] < 700 and (ref is None or x["x"] > ref["x"] + 60)]
+        for attempt in range(3):
+            # 1) left list er 'Images' tab (shudhu image dekhabe — default 'All' e video prothome thake)
+            self._step(f"'Images' tab e click korchi (try {attempt + 1}/3)")
+            # NOTE: Flow er BAM SIDEBAR er 'Images' na — shudhu panel er vitorer 'Images' (Upload media er upore, same column)
+            tabs = [x for x in self._find(page, FLOW_CLICKABLE + ",div,span,li", self._word("Images"))
+                    if x["w"] < 420 and (ref is None or (ref["x"] - 60 <= x["x"] < ref["x"] + 220 and x["y"] < ref["y"]))]
+            if tabs:
+                tb = min(tabs, key=_flow_area)
+                ok_img = False
+                for ck in range(3):                       # click -> sure hoyei agabo (click hoyeche kina verify)
+                    self._click_it(page, tb)
+                    for _ in range(8):                    # max ~4s: list e shudhu image, kono video na
+                        self._fw(page, 500)
+                        if self._images_only(page, ref):
+                            ok_img = True
+                            break
+                    if ok_img:
+                        break
+                    self._log(f"  'Images' tab click hoyeche kina nischit na — abar click ({ck + 1}/3)", "warn")
+                    if not self._assets_open(page):       # vul click e panel bondho hole abar kholo
+                        self._open_assets(page)
+                        self._fw(page, 1000)
+                if ok_img:
+                    self._log("  'Images' tab select \u2713 (list e shudhu image)", "dim")
+                else:
+                    self._log("  'Images' tab verify hoy ni — tobuo agacchi", "warn")
+                self._fw(page, 400)
+            else:
+                self._log("  panel er 'Images' tab pawa jay ni", "warn")
+            # 2) file er nam e row
+            rows = rx_row()
+            if not rows:                                   # 3) search box e nam likhe khuji
+                self._step("Search assets e avatar er nam likhe khujchi")
+                inp = [x for x in self._find(page, 'input,[role="searchbox"],[role="combobox"],[contenteditable="true"]')
+                       if ref is None or x["x"] > ref["x"] - 50]
+                if inp:
+                    self._click_it(page, min(inp, key=lambda i: i["y"]))
+                    self._fw(page, 250)
+                    page.keyboard.press("Control+A")
+                    page.keyboard.type(os.path.splitext(os.path.basename(path))[0], delay=15)
+                    self._fw(page, 1300)
+                    rows = rx_row()
+            if not rows:                                   # Images tab e ekta-i image dekhale seta-i avatar
+                px = (ref["x"] + 60) if ref else 0
+                cand = [x for x in self._find(page, "div,li,span,p", r"(^|\s)Image$")
+                        if x["x"] > px and x["w"] < 700 and len(x["text"]) > 6]
+                if cand and len({round((x["y"] + x["h"] / 2) / 25) for x in cand}) == 1:
+                    rows = cand
+                    self._log("  list e ekta-i image — seta-i select hocche", "dim")
+            if rows:
+                self._step("Avatar image row select korchi: " + os.path.basename(path))
+                self._click_it(page, min(rows, key=_flow_area))
+                self._fw(page, 1000)
+                return True
+            self._fw(page, 800)
+        return False
+
+    def _add_ingredient(self, page, path, st):
+        self._open_assets(page)
+        self._fw(page, 1200)
+        reuse = path in st["up"]
+        if reuse:        # ei project e age upload kora -> '+' -> Images -> avatar
+            ub = self._find(page, FLOW_CLICKABLE, r"^Upload media$")
+            ref = min(ub, key=_flow_area) if ub else None
+            if not self._select_uploaded(page, path, ref):
+                self._log("  avatar list e pawa gelo na (onno file select hoye jete pare) \u2014 abar upload korchi", "warn")
+                reuse = False
+        if not reuse:
+            self._upload_file(page, path)
+            st["up"].add(path)
+        self._add_to_prompt(page, path)
+
+    def _prompt_box(self, page):
+        b = self._find(page, FLOW_PROMPT_SEL)
+        return max(b, key=lambda i: i["y"]) if b else None
+
+    def _fill_prompt(self, page, text, sent):
+        snip = " ".join(sent.split())[:14]
+        norm = lambda s: " ".join(s.split())
+        for k in range(3):
+            self._step(f"Prompt box e text boshachhi (try {k + 1}/3)")
+            b = self._prompt_box(page)
+            if b is None:
+                self._fw(page, 800)
+                continue
+            self._click_it(page, b)
+            self._fw(page, 250)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Delete")
+            self._fw(page, 150)
+            page.evaluate(FLOW_JS_PASTE, text)               # paste
+            self._fw(page, 500)
+            cur = page.evaluate(FLOW_JS_ACTIVE_TEXT)
+            if snip not in norm(cur):
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+                page.keyboard.insert_text(text)
+                self._fw(page, 500)
+                cur = page.evaluate(FLOW_JS_ACTIVE_TEXT)
+            if snip in norm(cur) and not re.search(r"enter\s+sentence", cur, re.I):
+                self._log("  prompt paste hoyeche", "dim")
+                return
+        self._shot(page, "prompt")
+        raise RuntimeError("Prompt box e text boshano gelo na")
+
+    def _submit(self, page):
+        for k in range(3):
+            self._step(f"Submit (arrow) button click korchi (try {k + 1}/3)")
+            tg, pill = self._find_agent_toggle(page), self._pill(page)
+            ref = tg or pill
+            if ref is None:
+                self._fw(page, 800)
+                continue
+            right = (tg["x"] + tg["w"]) if tg else (pill["x"] + pill["w"])
+            cy = ref["y"] + ref["h"] / 2
+            c = [i for i in self._find(page, 'button,[role="button"]')
+                 if i["x"] >= right - 2 and abs(i["y"] + i["h"] / 2 - cy) < 40 and not i["disabled"]]
+            if not c:
+                self._fw(page, 1000)
+                continue
+            self._click_it(page, min(c, key=lambda i: i["x"]))
+            for _ in range(20):                              # prompt box khali hole submit hoyeche
+                self._fw(page, 400)
+                b = self._prompt_box(page)
+                cur = " ".join(((b["val"] or b["text"]) if b else "").split())
+                if len(cur) < 3 or re.search(r"What do you want to create", cur, re.I):
+                    return
+        self._shot(page, "submit")
+        raise RuntimeError("Submit (arrow) button click kaj kore ni")
+
+    def _pump(self):
+        try:
+            items = []
+            while len(items) < 300:
+                items.append(self._logq.get_nowait())
+        except queue.Empty:
+            pass
+        try:
+            logs = [it for it in items if it[0] == "log"]
+            if logs:
+                t = self.log_txt
+                at_end = t.yview()[1] >= 0.98
+                t.configure(state="normal")
+                for _, ts, msg, lv in logs:
+                    t.insert("end", ts + "  ", "dim")
+                    t.insert("end", msg + "\n", lv if lv in ("ok", "warn", "err") else "info")
+                n = int(t.index("end-1c").split(".")[0])
+                if n > 3000:
+                    t.delete("1.0", f"{n - 3000}.0")
+                t.configure(state="disabled")
+                if at_end:
+                    t.see("end")
+            for it in items:
+                if it[0] == "tick":
+                    it[1].setdefault("failed", set()).discard(it[2])
+                    self._sc_ticks(it[1])
+                elif it[0] == "fail":
+                    it[1].setdefault("failed", set()).add(it[2])
+                    self._sc_ticks(it[1])
+                elif it[0] == "alert":
+                    messagebox.showerror(it[1], it[2], parent=self.app)
+                elif it[0] == "prog":
+                    self.pbar["value"] = it[1]
+                elif it[0] == "end":
+                    self._thr = None
+                    self.fix_btn.configure(state="normal")
+                    self.thr_cb.configure(state="readonly")
+                    self.start_btn.configure(state="normal")
+                    self.stop_btn.configure(state="disabled")
+                    self.run_lbl.configure(text="Stopped" if it[1] else "Done", fg=WARN if it[1] else OK)
+                    if not it[1]:
+                        self.pbar["value"] = 100
+        except Exception:
+            pass
+        self.after(150, self._pump)
+
+    # ───── drag & drop from outside ─────
+    def _box_at(self, event, attr):
+        try:
+            w = self.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        while w is not None:
+            b = getattr(w, attr, None)
+            if b:
+                return b
+            w = getattr(w, "master", None)
+        return None
+
+    def on_drop(self, event):
+        """App._on_drop (Tab 4 khola thakle) ekhane pathay."""
+        try:
+            paths = []
+            for p in self.tk.splitlist(event.data):
+                p = p.strip()
+                if os.path.isdir(p):
+                    paths += sorted(os.path.join(p, f) for f in os.listdir(p))
+                else:
+                    paths.append(p)
+            files = [p for p in paths if os.path.isfile(p)]
+            if self.cur == "script":
+                txts = [p for p in files if p.lower().endswith(".txt")]
+                if not txts:
+                    self.app.note("Shudhu .txt file drop korte paren", WARN)
+                    return event.action
+                target = self._box_at(event, "_sbox")
+                if target is not None:
+                    self._fill_box(target, txts.pop(0))
+                for p in txts:
+                    self._add_script(os.path.splitext(os.path.basename(p))[0], read_text(p), focus=False)
+            elif self.cur == "avatar":
+                imgs = [p for p in files if p.lower().endswith(FLOW_IMG_EXTS)]
+                if not imgs:
+                    self.app.note("Shudhu image file drop korte paren", WARN)
+                    return event.action
+                target = self._box_at(event, "_abox")
+                if target is not None:
+                    self._set_av_image(target, imgs.pop(0))
+                for p in imgs:
+                    b = self._add_avatar(name=os.path.splitext(os.path.basename(p))[0], focus=False)
+                    self._set_av_image(b, p)
+            else:
+                self.app.note("Drop korte 'Avatar' ba 'Script' section e jao", WARN)
+                return event.action
+            self.app.note("Drop hoyeche \u2713", OK)
+        except Exception as e:
+            self.app.note(f"Drop error: {e}", BAD)
+        return event.action
+
+
 class App(_Base):
     SECTIONS = [("script", "✎", "Script"), ("audio", "♫", "Audio"), ("srt", "❝", "SRT"),
                 ("clips", "▣", "Clips"), ("avatar", "☺", "Avatar+Subs"),
@@ -29003,6 +31688,18 @@ class App(_Base):
             except Exception:
                 pass
 
+        try:
+            self.tab4 = Tab4Flow(self)        # Tab 4: Flow Video (shown by show_tab(4))
+        except Exception:
+            import traceback
+            self.tab4 = None
+            try:
+                os.makedirs(WORKSPACE, exist_ok=True)
+                with open(os.path.join(WORKSPACE, "tab4_error.log"), "w", encoding="utf-8") as _f:
+                    _f.write(traceback.format_exc())
+            except Exception:
+                pass
+
         self.statusbar = mklabel(self, "", 9, MUTED, bg=SIDE, anchor="w", padx=16, pady=5)
         self.statusbar.pack(fill="x", side="bottom")
         tk.Frame(self, bg=PANEL2, height=1).pack(fill="x", side="bottom")
@@ -29064,7 +31761,8 @@ class App(_Base):
         bar.pack_propagate(False)
         tk.Frame(self, bg=PANEL2, height=1).pack(fill="x")
         self._tabs = {}
-        for n, text in ((1, "Tab 1  ·  Studio"), (2, "Tab 2  ·  Timeline Editor"), (3, "Tab 3  ·  2D Animation")):
+        for n, text in ((1, "Tab 1  ·  Studio"), (2, "Tab 2  ·  Timeline Editor"), (3, "Tab 3  ·  2D Animation"),
+                        (4, "Tab 4  ·  Flow Video")):
             h = tk.Frame(bar, bg=SIDE, cursor="hand2")
             h.pack(side="left", padx=(16 if n == 1 else 4, 4), fill="y")
             ul = tk.Frame(h, bg=SIDE, height=3)
@@ -29083,9 +31781,11 @@ class App(_Base):
             ul.configure(bg=ACCENT if on else SIDE)
 
     def show_tab(self, n):
-        if n == self.active_tab or (n == 3 and self.tab3 is None):
+        if n == self.active_tab or (n == 3 and self.tab3 is None) or (n == 4 and self.tab4 is None):
             if n == 3 and self.tab3 is None:
                 messagebox.showerror("Tab 3", "Tab 3 load hoy ni. Details: Documents/AI Video Editor/tab3_error.log")
+            elif n == 4 and self.tab4 is None:
+                messagebox.showerror("Tab 4", "Tab 4 load hoy ni. Details: Documents/AI Video Editor/tab4_error.log")
             return
         old = self.active_tab
         if old == 1:
@@ -29097,6 +31797,9 @@ class App(_Base):
         elif old == 3:
             self.tab3.deactivate()
             self.tab3.pack_forget()
+        elif old == 4:
+            self.tab4.deactivate()
+            self.tab4.pack_forget()
         if n == 2:
             self.tab2.pack(fill="both", expand=True, before=self.statusbar)
             self.active_tab = 2
@@ -29105,6 +31808,10 @@ class App(_Base):
             self.tab3.pack(fill="both", expand=True, before=self.statusbar)
             self.active_tab = 3
             self.tab3.activate()
+        elif n == 4:
+            self.tab4.pack(fill="both", expand=True, before=self.statusbar)
+            self.active_tab = 4
+            self.tab4.activate()
         else:
             self.body.pack(fill="both", expand=True, before=self.statusbar)
             self.active_tab = 1
@@ -32676,11 +35383,16 @@ class App(_Base):
         if self.tab3 is not None and self.tab3.is_running():
             if not messagebox.askyesno("Quit", "2D Animation (Tab 3) cholche. Stop kore quit korbe?"):
                 return
+        if getattr(self, "tab4", None) is not None and self.tab4.is_running():
+            if not messagebox.askyesno("Quit", "Flow Video (Tab 4) cholche. Stop kore quit korbe?"):
+                return
         self._avp_pause()
         try:
             self.tab2.shutdown()
             if self.tab3 is not None:
                 self.tab3.shutdown()
+            if getattr(self, "tab4", None) is not None:
+                self.tab4.shutdown()
         except Exception:
             pass
         self.save_all(quiet=True)
@@ -33123,6 +35835,12 @@ class App(_Base):
         return False
 
     def _on_drop(self, event):
+        if self.active_tab == 4 and self.tab4 is not None:
+            try:
+                return self.tab4.on_drop(event)
+            except Exception as e:
+                self.note(f"Drop error: {e}", BAD)
+                return event.action
         if self.active_tab == 3 and self.tab3 is not None:
             try:
                 return self.tab3.on_drop(event)
