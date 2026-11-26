@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.4.3"
+APP_VERSION = "3.4.4"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -30482,7 +30482,7 @@ class Tab4Flow(tk.Frame):
         os.makedirs(prof["dir"], exist_ok=True)
         _force_nvidia_for_chrome()
         off = (int(getattr(self._tls, "tid", 1)) - 1) * 28
-        args = ["--disable-blink-features=AutomationControlled", f"--window-position={off},{off}",
+        args = [f"--window-position={off},{off}",
                 "--window-size=1366,900", "--lang=en-US", "--accept-lang=en-US",
                 "--disable-features=Translate,TranslateUI,TranslateRankerEnforcement",
                 "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
@@ -31093,9 +31093,9 @@ class Tab4Flow(tk.Frame):
                     self._hard_click(page, arrow)
                 else:
                     self._js_click_at(page, arrow)
-            else:
-                self._log("  popup: right arrow (keyboard)", "dim")
-                page.keyboard.press("ArrowRight")
+            else:                                          # arrow pai ni — KEYBOARD NOY (focus left sidebar e giye Scenes e jay), shudhu scroll
+                self._log("  popup: arrow pawa gelo na \u2014 text scroll korchi", "dim")
+                self._popup_scroll_end(page)
             clicked = True
             self._fw(page, 700)
             # arrow e kaj na hole text niche scroll kore dekhi (Get started tokhon enable hoy)
