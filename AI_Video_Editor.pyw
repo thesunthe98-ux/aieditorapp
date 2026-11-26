@@ -569,7 +569,7 @@ w6Wn4A==
 
 
 # ───────── ACCESS CONTROL / UPDATE (the admin tool fills these 3 lines for you — don't edit) ─────────
-APP_VERSION = "3.4.2"
+APP_VERSION = "3.4.3"
 CONTROL_URL = "https://raw.githubusercontent.com/thesunthe98-ux/aieditorapp/main/control.json"
 PUBKEY_B64 = "K8g+PP95UpYNka1pUwF/6lLk/aBqugx7dtH5ZhC05Lc="
 
@@ -28925,7 +28925,11 @@ FLOW_MODEL = "Veo 3.1 - Lite"
 FLOW_MODEL_RX = r"Veo\s*3\.1\s*[-\u2013\u2014]\s*Lite"
 FLOW_COUNT = "x1"
 FLOW_CREDIT_COST = 10          # ekta video generate korte 10 credit lage
-FLOW_MAX_TRIES = 3             # ekta video minimum 3 ta alada Chrome e try hobe, tao fail hole skip + cross
+FLOW_MAX_TRIES = 4             # ekta video minimum 4 ta alada Chrome e try hobe, tao fail hole skip + cross
+FLOW_MAX_FLAGS = 8             # "unusual activity" Failed alada ginti — eta FLOW_MAX_TRIES e dhore na, 8 bar hole tobei skip
+FLOW_FLAG_COOLDOWN = (30 * 60, 60 * 60)   # flag hoya account 30-60 minute (random) bishram pabe
+FLOW_PAUSE_BEFORE = (1.2, 3.5)  # Generate click er age human-like pause (sec)
+FLOW_PAUSE_AFTER = (2.0, 5.0)   # Generate click er pore pause (sec)
 # site English, kintu account Bangla hote pare -> duita bhashatei match kore
 FLOW_RX_NEWPROJ = r"New\s*project|\u09a8\u09a4\u09c1\u09a8\s*\u09aa\u09cd\u09b0\u09cb\u099c\u09c7\u0995\u09cd\u099f|\u09a8\u09a4\u09c1\u09a8\s*\u09aa\u09cd\u09b0\u0995\u09b2\u09cd\u09aa"
 FLOW_RX_START = r"Get\s*started|\u09b6\u09c1\u09b0\u09c1\s*\u0995\u09b0\u09c1\u09a8"
@@ -29082,7 +29086,8 @@ class Tab4Flow(tk.Frame):
         self._thr = None
         self._tls = threading.local()                  # prottek Chrome thread er nijoshho session/step
         self._fl_lock = threading.RLock()
-        self._stop_ev = threading.Event()
+        self._stop_ev = threading.Event()                    # FORCE stop: sathe sathe thamo + Chrome close
+        self._soft_ev = threading.Event()                    # STOP: notun submit bondho, submit howa gulo shesh hole Chrome close
         os.makedirs(FLOW_AV_DIR, exist_ok=True)
         self.cfg = _json_load(FLOW_SETTINGS, {})
         if not isinstance(self.cfg, dict):
@@ -29891,6 +29896,9 @@ class Tab4Flow(tk.Frame):
         self.stop_btn = mkbtn(row, "\u25a0  STOP", self._stop, "danger", padx=18)
         self.stop_btn.pack(side="left", padx=8)
         self.stop_btn.configure(state="disabled")
+        self.force_btn = mkbtn(row, "\u26d4  FORCE STOP", self._force_stop, "danger", padx=14)
+        self.force_btn.pack(side="left", padx=(0, 8))
+        self.force_btn.configure(state="disabled")
         mklabel(row, "Threads", 10, MUTED, bg=PANEL).pack(side="left", padx=(16, 4))
         try:
             tv = max(1, min(15, int(self.cfg.get("threads", 1))))
@@ -30013,6 +30021,7 @@ class Tab4Flow(tk.Frame):
             return
         self._flush()
         self._stop_ev.clear()
+        self._soft_ev.clear()
         if only_failed:
             for j in jobs:
                 j["bref"].setdefault("failed", set()).discard(j["n"])
@@ -30028,6 +30037,7 @@ class Tab4Flow(tk.Frame):
         self.fix_btn.configure(state="disabled")
         self.thr_cb.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self.force_btn.configure(state="normal")
         self.run_lbl.configure(text="Running\u2026", fg=OK)
         self.pbar["value"] = 0
         self._refresh_run_info()
@@ -30037,11 +30047,23 @@ class Tab4Flow(tk.Frame):
         self._thr.start()
 
     def _stop(self):
+        """Soft stop: notun video submit hobe na; je gulo submit hoyeche oi gulo shesh (download) hole tarpor Chrome close."""
         if self.is_running():
+            self._soft_ev.set()
+            self.stop_btn.configure(state="disabled")
+            self.run_lbl.configure(text="Finishing\u2026", fg=WARN)
+            self._log("Stop chaoa hoyeche \u2014 notun video submit hobe na. Submit howa gulo shesh hole Chrome close hobe "
+                      "(sathe sathe thamate FORCE STOP chapo).", "warn")
+
+    def _force_stop(self):
+        """Force stop: sathe sathe thamo, Chrome close."""
+        if self.is_running():
+            self._soft_ev.set()
             self._stop_ev.set()
             self.stop_btn.configure(state="disabled")
+            self.force_btn.configure(state="disabled")
             self.run_lbl.configure(text="Stopping\u2026", fg=WARN)
-            self._log("Stop chaoa hoyeche \u2014 cholte thaka kaj shesh hoye thambe...", "warn")
+            self._log("FORCE STOP \u2014 sathe sathe thamchhi, Chrome close hochhe...", "warn")
 
     # ───── folder / usage / profile helpers ─────
     def _out_root(self):
@@ -30073,6 +30095,24 @@ class Tab4Flow(tk.Frame):
         except Exception as e:
             messagebox.showerror("Open folder", f"Folder khola gelo na:\n{e}", parent=self.app)
 
+    _BUSY_FR = ("\u25d0", "\u25d3", "\u25d1", "\u25d2")
+    _busy_i = 0
+    _busy_on = False
+
+    def _busy_anim(self):
+        """Submit howa (video toiri hocche) sentence number gulo ghurte thakbe."""
+        try:
+            boxes = [b for b in self.prompts if b.get("busy")]
+            if not boxes:
+                self._busy_on = False
+                return
+            self._busy_i += 1
+            for b in boxes:
+                self._sc_ticks(b)
+        except Exception:
+            pass
+        self.after(220, self._busy_anim)
+
     def _sc_ticks(self, box):
         """Download howa video er sentence number e tick (folder e N.mp4 thakle)."""
         try:
@@ -30083,6 +30123,8 @@ class Tab4Flow(tk.Frame):
                     lb.configure(text="\u2705 " + str(k), fg=OK)
                 elif k in bad:                                  # 3 ta Chrome e fail -> skip, cross
                     lb.configure(text="\u274c " + str(k), fg=BAD)
+                elif k in (box.get("busy") or ()):              # submit hoyeche, video toiri hocche -> ghurche
+                    lb.configure(text=self._BUSY_FR[self._busy_i % len(self._BUSY_FR)] + " " + str(k), fg=WARN)
                 else:
                     lb.configure(text="\u26aa " + str(k), fg=MUTED)
         except Exception:
@@ -30100,12 +30142,12 @@ class Tab4Flow(tk.Frame):
         except Exception:
             return 0.0
 
-    def _block(self, name, until):
+    def _block(self, name, until, why="credit"):
         with self._fl_lock:
             d = _json_load(FLOW_USAGE, {})
             if not isinstance(d, dict):
                 d = {}
-            d[name] = {"until": float(until)}
+            d[name] = {"until": float(until), "why": why}
             os.makedirs(FLOW_BASE, exist_ok=True)
             atomic_write(FLOW_USAGE, json.dumps(d, ensure_ascii=False, indent=1))
 
@@ -30133,6 +30175,11 @@ class Tab4Flow(tk.Frame):
                 tgt += datetime.timedelta(days=1)
             return tgt.timestamp() + 120                 # 2 min buffer
         return None
+
+    def _block_reason(self, name):
+        d = _json_load(FLOW_USAGE, {})
+        r = d.get(name) if isinstance(d, dict) else None
+        return (r.get("why") if isinstance(r, dict) else None) or "credit"
 
     def _block_account(self, name, sess=None):
         ts = (sess or {}).get("reset") if sess else None
@@ -30206,7 +30253,7 @@ class Tab4Flow(tk.Frame):
                 while any(t.is_alive() for t in ths):
                     for t in ths:
                         t.join(0.5)
-                if self._stop_ev.is_set():
+                if self._stop_ev.is_set() or self._soft_ev.is_set():
                     raise FlowStop()
                 left = sum(1 for j in todo if not j.get("ok") and not j.get("dead"))
             nfail = sum(1 for j in todo if j.get("dead"))
@@ -30217,7 +30264,9 @@ class Tab4Flow(tk.Frame):
                 for p in profs:
                     n = p["name"]
                     u = self._blocked_until(n)
-                    if u > time.time():
+                    if u > time.time() and self._block_reason(n) == "flag":
+                        why.append(f"{n}: Flow 'unusual activity' Failed dilo \u2014 cooldown, {time.strftime('%d %b %I:%M %p', time.localtime(u))} porjonto bishram")
+                    elif u > time.time():
                         why.append(f"{n}: credit shesh \u2014 {time.strftime('%d %b %I:%M %p', time.localtime(u))} e refresh")
                     elif self._dead.get(n) == "login":
                         why.append(f"{n}: login kora nei")
@@ -30265,6 +30314,8 @@ class Tab4Flow(tk.Frame):
                 while True:
                     if self._stop_ev.is_set():
                         raise FlowStop()
+                    if self._soft_ev.is_set():                 # soft stop: notun Chrome khulbo na
+                        break
                     prof, wait = None, False
                     with lock:
                         pend = [j for j in shared["jobs"] if not j.get("ok") and not j.get("dead") and not j.get("claimed")]
@@ -30339,6 +30390,8 @@ class Tab4Flow(tk.Frame):
             while True:                                   # credit thakle ei Chrome e-i aro video claim
                 if self._stop_ev.is_set():
                     raise FlowStop()
+                if self._soft_ev.is_set():                    # soft stop: notun batch nibo na -> Chrome close
+                    break
                 cr = sess.get("credits")
                 cap = None if cr is None else cr // FLOW_CREDIT_COST
                 with lock:
@@ -30357,6 +30410,9 @@ class Tab4Flow(tk.Frame):
                     for j in batch:
                         if self._stop_ev.is_set():
                             raise FlowStop()
+                        if self._soft_ev.is_set():            # soft stop: baki sentence submit hobe na; ager submit gulo collect hobe
+                            self._log("  Stop: baki sentence submit kora holo na \u2014 submit howa gulo shesh korchi", "warn")
+                            break
                         if sess.get("credits") is not None:
                             if sess["credits"] < FLOW_CREDIT_COST:
                                 dead[name] = "credit"
@@ -30432,9 +30488,15 @@ class Tab4Flow(tk.Frame):
                 "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding"] + ANIM_GPU_ARGS
         try:
-            ctx = pw.chromium.launch_persistent_context(
-                prof["dir"], channel="chrome", headless=False, no_viewport=True, locale="en-US",
-                ignore_default_args=["--disable-extensions", "--enable-automation"], args=args)
+            try:                                              # sandbox ON: Chrome e '--no-sandbox' warning bar ar layout shift ashbe na
+                ctx = pw.chromium.launch_persistent_context(
+                    prof["dir"], channel="chrome", headless=False, no_viewport=True, locale="en-US",
+                    chromium_sandbox=True,
+                    ignore_default_args=["--disable-extensions", "--enable-automation"], args=args)
+            except TypeError:                                 # puran Playwright version — option nei
+                ctx = pw.chromium.launch_persistent_context(
+                    prof["dir"], channel="chrome", headless=False, no_viewport=True, locale="en-US",
+                    ignore_default_args=["--disable-extensions", "--enable-automation", "--no-sandbox"], args=args)
         except Exception as e:
             raise RuntimeError("Chrome khola gelo na. Ei profile onno kothao khola thakle age bondho koro. "
                                + (str(e).splitlines() or [""])[0][:140])
@@ -30458,8 +30520,18 @@ class Tab4Flow(tk.Frame):
             except Exception:
                 pass
 
-    def _job_failed(self, j, name, why, final=False):
+    def _job_failed(self, j, name, why, final=False, flag=False):
+        self._logq.put(("idle", j["bref"], j["n"]))          # animation thamao (abar try hole submit e abar ghurbe)
         j["tried"].add(name)
+        if flag:                                              # 'unusual activity' — alada counter, normal try e dhore na
+            j["flags"] = j.get("flags", 0) + 1
+            if j["flags"] >= FLOW_MAX_FLAGS:
+                j["dead"] = True
+                self._logq.put(("fail", j["bref"], j["n"]))
+                self._log(f"  \u274c [{j['box']}] {j['n']} \u2014 {j['flags']} bar 'unusual activity' ({why}) \u2014 skip", "err")
+            else:
+                self._log(f"  \u21bb [{j['box']}] {j['n']} \u2014 {name} e 'unusual activity' [{j['flags']}/{FLOW_MAX_FLAGS}] \u2014 porer Chrome e abar try hobe", "warn")
+            return
         j["att"] += 1
         if final or j["att"] >= FLOW_MAX_TRIES:
             j["dead"] = True
@@ -30528,8 +30600,15 @@ class Tab4Flow(tk.Frame):
         self._dead[name] = "flagged"
         self._log(f"\u26d4 {name}: Flow bolche 'We noticed some unusual activity' (Failed) \u2014 ei Chrome skip, porer Chrome e jachhi", "err")
         self._shot(page, "unusual_activity")
+        cd = random.uniform(*FLOW_FLAG_COOLDOWN)
+        until = time.time() + cd
+        try:
+            self._block(name, until, "flag")
+        except Exception:
+            pass
+        self._log(f"\u23f8 {name}: {int(cd // 60)} minute cooldown \u2014 {time.strftime('%I:%M %p', time.localtime(until))} er age ei account e kaj hobe na", "warn")
         for e_ in list(inflight.values()):
-            self._job_failed(e_["j"], name, "KARON: Flow 'unusual activity' Failed \u2014 ei Chrome skip")
+            self._job_failed(e_["j"], name, "KARON: Flow 'unusual activity' Failed \u2014 ei Chrome skip", flag=True)
         inflight.clear()
 
     def _account_popup_open(self, page):
@@ -30881,6 +30960,17 @@ class Tab4Flow(tk.Frame):
                 return
             page.wait_for_timeout(int(min(250, max(1, left * 1000))))
 
+    def _human_pause(self, page, rng):
+        """Random human-like pause (stop-aware) + chhoto mouse nora."""
+        sec = random.uniform(*rng)
+        try:
+            vp = page.viewport_size or {"width": 1366, "height": 800}
+            page.mouse.move(random.randint(80, max(120, vp["width"] - 80)),
+                            random.randint(120, max(160, vp["height"] - 120)), steps=random.randint(4, 12))
+        except Exception:
+            pass
+        self._fw(page, int(sec * 1000))
+
     def _shot(self, page, name):
         try:
             p = os.path.join(FLOW_BASE, f"debug_{name}.png")
@@ -30908,23 +30998,71 @@ class Tab4Flow(tk.Frame):
     def _click_it(self, page, it):
         cx, cy = it["x"] + it["w"] / 2, it["y"] + it["h"] / 2
         page.mouse.move(cx, cy, steps=6)
+        try:                                                  # layout sore gele (banner/popup) click jeno left sidebar (Scenes/Images...) e na pore
+            hit = page.evaluate("""([x, y]) => { const e = document.elementFromPoint(x, y); if (!e) return null;
+                const b = e.closest('nav,aside,[role="navigation"],[role="menu"],[role="dialog"]');
+                const r = e.getBoundingClientRect();
+                return {nav: !!(b && b.matches('nav,aside,[role="navigation"]')), left: r.left, text: (e.innerText || '').trim().slice(0, 40)}; }""",
+                [cx, cy])
+        except Exception:
+            hit = None
+        if hit and it["x"] > 300 and (hit.get("nav") or hit.get("left", 999) < 290):
+            self._log(f"  \u26a0 click skip: target ({int(cx)},{int(cy)}) e left sidebar item '{hit.get('text', '')}' pawa gelo (layout sore geche) \u2014 abar try hobe", "warn")
+            self._fw(page, 700)
+            return False
         page.mouse.click(cx, cy)
+        return True
 
     @staticmethod
     def _word(w):
         return r"(^|\s)" + re.escape(w) + r"$"
 
     # ───── popups ─────
+    def _popup_scroll_sig(self, page):
+        try:
+            return page.evaluate("""() => Array.from(document.querySelectorAll('*')).filter(e => {
+                const r = e.getBoundingClientRect();
+                return e.scrollHeight > e.clientHeight + 20 && r.width > 200 && r.width < innerWidth * 0.9 &&
+                       /(auto|scroll)/.test(getComputedStyle(e).overflowY); }).map(e => Math.round(e.scrollTop)).join(',')""")
+        except Exception:
+            return ""
+
+    def _popup_scroll_end(self, page):
+        """Popup er scrollable text ke niche porjonto scroll (Get started enable howar jonno)."""
+        try:
+            page.evaluate("""() => Array.from(document.querySelectorAll('*')).forEach(e => {
+                const r = e.getBoundingClientRect();
+                if (e.scrollHeight > e.clientHeight + 20 && r.width > 200 && r.width < innerWidth * 0.9 &&
+                    /(auto|scroll)/.test(getComputedStyle(e).overflowY)) e.scrollTop = e.scrollHeight; })""")
+        except Exception:
+            pass
+
+    def _hard_click(self, page, it):
+        """Real mouse down/up (kichu delay shoho) + fail hole JS click."""
+        cx, cy = it["x"] + it["w"] / 2, it["y"] + it["h"] / 2
+        page.mouse.move(cx, cy, steps=5)
+        page.mouse.down()
+        page.wait_for_timeout(70)
+        page.mouse.up()
+
+    def _js_click_at(self, page, it):
+        cx, cy = it["x"] + it["w"] / 2, it["y"] + it["h"] / 2
+        try:
+            page.evaluate("""([x, y]) => { const e = document.elementFromPoint(x, y); if (!e) return;
+                const b = e.closest('button,[role="button"],a') || e; b.click(); }""", [cx, cy])
+        except Exception:
+            pass
+
     def _changelog(self, page):
-        """'Flow Agent' update popup: arrow (->) chepe shesh porjonto giye 'Get started'. Dialog role na thakleo kaj kore."""
+        """'Flow Agent' update popup: arrow (->) / scroll kore shesh porjonto giye 'Get started'. Dialog role na thakleo kaj kore."""
         ANY = "button,[role=\"button\"],a,div,span"
         gs_all = lambda: [g for g in self._find(page, ANY, FLOW_RX_START) if len(g["text"]) < 30]
         marker = lambda: bool(self._find(page, ANY, r"View all changelogs?|changelog")) or \
             bool(self._find(page, "*", FLOW_RX_START, FLOW_SCOPE_DLG))
         if not gs_all() or not marker():
             return False
-        clicked = False
-        for _ in range(12):
+        clicked, stuck = False, 0
+        for rnd in range(30):
             self._fw(page, 400)
             gs = gs_all()
             if not gs or not marker():
@@ -30932,23 +31070,53 @@ class Tab4Flow(tk.Frame):
             g = min(gs, key=_flow_area)
             if not g["disabled"]:                           # 'Get started' enabled hole click
                 self._log("  popup: Get started click", "dim")
-                self._click_it(page, g)
+                self._hard_click(page, g)
                 clicked = True
                 self._fw(page, 900)
                 if not (gs_all() and marker()):
                     break
+                self._js_click_at(page, g)
+                self._fw(page, 700)
+                if not (gs_all() and marker()):
+                    break
+            sig0 = self._popup_scroll_sig(page)
             # arrow button: Get started er thik upore, boro (~wide) button
             cand = [b for b in self._find(page, ANY)
-                    if 200 < b["w"] < 600 and 30 < b["h"] < 90 and g["y"] - 170 < b["y"] < g["y"] - 5
+                    if 200 < b["w"] < 600 and 30 < b["h"] < 90 and g["y"] - 200 < b["y"] < g["y"] - 5
                     and b["x"] + b["w"] > g["x"] - 40 and len(b["text"]) < 30]
+            arrow = None
             if cand:
+                btn = [b for b in cand if b["bg"] and "0, 0, 0, 0" not in b["bg"]] or cand
+                arrow = max(btn, key=_flow_area)           # sabcheye boro = asol button (bhitorer icon na)
                 self._log("  popup: right arrow click", "dim")
-                self._click_it(page, min(cand, key=_flow_area))
+                if stuck % 2 == 0:
+                    self._hard_click(page, arrow)
+                else:
+                    self._js_click_at(page, arrow)
             else:
                 self._log("  popup: right arrow (keyboard)", "dim")
                 page.keyboard.press("ArrowRight")
             clicked = True
-            self._fw(page, 800)
+            self._fw(page, 700)
+            # arrow e kaj na hole text niche scroll kore dekhi (Get started tokhon enable hoy)
+            if self._popup_scroll_sig(page) == sig0:
+                stuck += 1
+                if arrow is not None:
+                    try:
+                        page.mouse.move(arrow["x"] + arrow["w"] / 2, arrow["y"] - 130)
+                        page.mouse.wheel(0, 700)
+                    except Exception:
+                        pass
+                self._popup_scroll_end(page)
+                self._fw(page, 500)
+            else:
+                stuck = 0
+            if stuck >= 6:
+                self._log("  popup: arrow/scroll e kaj hocche na \u2014 Escape diye bondho korchi", "warn")
+                self._shot(page, "changelog_stuck")
+                page.keyboard.press("Escape")
+                self._fw(page, 500)
+                break
         return clicked
 
     def _close_generic(self, page):
@@ -31223,6 +31391,7 @@ class Tab4Flow(tk.Frame):
             self._shot(page, f"job_{j['n']}")
             raise
         self._log("  submit hoyeche \u2713", "ok")
+        self._logq.put(("busy", j["bref"], j["n"]))          # chip e ghurano animation shuru
         self._fw(page, 5000)                               # 5s por porer sentence
         return True
 
@@ -31481,7 +31650,9 @@ class Tab4Flow(tk.Frame):
             if not c:
                 self._fw(page, 1000)
                 continue
+            self._human_pause(page, FLOW_PAUSE_BEFORE)
             self._click_it(page, min(c, key=lambda i: i["x"]))
+            self._human_pause(page, FLOW_PAUSE_AFTER)
             for _ in range(20):                              # prompt box khali hole submit hoyeche
                 self._fw(page, 400)
                 b = self._prompt_box(page)
@@ -31516,20 +31687,37 @@ class Tab4Flow(tk.Frame):
             for it in items:
                 if it[0] == "tick":
                     it[1].setdefault("failed", set()).discard(it[2])
+                    it[1].setdefault("busy", set()).discard(it[2])
                     self._sc_ticks(it[1])
                 elif it[0] == "fail":
                     it[1].setdefault("failed", set()).add(it[2])
+                    it[1].setdefault("busy", set()).discard(it[2])
+                    self._sc_ticks(it[1])
+                elif it[0] == "busy":
+                    it[1].setdefault("busy", set()).add(it[2])
+                    it[1].setdefault("failed", set()).discard(it[2])
+                    self._sc_ticks(it[1])
+                    if not self._busy_on:
+                        self._busy_on = True
+                        self.after(220, self._busy_anim)
+                elif it[0] == "idle":
+                    it[1].setdefault("busy", set()).discard(it[2])
                     self._sc_ticks(it[1])
                 elif it[0] == "alert":
                     messagebox.showerror(it[1], it[2], parent=self.app)
                 elif it[0] == "prog":
                     self.pbar["value"] = it[1]
                 elif it[0] == "end":
+                    for _b in self.prompts:
+                        if _b.get("busy"):
+                            _b["busy"] = set()
+                            self._sc_ticks(_b)
                     self._thr = None
                     self.fix_btn.configure(state="normal")
                     self.thr_cb.configure(state="readonly")
                     self.start_btn.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
+                    self.force_btn.configure(state="disabled")
                     self.run_lbl.configure(text="Stopped" if it[1] else "Done", fg=WARN if it[1] else OK)
                     if not it[1]:
                         self.pbar["value"] = 100
